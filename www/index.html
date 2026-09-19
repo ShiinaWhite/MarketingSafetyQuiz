@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1565c0">
+<title>营销安规刷题</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- 主菜单 -->
+  <section id="view-menu" class="view">
+    <header class="menu-head">
+      <h1>营销安规刷题</h1>
+      <p id="menu-bank" class="sub"></p>
+      <p id="menu-stats" class="sub"></p>
+      <p id="menu-exam" class="sub dim"></p>
+    </header>
+    <div id="menu-buttons" class="grid"></div>
+    <div class="menu-foot">
+      <button id="btn-settings" class="linkbtn">模拟考试设置</button>
+      <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
+    </div>
+    <p class="foot-note">数据仅保存在本机 · 完全离线 · 无网络请求</p>
+  </section>
+
+  <!-- 刷题 / 模拟考试答题 -->
+  <section id="view-quiz" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-back" class="backbtn">‹ 返回</button>
+      <div id="quiz-title" class="qtitle"></div>
+    </header>
+    <main id="quiz-scroll">
+      <p id="major-line" class="major hidden"></p>
+      <div id="stem" class="stem"></div>
+      <div id="options"></div>
+      <div id="feedback" class="feedback hidden"></div>
+    </main>
+    <footer class="quiz-bar">
+      <button id="btn-prev" class="barbtn">上一题</button>
+      <button id="btn-submit" class="barbtn primary hidden">提交答案</button>
+      <button id="btn-next" class="barbtn">下一题</button>
+      <button id="btn-handin" class="barbtn danger hidden">交卷</button>
+    </footer>
+  </section>
+
+  <!-- 考试成绩 -->
+  <section id="view-result" class="view hidden">
+    <header class="quiz-head"><div class="qtitle center">模拟考试成绩</div></header>
+    <main id="result-body" class="pad"></main>
+  </section>
+
+  <!-- 考试错题回顾 -->
+  <section id="view-review" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-review-back" class="backbtn">‹ 成绩</button>
+      <div id="review-title" class="qtitle"></div>
+    </header>
+    <main id="review-body" class="pad"></main>
+  </section>
+
+</div>
+<div id="modal-root" class="hidden"></div>
+
+<script src="data/config.js"></script>
+<script src="data/questions.js"></script>
+<script src="js/core.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

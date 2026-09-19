@@ -1,0 +1,36 @@
+# ---- 题库数据（由 tools/import_xlsx.py 本地生成，不入库） ----
+*.xlsx
+*.xls
+www/data/questions.json
+www/data/questions.js
+
+# ---- Android 构建产物 / 本机配置 ----
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/local.properties
+*.jks
+*.keystore
+*.apk
+
+# ---- Node / Python ----
+node_modules/
+__pycache__/
+*.pyc
+
+# ---- IDE / 系统 ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---- 本机专用（构建链、旧版桌面程序、发布物、临时文件） ----
+_build/
+_local/
+release/
+*.zip
+*.log

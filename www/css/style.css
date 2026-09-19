@@ -1,0 +1,156 @@
+/* style.css —— 手机竖屏优先，无动画、无渐变，字大块大、间距足、无横向滚动 */
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: #f5f6f8; color: #1a1a1a;
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  font-size: 17px; line-height: 1.55;
+  overflow-x: hidden;
+  touch-action: manipulation;
+}
+
+#app { max-width: 640px; margin: 0 auto; min-height: 100vh; }
+.hidden { display: none !important; }
+.view { display: flex; flex-direction: column; min-height: 100vh; }
+/* 答题页必须严格等于视口高度，保证底部按钮始终可见（dvh 兼容手机地址栏） */
+#view-quiz { height: 100vh; height: 100dvh; }
+
+button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
+
+/* ---------- 主菜单 ---------- */
+.menu-head { padding: 28px 16px 6px; text-align: center; }
+.menu-head h1 { margin: 0 0 8px; font-size: 26px; color: #1565c0; }
+.sub { margin: 4px 0; font-size: 14px; color: #444; }
+.sub.dim { color: #888; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 16px 14px; }
+.grid button {
+  min-height: 64px; font-size: 18px; font-weight: 600;
+  border: 1px solid #d8dee6; border-radius: 12px; background: #fff; color: #1a1a1a;
+}
+.grid button:active { background: #e3edf8; }
+.grid button.exam { background: #1565c0; border-color: #1565c0; color: #fff; }
+.grid button.exam:active { background: #0d4f9e; }
+
+.menu-foot { display: flex; justify-content: center; gap: 26px; padding: 10px 0 4px; }
+.linkbtn { background: none; border: none; color: #1565c0; font-size: 15px; padding: 8px; }
+.linkbtn.danger { color: #c62828; }
+.foot-note { text-align: center; color: #aaa; font-size: 12px; padding: 8px 0 18px; }
+
+/* ---------- 答题页 ---------- */
+.quiz-head {
+  display: flex; align-items: center; gap: 8px;
+  background: #1565c0; color: #fff;
+  padding: 10px 12px;
+  padding-top: calc(10px + env(safe-area-inset-top));
+}
+.backbtn {
+  flex: 0 0 auto; background: rgba(255,255,255,.14); color: #fff;
+  border: none; border-radius: 8px; font-size: 15px; padding: 8px 12px;
+}
+.qtitle { flex: 1; font-size: 14.5px; font-weight: 600; line-height: 1.35; min-width: 0; }
+.qtitle.center { text-align: center; font-size: 17px; padding: 10px 0; }
+
+#quiz-scroll { flex: 1 1 0; min-height: 0; padding: 14px 14px 10px; overflow-y: auto; }
+.major { color: #888; font-size: 13px; margin: 0 2px 6px; }
+.stem {
+  font-size: 19px; font-weight: 600; line-height: 1.6;
+  overflow-wrap: break-word; word-break: break-word;
+  background: #fff; border: 1px solid #e3e7ee; border-radius: 12px;
+  padding: 14px 14px; margin-bottom: 14px;
+}
+
+/* 选项：整块可点击，间距足，防误触 */
+#options { display: flex; flex-direction: column; gap: 13px; }
+.opt {
+  display: block; width: 100%; text-align: left;
+  font-size: 17px; line-height: 1.55;
+  background: #fff; color: #1a1a1a;
+  border: 2px solid #d8dee6; border-radius: 12px;
+  padding: 13px 14px; min-height: 54px;
+  overflow-wrap: break-word; word-break: break-word;
+}
+.opt .tag { font-weight: 700; margin-right: 6px; color: #1565c0; }
+.opt.selected { border-color: #1565c0; background: #eaf2fc; }
+.opt.judge { min-height: 72px; font-size: 19px; font-weight: 700; text-align: center; }
+.opt.correct { border-color: #0a7d32; background: #e8f5ec; color: #0a7d32; font-weight: 700; }
+.opt.correct .tag { color: #0a7d32; }
+.opt.wrong { border-color: #c62828; background: #fdecea; color: #c62828; }
+.opt.wrong .tag { color: #c62828; }
+.opt.plain { border-color: #d8dee6; background: #fff; color: #777; }
+.opt:disabled { opacity: 1; }
+
+/* 反馈条 */
+.feedback {
+  margin-top: 14px; border-radius: 12px; padding: 12px 14px;
+  font-size: 16.5px; font-weight: 700; line-height: 1.55;
+  overflow-wrap: break-word;
+}
+.feedback.ok { background: #e8f5ec; color: #0a7d32; }
+.feedback.err { background: #fdecea; color: #c62828; }
+.feedback.info { background: #fff; color: #888; font-weight: 400; }
+
+/* 底部按钮栏 */
+.quiz-bar {
+  display: flex; gap: 10px; padding: 10px 14px;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  background: #f5f6f8; border-top: 1px solid #e3e7ee;
+}
+.barbtn {
+  flex: 1; min-height: 54px; font-size: 17px; font-weight: 600;
+  border: 1px solid #d8dee6; border-radius: 12px; background: #fff; color: #1a1a1a;
+}
+.barbtn:disabled { color: #bbb; background: #fafafa; }
+.barbtn.primary { background: #0a7d32; border-color: #0a7d32; color: #fff; flex: 1.4; }
+.barbtn.danger { background: #c62828; border-color: #c62828; color: #fff; }
+
+/* ---------- 成绩 / 错题回顾 ---------- */
+.pad { flex: 1; padding: 16px 14px 24px; overflow-y: auto; }
+.score-big { text-align: center; font-size: 44px; font-weight: 700; color: #1565c0; margin: 18px 0 6px; }
+.score-sub { text-align: center; color: #444; font-size: 15px; margin: 2px 0 14px; }
+.result-line {
+  background: #fff; border: 1px solid #e3e7ee; border-radius: 12px;
+  padding: 13px 14px; font-size: 16px; margin-bottom: 10px;
+}
+.result-btns { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.result-btns .barbtn { width: 100%; }
+
+.review-block {
+  background: #fff; border: 1px solid #e3e7ee; border-radius: 12px;
+  padding: 12px 13px; margin-bottom: 14px;
+}
+.review-meta { font-size: 13.5px; color: #444; font-weight: 700; margin-bottom: 6px; }
+.review-meta b.you { color: #c62828; }
+.review-meta b.ans { color: #0a7d32; }
+.review-stem { font-size: 16.5px; font-weight: 600; line-height: 1.6; margin-bottom: 10px; overflow-wrap: break-word; }
+.review-opt { font-size: 15.5px; padding: 7px 10px; border-radius: 8px; margin: 4px 0; overflow-wrap: break-word; }
+.review-opt.ok { background: #e8f5ec; color: #0a7d32; }
+.review-opt.err { background: #fdecea; color: #c62828; }
+.review-opt.dim { color: #777; }
+
+/* ---------- 弹窗（无动画） ---------- */
+#modal-root {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.modal {
+  width: 100%; max-width: 420px; background: #fff; border-radius: 14px;
+  padding: 18px 16px; max-height: 86vh; overflow-y: auto;
+}
+.modal h3 { margin: 0 0 10px; font-size: 18px; }
+.modal .msg { font-size: 16px; line-height: 1.6; overflow-wrap: break-word; }
+.modal .btns { display: flex; gap: 10px; margin-top: 18px; }
+.modal .btns .barbtn { flex: 1; }
+.modal .btns .ok { background: #1565c0; border-color: #1565c0; color: #fff; }
+.modal .btns .cancel { background: #fff; }
+.modal .btns .okred { background: #c62828; border-color: #c62828; color: #fff; }
+
+.field { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+.field label { font-size: 15.5px; }
+.field input {
+  width: 84px; font-size: 17px; text-align: center; padding: 8px 6px;
+  border: 1px solid #c9d2dd; border-radius: 8px;
+}
+.total-line { text-align: center; color: #1565c0; font-weight: 700; margin-top: 10px; font-size: 15.5px; }
