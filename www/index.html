@@ -40,6 +40,19 @@
       <div id="stem" class="stem"></div>
       <div id="options"></div>
       <div id="feedback" class="feedback hidden"></div>
+      <div id="explain-box" class="explain hidden">
+        <button id="explain-toggle" type="button" class="explain-btn"></button>
+        <div id="explain-body" class="explain-body hidden">
+          <div class="explain-sec">
+            <div class="explain-h">为什么这么选</div>
+            <p id="explain-reason" class="explain-text"></p>
+          </div>
+          <div class="explain-sec memory">
+            <div class="explain-h">记忆技巧</div>
+            <p id="explain-memory" class="explain-text"></p>
+          </div>
+        </div>
+      </div>
     </main>
     <footer class="quiz-bar">
       <button id="btn-prev" class="barbtn">上一题</button>
@@ -70,6 +83,7 @@
 
 <script src="data/config.js"></script>
 <script src="data/questions.js"></script>
+<script src="data/explanations.js"></script>
 <script src="js/core.js"></script>
 <script src="js/app.js"></script>
 </body>

@@ -91,6 +91,28 @@ button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
 .feedback.err { background: #fdecea; color: #c62828; }
 .feedback.info { background: #fff; color: #888; font-weight: 400; }
 
+/* 解析与记忆技巧（默认折叠） */
+.explain { margin-top: 12px; }
+.explain-btn {
+  display: block; width: 100%; text-align: center;
+  font-size: 15.5px; font-weight: 600; color: #1565c0;
+  background: #fff; border: 1px dashed #9db8d8; border-radius: 12px;
+  padding: 12px 14px; min-height: 48px;
+  overflow-wrap: break-word;
+}
+.explain-body { margin-top: 10px; }
+.explain-sec {
+  background: #fff; border: 1px solid #e3e7ee; border-radius: 12px;
+  padding: 12px 14px; margin-bottom: 10px;
+}
+.explain-sec.memory { background: #fdf6e3; border-color: #eadfb8; }
+.explain-h { font-size: 13.5px; font-weight: 700; color: #666; margin-bottom: 4px; }
+.explain-sec.memory .explain-h { color: #b26a00; }
+.explain-text {
+  margin: 0; font-size: 15.5px; line-height: 1.65; color: #1a1a1a;
+  overflow-wrap: break-word; word-break: break-word;
+}
+
 /* 底部按钮栏 */
 .quiz-bar {
   display: flex; gap: 10px; padding: 10px 14px;

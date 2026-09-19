@@ -4,6 +4,11 @@
 www/data/questions.json
 www/data/questions.js
 
+# ---- 题目解析数据（用户自备，不入库；示例文件除外） ----
+www/data/explanations.json
+www/data/explanations.js
+营销安规题目解析与记忆技巧.json
+
 # ---- Android 构建产物 / 本机配置 ----
 android/.gradle/
 android/build/

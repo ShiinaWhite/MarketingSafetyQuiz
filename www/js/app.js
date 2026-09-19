@@ -60,6 +60,8 @@
   var bank = null, byType = null;
   var P = null;   // 刷题会话 {mode, list, pos, session:{qid:{sel:Set,submitted,correct}}}
   var E = null;   // 模拟考试 {paper, answers:{qid:Set}, pos, result}
+  var curExplain = null;     // 当前题目的解析对象（null = 无解析或未显示）
+  var explainOpen = false;   // 解析区展开状态；每切换一题在 renderQuestion 中重置
   var MODE_TITLES = {
     seq: "顺序刷题", rand: "随机刷题", single: "单选专项", multi: "多选专项",
     judge: "判断专项", wrong: "错题重做", recite: "背题模式", exam: "模拟考试"
@@ -73,6 +75,22 @@
       cfg[MSQ.COUNT_KEYS[t]] = Math.min(cfg[MSQ.COUNT_KEYS[t]], byType[t].length);
     });
     return cfg;
+  }
+
+  /* 解析数据查找：统一按 String(q.id) 匹配；数据文件缺失或该题无解析时返回 null */
+  function getExplanation(qid) {
+    var d = window.EXPLANATIONS_DATA;
+    return d ? (d[String(qid)] || null) : null;
+  }
+
+  function applyExplainState() {
+    var open = explainOpen && !!curExplain;
+    $("explain-toggle").textContent = open ? "收起解析与记忆技巧 ▴" : "查看解析与记忆技巧 ▾";
+    $("explain-body").classList.toggle("hidden", !open);
+    if (open) {
+      $("explain-reason").textContent = curExplain.reason || "";
+      $("explain-memory").textContent = curExplain.memory || "";
+    }
   }
 
   /* ---------------- 视图切换 ---------------- */
@@ -395,6 +413,15 @@
       fb.classList.remove("hidden");
     }
 
+    // 解析与记忆技巧：默认折叠，每切换一题重置。
+    // 背题：直接显示入口；普通刷题/错题重做：提交答案后才显示；模拟考试答题中：完全不显示。
+    // 解析数据按 String(q.id) 查找；该题无解析时整个入口隐藏（安全降级，不出现空白框）。
+    curExplain = getExplanation(q.id);
+    explainOpen = false;
+    var showExplain = !!curExplain && (exam ? false : (recite || st.submitted));
+    $("explain-box").classList.toggle("hidden", !showExplain);
+    applyExplainState();
+
     // 底部按钮
     var canSubmit = !exam && !recite && q.type === "multi" && !st.submitted;
     $("btn-submit").classList.toggle("hidden", !canSubmit);
@@ -533,14 +560,39 @@
       block.appendChild(meta);
       var stemEl = document.createElement("div"); stemEl.className = "review-stem";
       stemEl.textContent = q.stem; block.appendChild(stemEl);
-      q.options.forEach(function (opt, i) {
-        var row = document.createElement("div");
-        var isAns = q.answer.indexOf(i) >= 0;
-        row.className = "review-opt " + (isAns ? "ok" : (sel.has(i) ? "err" : "dim"));
-        row.textContent = (isAns ? "✔ " : (sel.has(i) ? "✘ " : "　")) + MSQ.LETTERS[i] + ". " + opt;
-        block.appendChild(row);
-      });
-      body.appendChild(block);
+            q.options.forEach(function (opt, i) {
+                var row = document.createElement("div");
+                var isAns = q.answer.indexOf(i) >= 0;
+                row.className = "review-opt " + (isAns ? "ok" : (sel.has(i) ? "err" : "dim"));
+                row.textContent = (isAns ? "✔ " : (sel.has(i) ? "✘ " : "　")) + MSQ.LETTERS[i] + ". " + opt;
+                block.appendChild(row);
+            });
+            // 交卷后错题逐题解析（默认折叠；该题无解析则不显示入口）
+            var exp = getExplanation(q.id);
+            if (exp) {
+              var eb = document.createElement("button");
+              eb.type = "button";
+              eb.className = "explain-btn";
+              eb.textContent = "查看解析与记忆技巧 ▾";
+              var ebody = document.createElement("div");
+              ebody.className = "explain-body hidden";
+              var sec1 = document.createElement("div"); sec1.className = "explain-sec";
+              var h1 = document.createElement("div"); h1.className = "explain-h"; h1.textContent = "为什么这么选";
+              var t1 = document.createElement("p"); t1.className = "explain-text"; t1.textContent = exp.reason || "";
+              sec1.appendChild(h1); sec1.appendChild(t1);
+              var sec2 = document.createElement("div"); sec2.className = "explain-sec memory";
+              var h2 = document.createElement("div"); h2.className = "explain-h"; h2.textContent = "记忆技巧";
+              var t2 = document.createElement("p"); t2.className = "explain-text"; t2.textContent = exp.memory || "";
+              sec2.appendChild(h2); sec2.appendChild(t2);
+              ebody.appendChild(sec1); ebody.appendChild(sec2);
+              eb.addEventListener("click", function () {
+                var open = ebody.classList.toggle("hidden") === false;
+                eb.textContent = open ? "收起解析与记忆技巧 ▴" : "查看解析与记忆技巧 ▾";
+              });
+              block.appendChild(eb);
+              block.appendChild(ebody);
+            }
+            body.appendChild(block);
     });
     show("view-review");
   }
@@ -683,6 +735,11 @@
     });
     $("btn-settings").addEventListener("click", function () { Modal.settings(); });
     $("btn-clear").addEventListener("click", clearRecords);
+    $("explain-toggle").addEventListener("click", function () {
+      if (!curExplain) { return; }
+      explainOpen = !explainOpen;
+      applyExplainState();
+    });
     bindSwipe();
     bindKeys();
   }

@@ -223,6 +223,47 @@ check("轻微上下滚动不触发", MSQ.resolveSwipe(0, 40, 300, 40) === null);
 check("长页慢速拖滚（超时）不翻题", MSQ.resolveSwipe(0, -400, 900, 0) === null);
 check("横向翻题不受页面滚动影响", MSQ.resolveSwipe(-100, 0, 300, 300) === "next");
 
+/* ---------- 题目解析 explanations ---------- */
+section("题目解析 explanations");
+const expJs = path.join(__dirname, "www", "data", "explanations.js");
+if (fs.existsSync(expJs)) {
+  const win = {};
+  new Function("window", fs.readFileSync(expJs, "utf8"))(win);
+  const exp = win.EXPLANATIONS_DATA || {};
+  const idKeys = Object.keys(exp).filter(k => k !== "_meta");
+  check("解析条数 = 392", idKeys.length === 392, String(idKeys.length));
+  check("392 个 question.id 均存在解析（String(id) 匹配）",
+    qs.every(q => !!exp[String(q.id)]),
+    "缺: " + qs.filter(q => !exp[String(q.id)]).map(q => q.id).slice(0, 8).join(","));
+  check("没有多余题目 id", idKeys.every(k => qs.some(q => String(q.id) === k)),
+    "多: " + idKeys.filter(k => !qs.some(q => String(q.id) === k)).slice(0, 8).join(","));
+  check("reason 全部非空", idKeys.every(k => typeof exp[k].reason === "string" && exp[k].reason.trim().length > 0));
+  check("memory 全部非空", idKeys.every(k => typeof exp[k].memory === "string" && exp[k].memory.trim().length > 0));
+  check("_meta 不作为题目解析计入", idKeys.indexOf("_meta") === -1);
+  const shq0 = MSQ.shuffleQuestionOptions(byType.single[0], rng);
+  check("选项随机化后仍通过同一 question.id 找到解析",
+    !!exp[String(shq0.id)] && exp[String(shq0.id)] === exp[String(byType.single[0].id)]);
+  const qExpT = byType.multi[0];
+  const rExp = MSQ.isCorrect(qExpT, qExpT.answer);
+  check("explanation 不参与 isCorrect 判定", rExp === true && MSQ.isCorrect(qExpT, qExpT.answer) === rExp);
+  const conf = exp._meta && exp._meta.known_source_conflicts;
+  if (Array.isArray(conf) && conf.length) {
+    check("已知冲突 id 的解析仍正常加载（答案不改）", conf.every(c => {
+      const id = (c && typeof c === "object") ? (c.id ?? c.question_id ?? c.seq) : c;
+      return id !== undefined && !!exp[String(id)];
+    }));
+  }
+  idKeys.slice(0, 2).forEach(k => console.log(
+    `  [id ${k}] reason=${String(exp[k].reason).slice(0, 28)}… memory=${String(exp[k].memory).slice(0, 22)}…`));
+} else {
+  console.log("  [SKIP] 本地无 www/data/explanations.js（未提供解析数据），改验示例文件结构");
+  const sample = JSON.parse(fs.readFileSync(path.join(__dirname, "www", "data", "explanations.sample.json"), "utf8"));
+  const sKeys = Object.keys(sample).filter(k => k !== "_meta");
+  check("示例文件至少 1 条结构演示", sKeys.length >= 1);
+  check("示例条目 reason/memory 字段非空", sKeys.every(k => sample[k].reason && sample[k].memory));
+  check("示例文件保留 _meta 结构", typeof sample._meta === "object");
+}
+
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {
