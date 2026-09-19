@@ -248,10 +248,20 @@ if (fs.existsSync(expJs)) {
   check("explanation 不参与 isCorrect 判定", rExp === true && MSQ.isCorrect(qExpT, qExpT.answer) === rExp);
   const conf = exp._meta && exp._meta.known_source_conflicts;
   if (Array.isArray(conf) && conf.length) {
-    check("已知冲突 id 的解析仍正常加载（答案不改）", conf.every(c => {
-      const id = (c && typeof c === "object") ? (c.id ?? c.question_id ?? c.seq) : c;
-      return id !== undefined && !!exp[String(id)];
-    }));
+    const confIds = conf.flatMap(c => {
+      if (c && typeof c === "object") {
+        if (Array.isArray(c.ids)) { return c.ids; }
+        return [c.id ?? c.question_id ?? c.seq].filter(x => x !== undefined);
+      }
+      return [c];
+    });
+    check("已知冲突 id 的解析仍正常加载", confIds.every(id => !!exp[String(id)]),
+      "conflict ids: " + confIds.join(","));
+    check("冲突题的标准答案未被解析改动（仍按原答案判对）",
+      confIds.every(id => {
+        const q = qs.find(x => String(x.id) === String(id));
+        return q && MSQ.isCorrect(q, q.answer);
+      }));
   }
   idKeys.slice(0, 2).forEach(k => console.log(
     `  [id ${k}] reason=${String(exp[k].reason).slice(0, 28)}… memory=${String(exp[k].memory).slice(0, 22)}…`));
