@@ -262,6 +262,12 @@
         Store.save();
       }
     }
+    // 做题类模式（顺序/随机/三类专项）：进入会话时一次性生成展示副本，
+    // 打乱选项并同步重映射答案；背题、错题重做保持题库原始顺序。
+    // 副本存入 P.list，重复渲染/前进后退都复用同一份，保证会话内顺序固定。
+    if (mode !== "recite" && mode !== "wrong") {
+      list = list.map(function (q) { return MSQ.shuffleQuestionOptions(q, Math.random); });
+    }
     P = {
       mode: mode, list: list,
       pos: Math.max(0, Math.min(Store.data.positions[mode] || 0, list.length - 1)),
@@ -395,6 +401,7 @@
     var canSubmit = !exam && !recite && q.type === "multi" && !st.submitted;
     $("btn-submit").classList.toggle("hidden", !canSubmit);
     $("btn-handin").classList.toggle("hidden", !exam);
+    $("btn-jump").classList.toggle("hidden", !(P && P.mode === "recite"));
     $("btn-next").classList.toggle("primary", (!exam && st && st.submitted) || recite);
     $("btn-prev").disabled = pos() === 0;
     $("btn-next").textContent = (!exam && P.pos === P.list.length - 1) ? "完成" : "下一题";
@@ -540,6 +547,54 @@
     show("view-review");
   }
 
+  /* ---------------- 背题模式快速跳转 ---------------- */
+  function openJump() {
+    if (!P || P.mode !== "recite") { return; }
+    var total = P.list.length;
+    Modal.open(function (box) {
+      var h = document.createElement("h3");
+      h.textContent = "背题模式跳转";
+      box.appendChild(h);
+      var m = document.createElement("div");
+      m.className = "msg";
+      m.textContent = "当前第 " + (P.pos + 1) + " / " + total + " 题";
+      box.appendChild(m);
+      var row = document.createElement("div");
+      row.className = "field";
+      var lb = document.createElement("label");
+      lb.textContent = "跳转到第";
+      var inp = document.createElement("input");
+      inp.type = "number"; inp.min = "1"; inp.max = String(total);
+      inp.inputMode = "numeric"; inp.placeholder = "1 ~ " + total;
+      var suffix = document.createElement("span");
+      suffix.textContent = "题";
+      suffix.style.cssText = "font-size:16px;margin-left:6px";
+      row.appendChild(lb); row.appendChild(inp); row.appendChild(suffix);
+      box.appendChild(row);
+      var err = document.createElement("div");
+      err.className = "total-line";
+      err.style.color = "#c62828";
+      box.appendChild(err);
+      function doJump() {
+        var res = MSQ.parseJumpTarget(inp.value, total);
+        if (!res.ok) { err.textContent = res.reason; return; }
+        Modal.close();
+        P.pos = res.index;
+        savePosition();          // 保存进度，退出重进可从此位置继续
+        renderQuestion();
+      }
+      inp.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { doJump(); }
+      });
+      var btns = document.createElement("div");
+      btns.className = "btns";
+      btns.appendChild(mkBtn("取消", "barbtn cancel", function () { Modal.close(); }));
+      btns.appendChild(mkBtn("跳转", "barbtn ok", doJump));
+      box.appendChild(btns);
+      setTimeout(function () { try { inp.focus(); } catch (e) { } }, 0);
+    });
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -618,6 +673,7 @@
     $("btn-prev").addEventListener("click", goPrev);
     $("btn-next").addEventListener("click", goNext);
     $("btn-submit").addEventListener("click", submitPractice);
+    $("btn-jump").addEventListener("click", openJump);
     $("btn-handin").addEventListener("click", handin);
     $("btn-review-back").addEventListener("click", function () {
       if (E && E.result) { renderResult(); } else { E = null; renderMenu(); }

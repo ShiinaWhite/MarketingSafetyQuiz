@@ -1,5 +1,7 @@
-/* sw.js —— 离线缓存：所有资源全部本地，无任何网络回退到外部站点 */
-const CACHE = "msq-cache-v4";
+/* sw.js —— 离线缓存：资源全部本地，无任何外部网络请求。
+   策略：network-first（有网时永远取最新资源并更新缓存），断网时回退缓存，
+   兼顾「完全离线可用」与「版本升级后不再跑到旧代码」。 */
+const CACHE = "msq-cache-v6";
 const ASSETS = [
   "./",
   "index.html",
@@ -32,17 +34,16 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-/* 缓存优先；仅缓存同源 GET 请求，绝不请求第三方 */
+/* 仅处理同源 GET：network-first，失败回退缓存（离线） */
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET" || !e.request.url.startsWith(self.location.origin)) { return; }
   e.respondWith(
-    caches.match(e.request, { ignoreSearch: true }).then((hit) => {
-      if (hit) { return hit; }
-      return fetch(e.request).then((resp) => {
-        const copy = resp.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
-        return resp;
-      }).catch(() => caches.match("./"));
-    })
+    fetch(e.request).then((resp) => {
+      const copy = resp.clone();
+      caches.open(CACHE).then((c) => c.put(e.request, copy));
+      return resp;
+    }).catch(() =>
+      caches.match(e.request, { ignoreSearch: true }).then((hit) => hit || caches.match("./"))
+    )
   );
 });

@@ -85,12 +85,50 @@
     return { score: score, full: full, detail: detail, wrong: wrong };
   }
 
+  /* 打乱一道题的选项顺序，并同步重映射答案下标。
+     返回全新题对象（含原题所有字段），绝不修改传入的原始题库数据。
+     例: options=[甲,乙,丙,丁] answer=[1,3] 打乱为 [丁,甲,乙,丙] 后 answer 自动变为 [0,2]。 */
+  function shuffleQuestionOptions(question, rng) {
+    rng = rng || Math.random;
+    var opts = question.options || [];
+    var perm = [];
+    for (var i = 0; i < opts.length; i++) { perm.push(i); }
+    for (var j = perm.length - 1; j > 0; j--) {
+      var k = Math.floor(rng() * (j + 1));
+      var t = perm[j]; perm[j] = perm[k]; perm[k] = t;
+    }
+    var newOpts = perm.map(function (orig) { return opts[orig]; });
+    var newAnswer = [];
+    for (var p = 0; p < perm.length; p++) {
+      if ((question.answer || []).indexOf(perm[p]) >= 0) { newAnswer.push(p); }
+    }
+    var copy = {};
+    for (var key in question) { copy[key] = question[key]; }
+    copy.options = newOpts;
+    copy.answer = newAnswer;
+    return copy;
+  }
+
+  /* 解析背题模式跳转输入。raw 为用户输入文本，total 为当前题目总数。
+     合法时返回 {ok:true, index: 题号-1}；非法时返回 {ok:false, reason: 提示文案}。 */
+  function parseJumpTarget(raw, total) {
+    var s = String(raw === null || raw === undefined ? "" : raw).trim();
+    if (!/^\d+$/.test(s)) {
+      return { ok: false, reason: "请输入整数题号（1 ~ " + total + "）" };
+    }
+    var n = parseInt(s, 10);
+    if (n < 1) { return { ok: false, reason: "题号不能小于 1" }; }
+    if (n > total) { return { ok: false, reason: "题号不能超过当前题目总数 " + total }; }
+    return { ok: true, index: n - 1 };
+  }
+
   return {
     LETTERS: LETTERS, TYPE_ORDER: TYPE_ORDER, TYPE_NAMES: TYPE_NAMES,
     DEFAULT_EXAM_CONFIG: DEFAULT_EXAM_CONFIG,
     COUNT_KEYS: COUNT_KEYS, SCORE_KEYS: SCORE_KEYS,
     normalizeConfig: normalizeConfig, indexByType: indexByType,
     isCorrect: isCorrect, answerText: answerText, shuffled: shuffled,
+    shuffleQuestionOptions: shuffleQuestionOptions, parseJumpTarget: parseJumpTarget,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });
