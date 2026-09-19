@@ -263,6 +263,20 @@ if (fs.existsSync(expJs)) {
         return q && MSQ.isCorrect(q, q.answer);
       }));
   }
+  /* V2 数据对应性与旧模板句检查 */
+  const atBad = [], typeBad = [];
+  for (const q of qs) {
+    const e = exp[String(q.id)];
+    if (!e) { continue; }
+    if (JSON.stringify(e.answer_text) !== JSON.stringify(q.answer.map(a => q.options[a]))) { atBad.push(q.id); }
+    if (e.type !== q.type_name) { typeBad.push(q.id); }
+  }
+  check("answer_text 392/392 与题库正确选项文本一致", atBad.length === 0, atBad.slice(0, 6).join(","));
+  check("type 392/392 与题库题型一致", typeBad.length === 0, typeBad.slice(0, 6).join(","));
+  const TPL = ["把标准答案按顺序填回题干", "这样记比只背"];
+  const tplHits = idKeys.filter(k => TPL.some(t =>
+    (exp[k].reason || "").includes(t) || (exp[k].memory || "").includes(t)));
+  check("不存在旧 V1 模板句", tplHits.length === 0, tplHits.slice(0, 6).join(","));
   idKeys.slice(0, 2).forEach(k => console.log(
     `  [id ${k}] reason=${String(exp[k].reason).slice(0, 28)}… memory=${String(exp[k].memory).slice(0, 22)}…`));
 } else {
