@@ -53,7 +53,7 @@ button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
 .qtitle.center { text-align: center; font-size: 17px; padding: 10px 0; }
 
 #quiz-scroll { flex: 1 1 0; min-height: 0; padding: 14px 14px 10px; overflow-y: auto; }
-.major { color: #888; font-size: 13px; margin: 0 2px 6px; }
+.type-line { color: #888; font-size: 13px; font-weight: 700; margin: 0 2px 6px; }
 .stem {
   font-size: 19px; font-weight: 600; line-height: 1.6;
   overflow-wrap: break-word; word-break: break-word;

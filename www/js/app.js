@@ -350,21 +350,19 @@
       ? { sel: E.answers[q.id] || new Set(), submitted: false, correct: false }
       : (P.session[q.id] || (P.session[q.id] = { sel: new Set(), submitted: false, correct: false }));
 
-    // 顶部标题
+    // 顶部标题：只保留模式与进度（模拟考试含已答数）；题型移到题干上方第二行
     if (exam) {
       var answered = 0;
       for (var k in E.answers) { if (E.answers[k].size) { answered++; } }
-      $("quiz-title").textContent = "模拟考试 ｜ " + MSQ.TYPE_NAMES[q.type] +
-        " ｜ 第 " + (E.pos + 1) + "/" + E.paper.length + " 题 ｜ 已答 " + answered;
+      $("quiz-title").textContent = "模拟考试 ｜ 第 " + (E.pos + 1) + "/" + E.paper.length + " 题 ｜ 已答 " + answered;
     } else {
-      $("quiz-title").textContent = MODE_TITLES[P.mode] + " ｜ " + MSQ.TYPE_NAMES[q.type] +
-        " ｜ 第 " + (P.pos + 1) + "/" + P.list.length + " 题 ｜ 序号 " + q.id;
+      $("quiz-title").textContent = MODE_TITLES[P.mode] + " ｜ 第 " + (P.pos + 1) + "/" + P.list.length + " 题";
     }
 
-    // 题干
-    var major = $("major-line");
-    if (q.major) { major.textContent = "专业：" + q.major; major.classList.remove("hidden"); }
-    else { major.classList.add("hidden"); }
+    // 题干上方第二行：仅显示题型名称（major/专业 字段保留在数据中，只是 UI 不再展示）
+    var typeLine = $("type-line");
+    typeLine.textContent = MSQ.TYPE_NAMES[q.type];
+    typeLine.classList.remove("hidden");
     $("stem").textContent = q.stem;
 
     // 选项
