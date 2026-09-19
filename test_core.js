@@ -202,6 +202,27 @@ check("非数字被拦截", !MSQ.parseJumpTarget("abc", 392).ok
   && !MSQ.parseJumpTarget("8.5", 392).ok
   && !MSQ.parseJumpTarget("", 392).ok);
 
+/* ---------- 滑动翻页判定（横向 + 纵向 + 滚动豁免） ---------- */
+section("滑动翻页判定 resolveSwipe");
+check("上滑 -> 下一题", MSQ.resolveSwipe(0, -200, 300, 0) === "next");
+check("下滑 -> 上一题", MSQ.resolveSwipe(0, 200, 300, 0) === "prev");
+check("左滑 -> 下一题", MSQ.resolveSwipe(-100, 0, 300, 0) === "next");
+check("右滑 -> 上一题", MSQ.resolveSwipe(100, 0, 300, 0) === "prev");
+check("纵向阈值边界 |dy|=90 触发", MSQ.resolveSwipe(0, -90, 300, 0) === "next");
+check("轻微位移 |dy|=89 不触发", MSQ.resolveSwipe(0, -89, 300, 0) === null);
+check("超时 700ms 不触发（横/纵均）",
+  MSQ.resolveSwipe(0, -200, 701, 0) === null && MSQ.resolveSwipe(-100, 0, 701, 0) === null);
+check("斜向滑动不误触", MSQ.resolveSwipe(-80, -120, 300, 0) === null
+  && MSQ.resolveSwipe(100, -100, 300, 0) === null);
+check("纵向主导的轻微斜向仍可翻题", MSQ.resolveSwipe(30, -200, 300, 0) === "next");
+check("明显滚动(300px)时纵向不翻题", MSQ.resolveSwipe(0, -200, 300, 300) === null);
+check("滚动量 31px 仍可翻题", MSQ.resolveSwipe(0, -200, 300, 31) === "next");
+check("滚动量阈值 32px 豁免翻题", MSQ.resolveSwipe(0, -200, 300, 32) === null);
+check("轻微触摸（多选点击带小位移）不触发", MSQ.resolveSwipe(8, -12, 180, 0) === null);
+check("轻微上下滚动不触发", MSQ.resolveSwipe(0, 40, 300, 40) === null);
+check("长页慢速拖滚（超时）不翻题", MSQ.resolveSwipe(0, -400, 900, 0) === null);
+check("横向翻题不受页面滚动影响", MSQ.resolveSwipe(-100, 0, 300, 300) === "next");
+
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {

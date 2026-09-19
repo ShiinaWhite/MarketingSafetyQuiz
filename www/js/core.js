@@ -122,6 +122,20 @@
     return { ok: true, index: n - 1 };
   }
 
+  /* 解析滑动翻页手势（横向 + 纵向）。
+     dx/dy 为位移，dt 为手势时长(ms)，scrolled 为手势期间页面滚动位移(px)。
+     返回 "next" / "prev" / null（null = 不翻页）。
+     横向：|dx|>64 且 |dy|<48 且 |dx|>|dy|*2（保持原有行为，不受页面滚动影响）。
+     纵向：|dy|>=90 且 |dy|>|dx|*2 且手势期间未发生明显滚动（>=32px 视为滚动，优先滚动），
+           防止与长题干页面的正常上下滚动冲突。超时 700ms 一律不触发。 */
+  function resolveSwipe(dx, dy, dt, scrolled) {
+    var adx = Math.abs(dx), ady = Math.abs(dy);
+    if (dt > 700) { return null; }
+    if (adx > 64 && ady < 48 && adx > ady * 2) { return dx < 0 ? "next" : "prev"; }
+    if (ady >= 90 && ady > adx * 2 && (scrolled || 0) < 32) { return dy < 0 ? "next" : "prev"; }
+    return null;
+  }
+
   return {
     LETTERS: LETTERS, TYPE_ORDER: TYPE_ORDER, TYPE_NAMES: TYPE_NAMES,
     DEFAULT_EXAM_CONFIG: DEFAULT_EXAM_CONFIG,
@@ -129,6 +143,7 @@
     normalizeConfig: normalizeConfig, indexByType: indexByType,
     isCorrect: isCorrect, answerText: answerText, shuffled: shuffled,
     shuffleQuestionOptions: shuffleQuestionOptions, parseJumpTarget: parseJumpTarget,
+    resolveSwipe: resolveSwipe,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

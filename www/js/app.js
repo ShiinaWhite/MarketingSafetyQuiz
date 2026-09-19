@@ -606,23 +606,28 @@
       }, { danger: true, okText: "继续" });
   }
 
-  /* ---------------- 滑动换题（不会触发提交） ---------------- */
+  /* ---------------- 滑动换题（横向 + 纵向，不影响正常上下滚动） ---------------- */
   function bindSwipe() {
     var ts = null;
     var area = $("view-quiz");
     area.addEventListener("touchstart", function (e) {
       var t = e.changedTouches[0];
-      ts = { x: t.clientX, y: t.clientY, t: Date.now() };
+      var sc = $("quiz-scroll");
+      ts = { x: t.clientX, y: t.clientY, t: Date.now(), top: sc ? sc.scrollTop : 0 };
     }, { passive: true });
     area.addEventListener("touchend", function (e) {
       if (!ts) { return; }
       var t = e.changedTouches[0];
+      var sc = $("quiz-scroll");
       var dx = t.clientX - ts.x, dy = t.clientY - ts.y, dt = Date.now() - ts.t;
+      var scrolled = Math.abs((sc ? sc.scrollTop : 0) - ts.top);
       ts = null;
-      if (dt > 700 || Modal.isOpen()) { return; }
-      if (Math.abs(dx) > 64 && Math.abs(dy) < 48 && Math.abs(dx) > Math.abs(dy) * 2) {
-        if (dx < 0) { goNext(); } else { goPrev(); }
-      }
+      if (Modal.isOpen()) { return; }
+      // 判定在 core.resolveSwipe：横向保持原规则；纵向要求快速明显滑动
+      // 且手势期间页面未发生明显滚动（>=32px 优先视为滚动），避免与长题干滚动冲突
+      var dir = MSQ.resolveSwipe(dx, dy, dt, scrolled);
+      if (dir === "next") { goNext(); }
+      else if (dir === "prev") { goPrev(); }
     }, { passive: true });
   }
 
