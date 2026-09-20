@@ -916,6 +916,16 @@
     return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
   }
 
+  /* 插件缺失诊断：区分哪一层未加载，附带桥接状态，便于真机定位 */
+  function photoPluginMissingMessage(Camera, Ocr) {
+    var msg;
+    if (!Camera && !Ocr) { msg = "相机和OCR插件均未加载"; }
+    else if (!Camera) { msg = "相机插件未加载"; }
+    else { msg = "OCR插件未加载"; }
+    var bridge = !!window.Capacitor;
+    return msg + "（Camera=" + !!Camera + " Ocr=" + !!Ocr + " 桥=" + bridge + "）";
+  }
+
   function setPhotoStatus(text) {
     var el = $("photo-status");
     if (el) { el.textContent = text; el.classList.remove("hidden"); }
@@ -992,7 +1002,7 @@
     var Camera = getPlugin("Camera");
     var Ocr = getPlugin("Ocr");
     if (!Camera || !Ocr) {
-      setPhotoStatus("拍照搜题需要在 Android 应用内使用（当前环境无相机/OCR）");
+      setPhotoStatus(photoPluginMissingMessage(Camera, Ocr));
       return;
     }
     setPhotoStatus("正在打开相机…");
@@ -1001,8 +1011,8 @@
       photo = await Camera.getPhoto({
         quality: 70,
         width: 1600,
-        resultType: "DataUrl",
-        source: "Camera",
+        resultType: "dataUrl",
+        source: "CAMERA",
         saveToGallery: false,
         allowEditing: false
       });
@@ -1148,9 +1158,11 @@
     $("btn-search-back").addEventListener("click", handleSearchBack);
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
     $("btn-photo-search").addEventListener("click", function () {
-      if (!getPlugin("Camera") || !getPlugin("Ocr")) {
+      var Camera = getPlugin("Camera");
+      var Ocr = getPlugin("Ocr");
+      if (!Camera || !Ocr) {
         show("view-photo");
-        setPhotoStatus("拍照搜题需要在 Android 应用内使用（当前环境无相机/OCR）");
+        setPhotoStatus(photoPluginMissingMessage(Camera, Ocr));
         return;
       }
       startPhotoSearch();

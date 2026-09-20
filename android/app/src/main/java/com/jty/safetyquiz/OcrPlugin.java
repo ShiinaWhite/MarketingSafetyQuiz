@@ -9,7 +9,6 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
-import com.google.android.gms.tasks.Tasks;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
@@ -19,12 +18,13 @@ import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
 /**
  * 本地 OCR 插件：ML Kit Text Recognition v2 中文（bundled 模型，随 APK 分发，离线可用）。
  * 输入 base64 图片（JPEG），输出识别全文与耗时。
+ * 使用 ML Kit 异步回调，不阻塞调用线程；成功/失败均关闭 recognizer。
  */
 @CapacitorPlugin(name = "Ocr")
 public class OcrPlugin extends Plugin {
 
     @PluginMethod
-    public void recognizeText(PluginCall call) {
+    public void recognizeText(final PluginCall call) {
         String base64 = call.getString("base64");
         if (base64 == null || base64.isEmpty()) {
             call.reject("EMPTY_IMAGE");
@@ -42,19 +42,21 @@ public class OcrPlugin extends Plugin {
             call.reject("DECODE_FAILED");
             return;
         }
-        long start = System.currentTimeMillis();
-        try {
-            InputImage image = InputImage.fromBitmap(bitmap, 0);
-            TextRecognizer recognizer = TextRecognition.getClient(
-                    new ChineseTextRecognizerOptions.Builder().build());
-            Text text = Tasks.await(recognizer.process(image));
-            recognizer.close();
-            JSObject ret = new JSObject();
-            ret.put("text", text.getText());
-            ret.put("ms", System.currentTimeMillis() - start);
-            call.resolve(ret);
-        } catch (Exception e) {
-            call.reject("OCR_FAILED", e.getMessage());
-        }
+        final long start = System.currentTimeMillis();
+        InputImage image = InputImage.fromBitmap(bitmap, 0);
+        final TextRecognizer recognizer = TextRecognition.getClient(
+                new ChineseTextRecognizerOptions.Builder().build());
+        recognizer.process(image)
+                .addOnSuccessListener(text -> {
+                    recognizer.close();
+                    JSObject ret = new JSObject();
+                    ret.put("text", text.getText());
+                    ret.put("ms", System.currentTimeMillis() - start);
+                    call.resolve(ret);
+                })
+                .addOnFailureListener(e -> {
+                    recognizer.close();
+                    call.reject("OCR_FAILED", e.getMessage());
+                });
     }
 }
