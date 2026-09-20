@@ -288,83 +288,56 @@ if (fs.existsSync(expJs)) {
   check("示例文件保留 _meta 结构", typeof sample._meta === "object");
 }
 
-/* ---------- 本地搜题 ---------- */
+/* ---------- 本地搜题（原文连续子串，标点敏感） ---------- */
 section("本地搜题");
-const sWin = {};
-const sExpPath = path.join(__dirname, "www", "data", "explanations.js");
-let sExp = null;
-if (fs.existsSync(sExpPath)) {
-  new Function("window", fs.readFileSync(sExpPath, "utf8"))(sWin);
-  sExp = sWin.EXPLANATIONS_DATA || null;
-}
-const sIdx = MSQ.buildSearchIndex(qs, sExp);
+const sIdx = MSQ.buildSearchIndex(qs);
 check("搜索索引数量 = 392", sIdx.length === 392, String(sIdx.length));
-check("索引字段完整（规范化题干/选项/全文）",
-  sIdx.every(it => typeof it.normalizedStem === "string" && it.normalizedStem.length > 0
-    && Array.isArray(it.normalizedOptions) && it.normalizedOptions.length >= 2
-    && typeof it.normalizedAll === "string"));
-const na = MSQ.normalizeSearchText("“工作负责人（监护人）”");
-const nb = MSQ.normalizeSearchText("工作负责人(监护人)");
-const nc = MSQ.normalizeSearchText("工作负责人 监护人");
-check("规范化：全角/半角/引号/空格 归一一致", na === nb && nb === nc && na === "工作负责人监护人",
-  JSON.stringify(na));
-check("规范化：换行与连续空白剔除",
-  MSQ.normalizeSearchText("工作\n负责人　  监护人") === "工作负责人监护人");
+check("索引只含原始字段（无规范化/解析字段）",
+  sIdx.every(it => it.stem && Array.isArray(it.options) && it.options.length >= 2
+    && it.normalizedStem === undefined && it.normalizedOptions === undefined
+    && it.normalizedExplanation === undefined));
 
-const top1 = (q) => { const r = MSQ.searchQuestions(sIdx, q); return r.length ? r[0].id : null; };
-const TOP1 = [
-  ["禁止作业人员擅自", 1],
-  ["成套接地线宜存放在专用架上", 5],
-  ["工作票只能延期", 214],
-  ["变电站 不停电", 294],
-  ["一机一闸一保护", 359],
-  ["视频监控", 118],
-  ["低压验电前", 35],
-  ["中途新加入", 307],
-  ["高压部位需停电", 118],
-  ["漏电保护器", 168],
-  ["延期手续", 214],
-  ["口头通知", 3],
-  ["短信传达", 3],
-  ["宜开启 设备", 118],
-  ["安全工器具使用前", 51],
-  ["遮栏", 1],
-  ["互感器现场校验工作不得少于三人", 15],
-  ["工作负责人", 2],
-  ["接地线", 5],
-  ["一人", 46],
-  ["工作负人", 2],
-];
-for (const [q, id] of TOP1) {
-  check(`Top1: ${q} -> ${id}`, top1(q) === id, "实际 " + top1(q));
+/* 真值辅助：暴力 includes 作为 ground truth */
+const bruteIds = (q) => qs.filter(x => (x.stem + "|" + x.options.join("|")).includes(q))
+  .map(x => x.id).sort((a, b) => a - b);
+const searchIds = (q) => MSQ.searchQuestions(sIdx, q).map(x => x.id).sort((a, b) => a - b);
+
+/* 标点敏感：必须原文连续一致才算命中 */
+const PUNCT = ["变、配", "发、输、变", "（开关站）", "（ ）", "，不得", "的（", "）、"];
+for (const q of PUNCT) {
+  const got = searchIds(q), want = bruteIds(q);
+  check(`标点查询 ${JSON.stringify(q)} 结果与原文真值一致（${want.length} 条）`,
+    JSON.stringify(got) === JSON.stringify(want), "got=" + got.slice(0, 6).join(","));
 }
-const TOP5 = [
-  ["确认手续", 307],
-  ["二次工作安全措施票", 4],
-  ["变电站 不停电 工作票", 294],
-  ["工作负责人", 2],
-];
-for (const [q, id] of TOP5) {
-  const r = MSQ.searchQuestions(sIdx, q).slice(0, 5).map(x => x.id);
-  check(`Top5 含: ${q} -> ${id}`, r.includes(id), "Top5=" + r.join(","));
-}
+check("「变、配」命中且「变配」不命中（标点参与匹配）",
+  searchIds("变、配").length >= 1 && searchIds("变配").length === 0,
+  "变、配=" + searchIds("变、配").join(",") + " 变配=" + searchIds("变配").join(","));
+
+/* 范围与降级回归 */
 check("空查询返回空", MSQ.searchQuestions(sIdx, "").length === 0
   && MSQ.searchQuestions(sIdx, "   ").length === 0);
-check("纯标点查询返回空", MSQ.searchQuestions(sIdx, "（）。！").length === 0);
-const q5full = qs.find(x => x.id === 5);
-check("完整题干精确命中 Top1", top1(q5full.stem) === 5);
-check("题干中间连续片段 Top1（延期手续应记录在）", top1("延期手续应记录在") === 214);
-const rc = MSQ.searchQuestions(sIdx, "确认手续");
-check("解析命中不压过题干命中（307 列第5，前三位均为题干层）",
-  rc.length >= 5 && rc[4].id === 307 && rc.slice(0, 3).every(x => x.tier <= 3),
-  "Top5=" + rc.slice(0, 5).map(x => x.id + "/T" + x.tier).join(","));
-const rsyn = MSQ.searchQuestions(sIdx, "视频监控");
-check("选项命中在解析命中之前（118 选项层 Top1）",
-  rsyn[0].id === 118 && rsyn[0].tier === 4 && rsyn[1].id === 153 && rsyn[1].tier === 6);
-const rEx = MSQ.searchQuestions(sIdx, "禁止作业人员擅自");
-check("同一查询命中多题时原题（id1）排最前", rEx[0].id === 1 && rEx[0].tier === 1);
+check("「工作负责人」正常搜索", searchIds("工作负责人").length === 60);
+check("「视频监控」从选项命中 118", MSQ.searchQuestions(sIdx, "视频监控")[0].id === 118
+  && MSQ.searchQuestions(sIdx, "视频监控")[0].tier === 2
+  && MSQ.searchQuestions(sIdx, "视频监控")[0].hitOption === "视频监控");
+check("「一机一闸一保护」题干/选项无原文 -> 0 条", searchIds("一机一闸一保护").length === 0);
+check("「工作负人」不再模糊纠错 -> 0 条", searchIds("工作负人").length === 0);
+check("「变电站 不停电」（含空格）按原文匹配 -> 0 条", searchIds("变电站 不停电").length === 0);
+check("解析文字不参与搜索（V1 口诀 -> 0 条）", searchIds("遮栏标牌两不擅").length === 0);
+check("解析文字不参与搜索（V2 原文「一机一闸一保护；少」 -> 0 条）",
+  searchIds("少“机”就错").length === 0);
+check("选项命中排在题干命中之后（二次工作安全措施票）",
+  (() => {
+    const r = MSQ.searchQuestions(sIdx, "二次工作安全措施票");
+    const firstOpt = r.findIndex(x => x.tier === 2);
+    return firstOpt > 0 && r.slice(0, firstOpt).every(x => x.tier === 1);
+  })());
+check("同层内 query 占原文比例高者优先（工作票 Top1=12，214 列第2）",
+  MSQ.searchQuestions(sIdx, "工作票")[0].id === 12
+  && MSQ.searchQuestions(sIdx, "工作票")[1].id === 214);
+
 /* 性能 */
-const timeQ = [...TOP1.map(x => x[0]), ...TOP5.map(x => x[0])];
+const timeQ = [...PUNCT, "工作负责人", "视频监控", "工作票", "一机一闸一保护", "工作负人"];
 let sw_max = 0, sw_sum = 0, sw_n = 0;
 for (let round = 0; round < 5; round++) {
   for (const q of timeQ) {

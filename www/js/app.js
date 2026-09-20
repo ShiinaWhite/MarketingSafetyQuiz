@@ -719,42 +719,21 @@
     box.appendChild(chips);
   }
 
-  /* 安太高亮：全部用 DOM 文本节点 + <mark>，不拼接用户输入的 innerHTML */
-  function renderHighlighted(parent, text, kws) {
-    var nm = MSQ.normalizeWithMap(text);
-    var ranges = [];
-    kws.forEach(function (kw) {
-      if (!kw) { return; }
-      var from = 0;
-      while (true) {
-        var at = nm.text.indexOf(kw, from);
-        if (at < 0) { break; }
-        ranges.push([nm.map[at], nm.map[at + kw.length - 1] + 1]);
-        from = at + 1;
-      }
-    });
-    ranges.sort(function (a, b) { return a[0] - b[0]; });
-    var merged = [];
-    ranges.forEach(function (r) {
-      var last = merged[merged.length - 1];
-      if (last && r[0] <= last[1]) { last[1] = Math.max(last[1], r[1]); }
-      else { merged.push(r.slice()); }
-    });
+  /* 原文连续子串高亮：全部用 DOM 文本节点 + <mark>，不拼接用户输入的 innerHTML */
+  function renderHighlighted(parent, text, query) {
+    var q = String(query || "").trim();
+    if (!q) { parent.textContent = text; return; }
     var pos = 0;
-    merged.forEach(function (r) {
-      if (r[0] > pos) { parent.appendChild(document.createTextNode(text.slice(pos, r[0]))); }
+    while (true) {
+      var at = text.indexOf(q, pos);
+      if (at < 0) { break; }
+      if (at > pos) { parent.appendChild(document.createTextNode(text.slice(pos, at))); }
       var mark = document.createElement("mark");
-      mark.textContent = text.slice(r[0], r[1]);
+      mark.textContent = text.slice(at, at + q.length);
       parent.appendChild(mark);
-      pos = r[1];
-    });
+      pos = at + q.length;
+    }
     if (pos < text.length) { parent.appendChild(document.createTextNode(text.slice(pos))); }
-  }
-
-  function queryKeywords(raw) {
-    var kws = String(raw || "").split(/\s+/).map(MSQ.normalizeSearchText)
-      .filter(function (k) { return k; });
-    return kws.length ? kws : [];
   }
 
   function doSearch(raw) {
@@ -763,9 +742,9 @@
     var countEl = $("search-count");
     var hist = $("search-history");
     box.innerHTML = "";
-    var kws = queryKeywords(raw);
+    var q = String(raw || "").trim();
     if (!results.length) {
-      var hasQuery = String(raw || "").trim() !== "";
+      var hasQuery = q !== "";
       countEl.classList.toggle("hidden", !hasQuery);
       if (hasQuery) {
         countEl.textContent = "未找到相关题目";
@@ -789,7 +768,7 @@
       item.appendChild(typeEl);
       var stemEl = document.createElement("div");
       stemEl.className = "s-stem";
-      renderHighlighted(stemEl, r.stem, kws);
+      renderHighlighted(stemEl, r.stem, q);
       item.appendChild(stemEl);
       if (r.hitOption) {
         var optEl = document.createElement("div");
@@ -813,7 +792,7 @@
     }, 60);
   }
 
-  /* 搜题详情：展示题库原始选项顺序（不做选项随机化），直接显示答案与 V2 解析 */
+  /* 搜题详情：只显示 题型/原始题干/原始选项（原序）/正确答案，不含解析与记忆技巧 */
   function openSearchDetail(id) {
     var q = null;
     bank.questions.forEach(function (x) { if (x.id === id) { q = x; } });
@@ -842,22 +821,6 @@
     ans.className = "feedback ok";
     ans.textContent = "【答案】" + MSQ.answerText(q);
     body.appendChild(ans);
-    var exp = getExplanation(q.id);
-    if (exp) {
-      [["为什么这么选", exp.reason, "explain-sec"],
-       ["记忆技巧", exp.memory, "explain-sec memory"]].forEach(function (def) {
-        var secEl = document.createElement("div");
-        secEl.className = def[2];
-        var h = document.createElement("div");
-        h.className = "explain-h";
-        h.textContent = def[0];
-        var t = document.createElement("p");
-        t.className = "explain-text";
-        t.textContent = def[1] || "";
-        secEl.appendChild(h); secEl.appendChild(t);
-        body.appendChild(secEl);
-      });
-    }
     show("view-search-detail");
   }
 
@@ -982,7 +945,7 @@
   loadBank().then(function (data) {
     bank = data;
     byType = MSQ.indexByType(bank.questions);
-    searchIndex = MSQ.buildSearchIndex(bank.questions, window.EXPLANATIONS_DATA || null);
+    searchIndex = MSQ.buildSearchIndex(bank.questions);
     bindEvents();
     renderMenu();
     registerSW();
