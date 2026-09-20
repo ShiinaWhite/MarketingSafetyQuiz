@@ -351,6 +351,75 @@ const sw_avg = sw_sum / sw_n;
 check("平均搜索耗时 < 10ms", sw_avg < 10, sw_avg.toFixed(2) + "ms");
 check("最大搜索耗时 < 50ms", sw_max < 50, sw_max.toFixed(2) + "ms");
 
+/* ---------- 拍照搜题（OCR 匹配，模拟 OCR 噪声） ---------- */
+section("拍照搜题 OCR 匹配");
+const ocrIdx = MSQ.buildOcrIndex(qs);
+check("OCR 索引数量 = 392", ocrIdx.length === 392);
+check("OCR 索引含规范化字段", ocrIdx.every(it => it.ocrStem.length > 0 && it.ocrOptions.length >= 2));
+check("normalizeOcrText：全角/标点/换行归一", MSQ.normalizeOcrText("（  ）A.正确\nB.错误") === "正确 错误");
+check("normalizeOcrText：选项标签剔除", MSQ.normalizeOcrText("A.搭建、B.损坏") === "搭建 损坏");
+
+/* 模拟 OCR 生成：真实题干/选项 + 典型 OCR 噪声（错字替换/漏字/空格/标点/选项标签） */
+const CONFUSABLE = { "责": "贵", "人": "入", "士": "土", "未": "末", "须": "需", "机": "肌",
+  "验": "鉴", "检": "捡", "设": "没", "地": "池", "压": "庄", "戴": "带", "已": "己",
+  "第": "弟", "维": "堆", "护": "户", "电": "龟", "动": "劝", "监": "临", "工": "二" };
+function simulateOcr(q, rand) {
+  let text = q.stem + "\n";
+  q.options.forEach((o, i) => { text += "ABCDEF"[i] + "." + o + "\n"; });
+  let chars = text.split("");
+  for (let i = 0; i < chars.length; i++) {
+    const roll = rand();
+    if (roll < 0.05 && CONFUSABLE[chars[i]]) { chars[i] = CONFUSABLE[chars[i]]; }
+    else if (roll < 0.065) { chars[i] = ""; }            // 漏字
+    else if (roll < 0.09 && chars[i] !== "\n") { chars[i] = " " + chars[i]; } // 随机空格
+  }
+  return chars.join("").replace(/\n{2,}/g, "\n");
+}
+/* 抽样：单选10 + 多选10 + 判断10（种子固定，可复现） */
+const ocrRand = mulberry(20260920);
+const pickOcr = [];
+["single", "multi", "judge"].forEach(t => {
+  const pool = byType[t].slice();
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(ocrRand() * (i + 1));
+    const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+  }
+  pool.slice(0, 10).forEach(q => pickOcr.push(q));
+});
+let top1 = 0, top3 = 0, misses = [], sumMatch = 0;
+const t0 = performance.now();
+for (const q of pickOcr) {
+  const sim = simulateOcr(q, ocrRand);
+  const a = performance.now();
+  const r = MSQ.searchQuestionsByOcr(ocrIdx, sim);
+  const d = performance.now() - a;
+  sumMatch += d;
+  const top3Ids = r.slice(0, 3).map(x => x.id);
+  if (top3Ids[0] === q.id) { top1++; }
+  if (top3Ids.includes(q.id)) { top3++; } else { misses.push({ id: q.id, type: q.type_name }); }
+}
+const matchAvg = sumMatch / pickOcr.length;
+const totalAvg = (performance.now() - t0) / pickOcr.length;
+check("模拟 OCR 30 题 Top1 准确率 >= 90%", top1 >= 27, top1 + "/30");
+check("模拟 OCR 30 题 Top3 准确率 >= 97%", top3 >= 29, top3 + "/30");
+check("匹配耗时 < 20ms", matchAvg < 20, matchAvg.toFixed(2) + "ms");
+check("识别+匹配单题总耗时 < 100ms（匹配侧）", totalAvg < 100, totalAvg.toFixed(2) + "ms");
+console.log("  [INFO] Top1=" + top1 + "/30 (" + (top1 / 30 * 100).toFixed(0) + "%)  Top3=" + top3 +
+  "/30 (" + (top3 / 30 * 100).toFixed(1) + "%)  平均匹配 " + matchAvg.toFixed(2) + "ms");
+if (misses.length) {
+  console.log("  [INFO] 未进 Top3 的题:", misses.map(m => m.id + "(" + m.type + ")").join(", "));
+}
+
+/* 手动搜题与 OCR 解耦回归 */
+check("手动搜题回归：变、配 -> 44", MSQ.searchQuestions(sIdx, "变、配").map(x => x.id).join(",") === "44");
+check("手动搜题回归：变配 -> 0", MSQ.searchQuestions(sIdx, "变配").length === 0);
+check("手动搜题回归：工作负人 -> 0", MSQ.searchQuestions(sIdx, "工作负人").length === 0);
+check("OCR 置信度：唯一高分结果 -> confident", MSQ.ocrConfidence([
+  { score: 2000 }, { score: 800 }]).level === "confident");
+check("OCR 置信度：接近分数 -> candidates", MSQ.ocrConfidence([
+  { score: 900 }, { score: 850 }]).level === "candidates");
+check("OCR 置信度：空结果 -> none", MSQ.ocrConfidence([]).level === "none");
+
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {

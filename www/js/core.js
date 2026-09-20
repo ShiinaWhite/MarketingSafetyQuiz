@@ -183,6 +183,155 @@
     return results;
   }
 
+  /* ---------------- 拍照搜题（OCR 匹配，独立于手动搜索） ---------------- */
+
+  /* OCR 文本规范化：NFKC + 小写；标点/符号转为空格（保留词边界供拆短语）；
+     去除行首/词首 A./B./F. 这类识别出的选项标签。只供拍照搜题使用，
+     手动搜索（searchQuestions，原文连续子串、标点敏感）完全不受影响。 */
+  function normalizeOcrText(text) {
+    var s = String(text == null ? "" : text).normalize("NFKC").toLowerCase();
+    s = s.replace(/(^|[^\p{L}\p{N}])[a-f][.、．]\s*/gu, "$1");
+    s = s.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    return s.replace(/\s+/g, " ");
+  }
+
+  /* 拍照搜题索引：预生成 OCR 规范化题干/选项（题库加载后一次性构建）。 */
+  function buildOcrIndex(questions) {
+    return (questions || []).map(function (q) {
+      return {
+        id: q.id,
+        type: q.type,
+        type_name: q.type_name,
+        stem: q.stem,
+        options: q.options,
+        ocrStem: normalizeOcrText(q.stem),
+        ocrOptions: (q.options || []).map(normalizeOcrText)
+      };
+    });
+  }
+
+  function gramCount(s) {
+    var g = {};
+    var n = 0;
+    if (s.length < 2) { if (s) { g[s] = true; n = 1; } return { g: g, n: n }; }
+    for (var i = 0; i < s.length - 1; i++) {
+      var b = s.slice(i, i + 2);
+      if (!g[b]) { g[b] = true; n++; }
+    }
+    return { g: g, n: n };
+  }
+
+  /* 查询 bigram 在目标中的包含率（容忍 OCR 少量错字/漏字）。
+     可传入预计算的查询 grams（同一查询对 392 题复用，避免重复构建）。 */
+  function bigramRatio(query, target, precomputed) {
+    var qg = precomputed || gramCount(query);
+    if (!qg.n) { return 0; }
+    var tg = gramCount(target).g;
+    var hit = 0;
+    for (var b in qg.g) { if (tg[b]) { hit++; } }
+    return hit / qg.n;
+  }
+
+  /* 在 phrase 中找最长的 8~20 字连续窗口，使其完整出现在 target 中（层1核心）。
+     先用 bigram 粗筛跳过明显不相关的 phrase，避免全量窗口扫描。 */
+  function longestRunIn(phrase, target) {
+    if (phrase.length < 8) { return target.indexOf(phrase) >= 0 ? phrase.length : 0; }
+    if (bigramRatio(phrase, target) < 0.35) { return 0; }
+    var maxLen = Math.min(20, phrase.length);
+    for (var len = maxLen; len >= 8; len--) {
+      for (var start = 0; start + len <= phrase.length; start++) {
+        if (target.indexOf(phrase.substr(start, len)) >= 0) { return len; }
+      }
+    }
+    return 0;
+  }
+
+  /* OCR 匹配（与手动搜索完全分离）。
+     层1：较长连续片段直接命中题干（8~20 字，越长分越高）
+     层2：多个 OCR 短语共同命中同一题（短语覆盖计数）
+     层3：最长短语的 bigram 包含率容错（OCR 错字）
+     辅助：选项低权重加分，避免选项常见词反超题干命中。 */
+  function searchQuestionsByOcr(ocrIndex, ocrText) {
+    var norm = normalizeOcrText(ocrText);
+    if (!norm) { return []; }
+    var seen = {};
+    var phrases = [];
+    norm.split(" ").forEach(function (p) {
+      if (p.length >= 4 && !seen[p]) { seen[p] = true; phrases.push(p); }
+    });
+    if (!phrases.length) { return []; }
+    phrases.sort(function (a, b) { return b.length - a.length; });
+    var longest = phrases[0];
+    var longestGrams = gramCount(longest);
+
+    /* IDF：套话短语（如"根据营销安规规定"，几乎每题都有）判别力低，
+       罕见短语命中权重高。df 在本次查询内统计。 */
+    var N = ocrIndex.length;
+    var idf = phrases.map(function (p) {
+      var df = 0;
+      for (var d = 0; d < N; d++) {
+        if (ocrIndex[d].ocrStem.indexOf(p) >= 0) { df++; }
+      }
+      return Math.max(0.5, Math.log((N + 1) / (df + 1)) * 2);
+    });
+
+    var results = [];
+    for (var i = 0; i < ocrIndex.length; i++) {
+      var it = ocrIndex[i];
+      var bestRun = 0, bestRunIdf = 0, fullHitIdf = 0, weightedHits = 0, optHits = 0;
+      for (var pi = 0; pi < phrases.length; pi++) {
+        var p = phrases[pi];
+        if (it.ocrStem.indexOf(p) >= 0) {
+          weightedHits += idf[pi];
+          fullHitIdf += idf[pi];
+          if (p.length > bestRun) { bestRun = p.length; bestRunIdf = idf[pi]; }
+          continue;
+        }
+        var run = longestRunIn(p, it.ocrStem);
+        if (run / p.length >= 0.6) { weightedHits += idf[pi] * 0.5; }
+        if (run > bestRun) { bestRun = run; bestRunIdf = idf[pi]; }
+        for (var oi = 0; oi < it.ocrOptions.length; oi++) {
+          if (it.ocrOptions[oi].indexOf(p) >= 0) { optHits += idf[pi] * 0.5; break; }
+        }
+      }
+      /* 稀有长连续段是主判别力：run 同时乘自身 IDF；
+         完整短语命中的 IDF 单独加分（真源通常完整包含多个短语）。 */
+      var sim = 0;
+      if (bestRun >= 6 || weightedHits > 0 || optHits > 0) {
+        var ratio = bigramRatio(longest, it.ocrStem, longestGrams);
+        if (ratio >= 0.55) { sim = ratio; }
+      }
+      var score = Math.round(bestRun * (100 + bestRunIdf * 10))
+        + Math.round(fullHitIdf * 20) + Math.round(weightedHits * 10)
+        + Math.round(bestRun / Math.max(it.ocrStem.length, 1) * 400)
+        + Math.round(sim * 300) + Math.round(optHits * 30);
+      if (score > 0) {
+        results.push({ id: it.id, type: it.type, type_name: it.type_name,
+          stem: it.stem, options: it.options, score: score,
+          bestRun: bestRun, phraseHits: Math.round(weightedHits * 10) / 10,
+          sim: sim, optHits: Math.round(optHits * 10) / 10 });
+      }
+    }
+    results.sort(function (a, b) {
+      return b.score - a.score || a.stem.length - b.stem.length || a.id - b.id;
+    });
+    return results;
+  }
+
+  /* 置信度：不要把低分结果冒充确定答案。
+     非常确定 = Top1 分数足够高且明显领先 Top2；否则给出候选列表。 */
+  function ocrConfidence(matches) {
+    if (!matches || !matches.length) { return { level: "none", matches: [] }; }
+    var t1 = matches[0];
+    if (matches.length === 1) {
+      return { level: t1.score >= 60 ? "confident" : "candidates", matches: matches };
+    }
+    var t2 = matches[1];
+    var lead = t2.score > 0 ? t1.score / t2.score : 2;
+    var ok = t1.score >= 60 && lead >= 1.25;
+    return { level: ok ? "confident" : "candidates", matches: matches };
+  }
+
   return {
     LETTERS: LETTERS, TYPE_ORDER: TYPE_ORDER, TYPE_NAMES: TYPE_NAMES,
     DEFAULT_EXAM_CONFIG: DEFAULT_EXAM_CONFIG,
@@ -192,6 +341,8 @@
     shuffleQuestionOptions: shuffleQuestionOptions, parseJumpTarget: parseJumpTarget,
     resolveSwipe: resolveSwipe,
     buildSearchIndex: buildSearchIndex, searchQuestions: searchQuestions,
+    normalizeOcrText: normalizeOcrText, buildOcrIndex: buildOcrIndex,
+    searchQuestionsByOcr: searchQuestionsByOcr, ocrConfidence: ocrConfidence,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

@@ -186,6 +186,15 @@ mark { background: #ffe58f; padding: 0 1px; border-radius: 2px; }
 }
 .search-entry:active { background: #e3edf8; }
 
+/* 拍照搜题 */
+.search-bar-wrap { display: flex; gap: 10px; align-items: center; }
+.photo-btn {
+  flex: 0 0 auto; width: 48px; height: 46px; font-size: 20px;
+  border: 2px solid #c9d2dd; border-radius: 10px; background: #fff;
+}
+.photo-btn:active { background: #e3edf8; }
+.photo-take { width: 100%; min-height: 64px; font-size: 18px; margin-bottom: 14px; }
+
 /* ---------- 成绩 / 错题回顾 ---------- */
 .pad { flex: 1; padding: 16px 14px 24px; overflow-y: auto; }
 .score-big { text-align: center; font-size: 44px; font-weight: 700; color: #1565c0; margin: 18px 0 6px; }

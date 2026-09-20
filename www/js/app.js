@@ -221,7 +221,7 @@
 
   /* ---------------- 主菜单 ---------------- */
   function renderMenu() {
-    var total = bank.questions.length;
+        var total = bank.questions.length;
     var t = Store.totals();
     var acc = t.a ? (t.c / t.a * 100).toFixed(1) + "%" : "—";
     var cfg = examConfig();
@@ -869,7 +869,12 @@
 
   /* 搜题列表返回 → 首页（关键词/结果在 DOM 中自然保留，下次进入仍在） */
   function handleSearchBack() {
-    renderMenu();
+        renderMenu();
+  }
+
+  /* 拍照搜题返回 → 搜题列表 */
+  function handlePhotoBack() {
+        show("view-search");
   }
 
   /* 搜题详情返回 → 搜题列表（不重建页面，关键词/结果/滚动位置保留） */
@@ -884,6 +889,7 @@
     if (Modal.isOpen()) { Modal.close(); return; }
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
+      case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
       case "view-result": E = null; renderMenu(); return;
@@ -901,6 +907,154 @@
     if (App && typeof App.addListener === "function") {
       App.addListener("backButton", function () { handleBack(); });
     }
+  }
+
+  /* ---------------- 拍照搜题（本地相机 + 本地 OCR + 本地匹配，零上传） ---------------- */
+  var photoIndex = null;
+
+  function getPlugin(name) {
+    return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
+  }
+
+  function setPhotoStatus(text) {
+    var el = $("photo-status");
+    if (el) { el.textContent = text; el.classList.remove("hidden"); }
+  }
+
+  function openPhotoSearch() {
+    show("view-photo");
+    var st = $("photo-status");
+    if (st) {
+      st.textContent = "尽量只拍一道题，并保证题干清晰完整";
+      st.classList.remove("hidden");
+    }
+    $("photo-preview").classList.add("hidden");
+    $("photo-results").innerHTML = "";
+  }
+
+  function renderPhotoResults(ocrText, matches, timing) {
+    var box = $("photo-results");
+    box.innerHTML = "";
+    var conf = MSQ.ocrConfidence(matches);
+    var head = document.createElement("div");
+    head.className = "search-count";
+    if (conf.level === "confident") {
+      head.textContent = "最佳匹配：第" + matches[0].id + " 题" +
+        (timing ? "（识别 " + timing.ocrMs + "ms · 匹配 " + timing.matchMs + "ms）" : "");
+    } else if (conf.level === "candidates") {
+      head.textContent = "可能是以下题目（识别 " + (timing ? timing.ocrMs + "ms" : "—") +
+        " · 匹配 " + (timing ? timing.matchMs + "ms" : "—") + "）";
+    } else {
+      head.textContent = "没有找到可靠匹配，请重拍或手动输入关键词";
+    }
+    box.appendChild(head);
+    // OCR 识别文字预览（默认折叠，区分"识别错"与"匹配错"）
+    var pv = document.createElement("button");
+    pv.type = "button";
+    pv.className = "explain-btn";
+    pv.textContent = "查看识别文字 ▾";
+    var pvBody = document.createElement("div");
+    pvBody.className = "explain-body hidden";
+    var pvSec = document.createElement("div");
+    pvSec.className = "explain-sec";
+    var pvText = document.createElement("p");
+    pvText.className = "explain-text";
+    pvText.textContent = ocrText || "（无）";
+    pvSec.appendChild(pvText);
+    pvBody.appendChild(pvSec);
+    pv.addEventListener("click", function () {
+      var open = pvBody.classList.toggle("hidden") === false;
+      pv.textContent = open ? "收起识别文字 ▴" : "查看识别文字 ▾";
+    });
+    box.appendChild(pv);
+    box.appendChild(pvBody);
+    // 结果卡片：非常确定只给 1 条；否则 Top 3~5
+    var limit = conf.level === "confident" ? 1 : Math.min(5, matches.length);
+    matches.slice(0, limit).forEach(function (m, idx) {
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "search-item";
+      var typeEl = document.createElement("div");
+      typeEl.className = "s-type";
+      typeEl.textContent = (conf.level === "confident" ? "最佳匹配" : "候选 " + (idx + 1)) +
+        " ｜ " + m.type_name + " ｜ 序号 " + m.id;
+      item.appendChild(typeEl);
+      var stemEl = document.createElement("div");
+      stemEl.className = "s-stem";
+      stemEl.textContent = m.stem;
+      item.appendChild(stemEl);
+      item.addEventListener("click", function () { openSearchDetail(m.id); });
+      box.appendChild(item);
+    });
+  }
+
+  async function startPhotoSearch() {
+    var Camera = getPlugin("Camera");
+    var Ocr = getPlugin("Ocr");
+    if (!Camera || !Ocr) {
+      setPhotoStatus("拍照搜题需要在 Android 应用内使用（当前环境无相机/OCR）");
+      return;
+    }
+    setPhotoStatus("正在打开相机…");
+    var photo;
+    try {
+      photo = await Camera.getPhoto({
+        quality: 70,
+        width: 1600,
+        resultType: "DataUrl",
+        source: "Camera",
+        saveToGallery: false,
+        allowEditing: false
+      });
+    } catch (e) {
+      var msg = String((e && e.message) || e);
+      setPhotoStatus(/permission|denied/i.test(msg)
+        ? "无法使用相机，请授予相机权限后重试"
+        : "未拍摄照片（" + msg.slice(0, 40) + "）");
+      return;
+    }
+    setPhotoStatus("正在识别文字…");
+    var totalStart = performance.now();
+    var ocrMs = 0;
+    var text = "";
+    try {
+      var b64 = String(photo.dataUrl || "").split(",")[1] || "";
+      var res = await Ocr.recognizeText({ base64: b64 });
+      text = (res && res.text) || "";
+      ocrMs = (res && res.ms) || 0;
+    } catch (e) {
+      setPhotoStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
+      return;
+    }
+    if (!text.trim()) {
+      setPhotoStatus("未识别到清晰文字，请重新拍摄");
+      return;
+    }
+    var m0 = performance.now();
+    var matches = MSQ.searchQuestionsByOcr(photoIndex, text);
+    var matchMs = Math.round(performance.now() - m0);
+    if (!matches.length) {
+      setPhotoStatus("没有找到可靠匹配，请重拍或手动输入关键词");
+      var pv = $("photo-preview");
+      if (pv) {
+        pv.innerHTML = "";
+        var btn = document.createElement("button");
+        btn.type = "button"; btn.className = "explain-btn"; btn.textContent = "查看识别文字 ▾";
+        var bd = document.createElement("div"); bd.className = "explain-body hidden";
+        var sc = document.createElement("div"); sc.className = "explain-sec";
+        var tx = document.createElement("p"); tx.className = "explain-text"; tx.textContent = text;
+        sc.appendChild(tx); bd.appendChild(sc); pv.appendChild(btn); pv.appendChild(bd);
+        btn.addEventListener("click", function () {
+          var open = bd.classList.toggle("hidden") === false;
+          btn.textContent = open ? "收起识别文字 ▴" : "查看识别文字 ▾";
+        });
+        pv.classList.remove("hidden");
+      }
+      return;
+    }
+    setPhotoStatus("识别完成（全程本地，图片不保存不上传）");
+    renderPhotoResults(text, matches, { ocrMs: ocrMs, matchMs: matchMs,
+      totalMs: Math.round(performance.now() - totalStart) });
   }
 
   /* ---------------- 清除记录 ---------------- */
@@ -993,6 +1147,16 @@
     // 搜题
     $("btn-search-back").addEventListener("click", handleSearchBack);
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
+    $("btn-photo-search").addEventListener("click", function () {
+      if (!getPlugin("Camera") || !getPlugin("Ocr")) {
+        show("view-photo");
+        setPhotoStatus("拍照搜题需要在 Android 应用内使用（当前环境无相机/OCR）");
+        return;
+      }
+      startPhotoSearch();
+    });
+    $("btn-take-photo").addEventListener("click", startPhotoSearch);
+    $("btn-photo-back").addEventListener("click", handlePhotoBack);
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
@@ -1017,6 +1181,7 @@
     bank = data;
     byType = MSQ.indexByType(bank.questions);
     searchIndex = MSQ.buildSearchIndex(bank.questions);
+    photoIndex = MSQ.buildOcrIndex(bank.questions);
     bindEvents();
     renderMenu();
     registerSW();
