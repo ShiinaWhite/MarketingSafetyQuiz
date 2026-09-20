@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>render</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  /* 截图专用：只渲染考试页主体，去掉控制面板与页面外边距，方便按元素尺寸精确截取 */
+  body { background: #fff; }
+  #shot-wrap { padding: 0; margin: 0; display: inline-block; }
+  #exam { box-shadow: none; border-radius: 0; margin: 0; }
+</style>
+</head>
+<body>
+<div id="shot-wrap"><div id="exam" class="exam"></div></div>
+<script src="../bench-core.js"></script>
+<script>
+/* render.html —— 基准测试的截图渲染页（harness 代码，不属于 App）。
+   与 testbench/index.html 使用同一套 CSS 与同一份 bench-core 数据，
+   只是去掉控制面板，保证截出来的就是考试页主体。
+   就绪信号：window.__ready = true（布局稳定后置位）。 */
+(function () {
+  "use strict";
+  var params = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+    if (!kv) { return; }
+    var i = kv.indexOf("=");
+    var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+    params[k] = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1));
+  });
+
+  var num = function (v, d) { var n = parseInt(v, 10); return isNaN(n) ? d : n; };
+  var DISPLAY = {
+    fontSize: params.fontSize || "md", lineHeight: params.lineHeight || "normal",
+    pageWidth: params.pageWidth || "normal", spacing: params.spacing || "normal",
+    indent: params.indent !== "0", headerStyle: params.headerStyle || "standard",
+    zoom: num(params.zoom, 100), noise: params.noise === "1"
+  };
+
+  fetch(params.source === "private" ? "../private_questions.json" : "../mock_questions.json", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
+    .then(function (raw) {
+      var data = Bench.normalizeQuestions(raw);
+      var page = Bench.buildPage({
+        data: data,
+        seed: num(params.seed, 1),
+        type: params.type || "single",
+        count: num(params.count, 5),
+        startNumber: num(params.start, 1),
+        mode: params.mode || "normal",
+        splitAt: params.splitAt ? num(params.splitAt, null) : null,
+        pool: params.pool || "all"
+      });
+      render(page, DISPLAY);
+      window.__page = page;
+      window.__size = measure();
+      /* 两帧之后再置就绪位，确保字体与布局已稳定 */
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { window.__ready = true; });
+      });
+    })
+    .catch(function (e) {
+      window.__error = String(e && e.message || e);
+      window.__ready = true;
+    });
+
+  function measure() {
+    var el = document.getElementById("exam");
+    var r = el.getBoundingClientRect();
+    return { width: Math.ceil(r.width), height: Math.ceil(r.height) };
+  }
+
+  /* 与 testbench/app.js 的 renderExam 保持同样的 DOM 结构与类名 */
+  function render(page, display) {
+    var exam = document.getElementById("exam");
+    exam.className = "exam fs-" + display.fontSize + " lh-" + display.lineHeight +
+      " sp-" + display.spacing + " pw-" + display.pageWidth;
+    exam.style.zoom = (display.zoom || 100) + "%";
+    var head = document.createElement("div");
+    head.className = "exam-head";
+    var title = document.createElement("div");
+    title.className = "exam-title";
+    title.textContent = "2026 年营销安规仿真考试（Test Bench）";
+    var meta = document.createElement("div");
+    meta.className = "exam-meta";
+    [["题型", page.sections.length > 1 ? page.sections.map(function (s) { return s.type_name; }).join(" + ")
+      : Bench.TYPE_NAMES[page.type]], ["页码", "第 1 / 1 页"], ["时间", "剩余时间 58:32"]].forEach(function (kv) {
+      var s = document.createElement("span");
+      s.textContent = kv[0] + "：" + kv[1];
+      meta.appendChild(s);
+    });
+    head.appendChild(title); head.appendChild(meta);
+    exam.appendChild(head);
+    if (display.noise) {
+      var noiseTop = document.createElement("div");
+      noiseTop.className = "exam-noise";
+      noiseTop.textContent = "考生须知：本场考试为闭卷考试，请独立作答；考试过程中如遇设备异常，请举手示意监考人员。";
+      exam.appendChild(noiseTop);
+    }
+    var body = document.createElement("div");
+    body.className = "exam-body";
+    var secIdx = 0;
+    page.questions.forEach(function (q, i) {
+      var sec = page.sections[secIdx];
+      if (sec && sec.firstIndex === i) {
+        var h = document.createElement("h3");
+        h.className = "section-title " + display.headerStyle;
+        h.textContent = sec.title;
+        body.appendChild(h);
+        secIdx++;
+      }
+      var wrap = document.createElement("div");
+      wrap.className = "q";
+      var stem = document.createElement("p");
+      stem.className = "q-stem";
+      var no = document.createElement("span");
+      no.className = "q-no";
+      no.textContent = q.screenNumber + ".";
+      stem.appendChild(no);
+      stem.appendChild(document.createTextNode(" " + q.stem));
+      wrap.appendChild(stem);
+      q.options.forEach(function (opt, oi) {
+        var p = document.createElement("p");
+        p.className = "q-opt" + (display.indent ? " indent" : "");
+        p.textContent = Bench.LETTERS[oi] + ". " + opt;
+        wrap.appendChild(p);
+      });
+      body.appendChild(wrap);
+    });
+    exam.appendChild(body);
+    var foot = document.createElement("div");
+    foot.className = "exam-foot";
+    [["上一页", "navbtn"], ["1 / 1", ""], ["下一页", "navbtn"]].forEach(function (kv) {
+      var el = kv[1] ? document.createElement("button") : document.createElement("span");
+      if (kv[1]) { el.className = kv[1]; el.type = "button"; }
+      el.textContent = kv[0];
+      foot.appendChild(el);
+    });
+    var tip = document.createElement("span");
+    tip.className = "exam-tip";
+    tip.textContent = "答题完毕后请点击交卷，交卷后不可修改";
+    foot.appendChild(tip);
+    exam.appendChild(foot);
+  }
+})();
+</script>
+</body>
+</html>

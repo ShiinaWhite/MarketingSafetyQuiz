@@ -121,8 +121,9 @@
     return tagged.length ? tagged : all;
   }
 
-  /* 确定性抽题：洗牌后取 n 个；题库不够时循环取，避免同页相邻重复 */
-  function takeFrom(pool, n, rand) {
+  /* 确定性抽题：洗牌后取 n 个；题库不够时循环取，避免同页相邻重复。
+     mustInclude 里的题目会先放进本页（用于 392 题全覆盖补齐），其余名额随机补足。 */
+  function takeFrom(pool, n, rand, mustInclude) {
     var arr = pool.slice();
     for (var i = arr.length - 1; i > 0; i--) {
       var j = Math.floor(rand() * (i + 1));
@@ -130,8 +131,23 @@
     }
     var out = [];
     if (!arr.length) { return out; }
-    for (var k = 0; k < n; k++) { out.push(arr[k % arr.length]); }
-    return out;
+    if (mustInclude && mustInclude.length) {
+      var want = {};
+      mustInclude.forEach(function (id) { want[String(id)] = true; });
+      arr.forEach(function (q) {
+        if (want[String(q.id)] && out.length < n && out.indexOf(q) < 0) { out.push(q); }
+      });
+      /* 强制题也按 seed 稳定排序，保证同 seed 可复现 */
+      out.sort(function (a, b) { return String(a.id) < String(b.id) ? -1 : 1; });
+    }
+    var k = 0;
+    while (out.length < n) {
+      var cand = arr[k % arr.length];
+      if (out.indexOf(cand) < 0 || arr.length < n) { out.push(cand); }
+      k++;
+      if (k > arr.length * 3) { break; }
+    }
+    return out.slice(0, n);
   }
 
   /* 生成一页：题目 + 大块结构 + Ground Truth（三者同源，保证一致） */
@@ -154,7 +170,8 @@
       if (pool !== "all" && !data.filter(function (q) { return q.type === sec.type && q.tag === pool; }).length) {
         usedFallback = true;
       }
-      var picked = takeFrom(p, sec.count, rand);
+      var must = (s.mustInclude && s.mustInclude[sec.type]) || null;
+      var picked = takeFrom(p, sec.count, rand, must);
       var firstIndex = questions.length;
       picked.forEach(function (q) {
         questions.push({
