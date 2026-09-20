@@ -19,6 +19,16 @@ html, body {
 button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
 
 /* ---------- 主菜单 ---------- */
+/* 首页纵向视觉平衡：用 flex 剩余空间整体居中（min-height 容器随内容增长，
+   矮屏手机内容超高时容器自动变高、可正常滚动，不会裁切顶部）。
+   底部留白大于顶部（含安全区），使视觉中心略偏上而非绝对居中。 */
+#view-menu {
+  min-height: 100vh;
+  min-height: 100dvh;
+  justify-content: center;
+  padding-top: 8px;
+  padding-bottom: calc(56px + env(safe-area-inset-bottom));
+}
 .menu-head { padding: 28px 16px 6px; text-align: center; }
 .menu-head h1 { margin: 0 0 8px; font-size: 26px; color: #1565c0; }
 .sub { margin: 4px 0; font-size: 14px; color: #444; }
