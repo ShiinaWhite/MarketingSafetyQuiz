@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Batch OCR Test Bench · 仿真考试页</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="layout">
+  <!-- ===== 测试控制面板 ===== -->
+  <aside id="panel">
+    <h1>Batch OCR Test Bench</h1>
+    <p class="hint">仿真考试页 → 手机拍屏 → App 整页识别 → 对照 Ground Truth。<br>
+       纯测试工具，不参与 App 打包。</p>
+
+    <section class="grp">
+      <h2>基准</h2>
+      <label>固定基准
+        <select id="c-benchmark"></select>
+      </label>
+      <label>数据源
+        <select id="c-source">
+          <option value="mock">mock（公开模拟题）</option>
+          <option value="private" id="opt-private" disabled>private（本机真实题库）</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="grp">
+      <h2>页面内容</h2>
+      <label>当前题型
+        <select id="c-type">
+          <option value="single">单选</option>
+          <option value="multi">多选</option>
+          <option value="judge">判断</option>
+        </select>
+      </label>
+      <label>每页题数
+        <select id="c-count">
+          <option>3</option><option>5</option><option>8</option><option>10</option><option>15</option>
+        </select>
+      </label>
+      <label>页面模式
+        <select id="c-mode">
+          <option value="normal">普通页（单一题型）</option>
+          <option value="single-multi">单选 → 多选 跨块</option>
+          <option value="multi-judge">多选 → 判断 跨块</option>
+        </select>
+      </label>
+      <label id="l-split">跨块切分点（前 N 题为上一大块）
+        <input id="c-splitAt" type="number" min="1" max="19" value="4">
+      </label>
+      <label>起始题号
+        <input id="c-startNumber" type="number" min="1" max="999" value="1">
+      </label>
+      <label>随机种子（同 seed = 同一页）
+        <input id="c-seed" type="number" min="0" max="2147483647" value="20260920">
+      </label>
+      <label>题目池
+        <select id="c-pool">
+          <option value="all">全部</option>
+          <option value="long-stem">长题干</option>
+          <option value="long-option">长选项</option>
+        </select>
+      </label>
+      <button id="btn-regen" class="primary">重新生成页面</button>
+    </section>
+
+    <section class="grp">
+      <h2>显示 / 视觉压力</h2>
+      <label>字号
+        <select id="d-fontSize">
+          <option value="sm">小</option><option value="md">中</option><option value="lg">大</option>
+        </select>
+      </label>
+      <label>行距
+        <select id="d-lineHeight">
+          <option value="tight">紧</option><option value="normal">正常</option><option value="loose">松</option>
+        </select>
+      </label>
+      <label>页面宽度
+        <select id="d-pageWidth">
+          <option value="narrow">窄</option><option value="normal">正常</option><option value="wide">宽</option>
+        </select>
+      </label>
+      <label>题目间距
+        <select id="d-spacing">
+          <option value="tight">紧</option><option value="normal">正常</option><option value="loose">松</option>
+        </select>
+      </label>
+      <label>大块标题
+        <select id="d-headerStyle">
+          <option value="standard">标准</option><option value="small">小字号</option><option value="bold">加粗</option>
+        </select>
+      </label>
+      <label>页面缩放
+        <select id="d-zoom">
+          <option value="90">90%</option><option value="100" selected>100%</option>
+          <option value="110">110%</option><option value="125">125%</option>
+        </select>
+      </label>
+      <label class="chk"><input id="d-indent" type="checkbox" checked> 选项缩进</label>
+      <label class="chk"><input id="d-noise" type="checkbox"> 页面导航干扰文字</label>
+    </section>
+
+    <section class="grp">
+      <h2>Ground Truth</h2>
+      <button id="btn-gt" class="primary">显示标准答案</button>
+      <button id="btn-copy">复制 Ground Truth JSON</button>
+      <button id="btn-download">下载 Ground Truth JSON</button>
+      <p class="hint" id="copy-msg"></p>
+    </section>
+
+    <p class="hint" id="status"></p>
+  </aside>
+
+  <!-- ===== 仿真考试页面（会被手机拍屏的部分） ===== -->
+  <main id="stage">
+    <div id="exam" class="exam">
+      <div class="exam-head">
+        <div class="exam-title">2026 年营销安规仿真考试（Test Bench）</div>
+        <div class="exam-meta">
+          <span id="exam-type">题型：单选题</span>
+          <span id="exam-page">第 1 / 1 页</span>
+          <span id="exam-time">剩余时间 58:32</span>
+        </div>
+      </div>
+      <div id="exam-noise-top" class="exam-noise hidden">
+        考生须知：本场考试为闭卷考试，请独立作答；考试过程中如遇设备异常，请举手示意监考人员。
+      </div>
+      <div id="exam-body" class="exam-body"></div>
+      <div class="exam-foot">
+        <button type="button" class="navbtn">上一页</button>
+        <span id="exam-pager">1 / 1</span>
+        <button type="button" class="navbtn">下一页</button>
+        <span class="exam-tip">答题完毕后请点击交卷，交卷后不可修改</span>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ===== Ground Truth 面板（默认隐藏，拍屏前务必关闭） ===== -->
+<div id="gt-panel" class="gt hidden">
+  <div class="gt-head">
+    <strong>当前页 Ground Truth</strong>
+    <span class="gt-warn">拍屏前请关闭本面板</span>
+    <button id="btn-gt-close">关闭</button>
+  </div>
+  <div class="gt-body">
+    <table id="gt-table"></table>
+    <details>
+      <summary>Ground Truth JSON</summary>
+      <textarea id="gt-json" readonly spellcheck="false"></textarea>
+    </details>
+  </div>
+</div>
+
+<script src="bench-core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

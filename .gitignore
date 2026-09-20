@@ -40,3 +40,6 @@ _local/
 release/
 *.zip
 *.log
+
+# ---- Batch OCR Test Bench：本机真实题库测试源（禁止提交） ----
+testbench/private_questions.json

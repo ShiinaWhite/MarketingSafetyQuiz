@@ -1,0 +1,89 @@
+/* style.css —— Batch OCR Test Bench。清爽为主：左边控制面板，右边仿真考试页。
+   无框架、无联网字体、无动画。 */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #eef1f5; color: #1a1a1a;
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+.hidden { display: none !important; }
+
+#layout { display: flex; align-items: flex-start; gap: 16px; padding: 16px; }
+@media (max-width: 900px) { #layout { flex-direction: column; } }
+
+/* ---------- 控制面板 ---------- */
+#panel { flex: 0 0 300px; width: 300px; background: #fff; border: 1px solid #dbe1ea;
+  border-radius: 10px; padding: 14px; }
+@media (max-width: 900px) { #panel { width: 100%; flex: 1 1 auto; } }
+#panel h1 { font-size: 17px; margin: 0 0 6px; }
+#panel .hint { font-size: 12px; color: #77808c; line-height: 1.6; margin: 6px 0; }
+.grp { border-top: 1px solid #eceff4; padding: 10px 0 6px; }
+.grp h2 { font-size: 13px; color: #1565c0; margin: 0 0 8px; }
+.grp label { display: block; font-size: 12.5px; color: #4a5563; margin-bottom: 8px; }
+.grp select, .grp input[type="number"] { width: 100%; margin-top: 3px; padding: 5px 6px;
+  font-size: 13px; font-family: inherit; border: 1px solid #ccd4e0; border-radius: 6px; background: #fff; }
+.grp label.chk { display: flex; align-items: center; gap: 6px; }
+.grp label.chk input { margin: 0; }
+.grp button { width: 100%; margin-top: 6px; padding: 7px 8px; font-size: 13px; font-family: inherit;
+  border: 1px solid #ccd4e0; border-radius: 7px; background: #f7f9fc; color: #1a1a1a; cursor: pointer; }
+.grp button.primary { background: #1565c0; border-color: #1565c0; color: #fff; font-weight: 700; }
+.grp button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ---------- 仿真考试页 ---------- */
+#stage { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; }
+.exam { background: #fff; border: 1px solid #cfd7e3; border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(20, 40, 80, .07); width: 720px; max-width: 100%;
+  display: flex; flex-direction: column; }
+.exam-head { border-bottom: 2px solid #1565c0; padding: 12px 22px; }
+.exam-title { font-size: 18px; font-weight: 700; text-align: center; }
+.exam-meta { display: flex; justify-content: space-between; font-size: 12.5px; color: #5a6472; margin-top: 6px; }
+.exam-noise { font-size: 12px; color: #6b7480; background: #f6f8fb;
+  border-bottom: 1px solid #e6ebf3; padding: 6px 22px; line-height: 1.6; }
+.exam-body { padding: 18px 22px 6px; }
+.exam-foot { border-top: 1px solid #e6ebf3; padding: 10px 22px; display: flex;
+  align-items: center; gap: 12px; font-size: 12.5px; color: #5a6472; }
+.exam-foot .navbtn { padding: 5px 14px; font-size: 13px; font-family: inherit;
+  border: 1px solid #ccd4e0; border-radius: 6px; background: #f7f9fc; cursor: pointer; }
+.exam-tip { margin-left: auto; color: #97a0ad; }
+
+.section-title { margin: 6px 0 14px; }
+.section-title.standard { font-size: 16px; font-weight: 700; }
+.section-title.small { font-size: 12.5px; font-weight: 400; color: #6b7480; }
+.section-title.bold { font-size: 18px; font-weight: 700; border-bottom: 1px solid #cfd7e3; padding-bottom: 4px; }
+
+.q { margin-bottom: 16px; }
+.q-stem { margin: 0 0 4px; }
+.q-no { font-weight: 700; margin-right: 2px; }
+.q-opt { margin: 0; }
+.q-opt.indent { padding-left: 2em; }
+
+/* 视觉压力：字号 / 行距 / 间距 / 缩放 */
+#exam.fs-sm { font-size: 14px; }
+#exam.fs-md { font-size: 17px; }
+#exam.fs-lg { font-size: 21px; }
+#exam.lh-tight .q-stem, #exam.lh-tight .q-opt { line-height: 1.35; }
+#exam.lh-normal .q-stem, #exam.lh-normal .q-opt { line-height: 1.6; }
+#exam.lh-loose .q-stem, #exam.lh-loose .q-opt { line-height: 2.0; }
+#exam.sp-tight .q { margin-bottom: 8px; }
+#exam.sp-normal .q { margin-bottom: 16px; }
+#exam.sp-loose .q { margin-bottom: 28px; }
+.exam.pw-narrow { width: 560px; }
+.exam.pw-normal { width: 720px; }
+.exam.pw-wide { width: 940px; }
+
+/* ---------- Ground Truth 面板 ---------- */
+.gt { position: fixed; right: 16px; top: 16px; width: 460px; max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px); background: #fff; border: 2px solid #c62828; border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(20, 40, 80, .22); display: flex; flex-direction: column; z-index: 50; }
+.gt-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid #f0e2e2; background: #fff5f5; border-radius: 8px 8px 0 0; }
+.gt-head strong { font-size: 14px; }
+.gt-warn { font-size: 12px; color: #c62828; }
+.gt-head button { margin-left: auto; padding: 4px 10px; font-size: 12.5px; font-family: inherit;
+  border: 1px solid #ccd4e0; border-radius: 6px; background: #fff; cursor: pointer; }
+.gt-body { padding: 10px 12px; overflow: auto; }
+#gt-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#gt-table th, #gt-table td { border-bottom: 1px solid #eceff4; padding: 4px 6px; text-align: left; }
+#gt-table th { color: #77808c; font-weight: 400; font-size: 12px; }
+#gt-table td.ans { font-weight: 700; color: #1565c0; font-size: 15px; }
+.gt details { margin-top: 10px; }
+.gt summary { font-size: 12.5px; color: #5a6472; cursor: pointer; }
+#gt-json { width: 100%; height: 180px; margin-top: 6px; font-family: Consolas, Menlo, monospace;
+  font-size: 11.5px; border: 1px solid #ccd4e0; border-radius: 6px; padding: 6px; }
