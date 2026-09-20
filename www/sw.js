@@ -1,7 +1,7 @@
 /* sw.js —— 离线缓存：资源全部本地，无任何外部网络请求。
    策略：network-first（有网时永远取最新资源并更新缓存），断网时回退缓存，
    兼顾「完全离线可用」与「版本升级后不再跑到旧代码」。 */
-const CACHE = "msq-cache-v16";
+const CACHE = "msq-cache-v17";
 const ASSETS = [
   "./",
   "index.html",

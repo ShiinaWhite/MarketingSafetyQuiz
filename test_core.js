@@ -336,6 +336,83 @@ check("同层内 query 占原文比例高者优先（工作票 Top1=12，214 列
   MSQ.searchQuestions(sIdx, "工作票")[0].id === 12
   && MSQ.searchQuestions(sIdx, "工作票")[1].id === 214);
 
+/* ---------- 文字搜题题型筛选 ---------- */
+section("文字搜题题型筛选");
+const FILTERS = ["all", "single", "multi", "judge"];
+const filterIds = (q, t) => MSQ.filterSearchResults(MSQ.searchQuestions(sIdx, q), t).map(x => x.id);
+
+check("filter 是纯函数：all 原样返回（同一数组引用）",
+  (() => { const r = MSQ.searchQuestions(sIdx, "工作票"); return MSQ.filterSearchResults(r, "all") === r; })());
+check("filter 是纯函数：undefined / 未知 type 原样返回",
+  (() => {
+    const r = MSQ.searchQuestions(sIdx, "工作票");
+    return MSQ.filterSearchResults(r, undefined) === r && MSQ.filterSearchResults(r, "xxx") === r;
+  })());
+check("filter 不修改原数组长度", (() => {
+  const r = MSQ.searchQuestions(sIdx, "工作票"); const n = r.length;
+  MSQ.filterSearchResults(r, "single");
+  return r.length === n;
+})());
+
+for (const t of ["single", "multi", "judge"]) {
+  check(`filter(${t}) 结果全部 type === ${t} 且非空`,
+    MSQ.filterSearchResults(MSQ.searchQuestions(sIdx, "工作负责人"), t).every(r => r.type === t)
+    && MSQ.filterSearchResults(MSQ.searchQuestions(sIdx, "工作负责人"), t).length > 0);
+}
+
+check("filter 保持原相关度顺序（是原序列的子序列）", (() => {
+  const all = MSQ.searchQuestions(sIdx, "工作负责人").map(x => x.id);
+  const sub = filterIds("工作负责人", "single");
+  let i = 0;
+  return sub.every(id => { const at = all.indexOf(id, i); if (at < 0) { return false; } i = at + 1; return true; });
+})());
+check("filter 不按题号重排（单选结果并非 id 升序）", (() => {
+  const ids = filterIds("工作票", "single");
+  return ids.length > 1 && ids.some((v, i) => i > 0 && v < ids[i - 1]);
+})());
+
+/* 数量守恒：全部 = 单选 + 多选 + 判断 */
+const sumKw = ["工作负责人", "工作票", "安全", "作业", "电", "视频监控", "二次工作安全措施票", ...PUNCT];
+let sumBad = null;
+for (const q of sumKw) {
+  const r = MSQ.searchQuestions(sIdx, q);
+  const c = MSQ.countSearchResultsByType(r);
+  if (c.all !== r.length || c.all !== c.single + c.multi + c.judge) { sumBad = q; break; }
+  if (FILTERS.slice(1).some(t => MSQ.filterSearchResults(r, t).length !== c[t])) { sumBad = q; break; }
+}
+check(`数量守恒：全部 = 单选+多选+判断（${sumKw.length} 个关键词）`, sumBad === null,
+  sumBad ? "关键词「" + sumBad + "」不一致" : "全部一致");
+check("计数纯函数：空结果 -> 全 0", (() => {
+  const c = MSQ.countSearchResultsByType([]);
+  return c.all === 0 && c.single === 0 && c.multi === 0 && c.judge === 0;
+})());
+check("计数与筛选一致：多选题数量 = filter(multi).length（工作负责人）",
+  MSQ.countSearchResultsByType(MSQ.searchQuestions(sIdx, "工作负责人")).multi
+  === filterIds("工作负责人", "multi").length);
+
+/* 筛选不得污染搜索逻辑（回归固化） */
+check("筛选后搜索回归：变、配 -> 44",
+  MSQ.searchQuestions(sIdx, "变、配").map(x => x.id).join(",") === "44"
+  && (() => {
+    const one = MSQ.searchQuestions(sIdx, "变、配")[0];
+    return MSQ.filterSearchResults([one], one.type).length === 1;
+  })());
+check("筛选后搜索回归：变配 -> 0", MSQ.searchQuestions(sIdx, "变配").length === 0
+  && MSQ.filterSearchResults(MSQ.searchQuestions(sIdx, "变配"), "all").length === 0);
+check("筛选后搜索回归：工作负人 -> 0", MSQ.searchQuestions(sIdx, "工作负人").length === 0
+  && MSQ.filterSearchResults(MSQ.searchQuestions(sIdx, "工作负人"), "single").length === 0);
+check("筛选后搜索回归：视频监控 -> id118 选项命中",
+  MSQ.searchQuestions(sIdx, "视频监控")[0].id === 118
+  && MSQ.countSearchResultsByType(MSQ.searchQuestions(sIdx, "视频监控")).all >= 1);
+
+/* 性能 */
+check("筛选耗时 < 5ms", (() => {
+  const r = MSQ.searchQuestions(sIdx, "工作负责人");
+  const a = performance.now();
+  for (let i = 0; i < 100; i++) { MSQ.filterSearchResults(r, "single"); MSQ.countSearchResultsByType(r); }
+  return (performance.now() - a) / 100 < 5;
+})());
+
 /* 性能 */
 const timeQ = [...PUNCT, "工作负责人", "视频监控", "工作票", "一机一闸一保护", "工作负人"];
 let sw_max = 0, sw_sum = 0, sw_n = 0;

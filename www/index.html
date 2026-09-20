@@ -74,6 +74,12 @@
              enterkeyhint="search" inputmode="search">
       <button id="btn-photo-search" class="photo-btn" type="button">📷</button>
     </div>
+    <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
+      <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
+      <button type="button" class="filter-btn" data-filter="single" aria-pressed="false">单选</button>
+      <button type="button" class="filter-btn" data-filter="multi" aria-pressed="false">多选</button>
+      <button type="button" class="filter-btn" data-filter="judge" aria-pressed="false">判断</button>
+    </div>
     <main id="search-scroll">
       <div id="search-history" class="search-history hidden"></div>
       <div id="search-count" class="search-count hidden"></div>

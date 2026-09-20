@@ -663,6 +663,24 @@
   var searchDebounceTimer = null;
   var HISTORY_KEY = "msq.searchHistory.v1";
   var SEARCH_RENDER_LIMIT = 30;
+  /* 题型筛选：会话内保持（不写 localStorage），App 冷启动回到 all */
+  var searchFilter = "all";
+  var searchInputBlurAt = 0;
+  var SEARCH_FILTER_DEFS = [
+    { key: "all", short: "全部", full: "" },
+    { key: "single", short: "单选", full: "单选题" },
+    { key: "multi", short: "多选", full: "多选题" },
+    { key: "judge", short: "判断", full: "判断题" }
+  ];
+
+  function searchFilterLabel(key, full) {
+    for (var i = 0; i < SEARCH_FILTER_DEFS.length; i++) {
+      if (SEARCH_FILTER_DEFS[i].key === key) {
+        return full ? SEARCH_FILTER_DEFS[i].full : SEARCH_FILTER_DEFS[i].short;
+      }
+    }
+    return "";
+  }
 
   function getHistory() {
     try {
@@ -736,14 +754,33 @@
     if (pos < text.length) { parent.appendChild(document.createTextNode(text.slice(pos))); }
   }
 
+  /* 筛选按钮：有搜索词时带真实数量（全部 12 单选 5 …），无搜索词时只有名称 */
+  function renderFilterBar(counts, hasQuery) {
+    var box = $("search-filters");
+    if (!box) { return; }
+    var btns = box.getElementsByClassName("filter-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var key = btns[i].getAttribute("data-filter");
+      var on = key === searchFilter;
+      btns[i].classList.toggle("active", on);
+      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+      var label = searchFilterLabel(key, false);
+      btns[i].textContent = hasQuery ? label + " " + (counts[key] || 0) : label;
+    }
+  }
+
   function doSearch(raw) {
-    var results = MSQ.searchQuestions(searchIndex, raw);
+    var q = String(raw || "").trim();
+    var all = MSQ.searchQuestions(searchIndex, q);
+    var counts = MSQ.countSearchResultsByType(all);
+    renderFilterBar(counts, q !== "");
+    /* 一次搜索 + 一次过滤：只从有序结果里摘取，不重搜、不重排 */
+    var results = MSQ.filterSearchResults(all, searchFilter);
     var box = $("search-results");
     var countEl = $("search-count");
     var hist = $("search-history");
     box.innerHTML = "";
-    var q = String(raw || "").trim();
-    if (!results.length) {
+    if (!all.length) {
       var hasQuery = q !== "";
       countEl.classList.toggle("hidden", !hasQuery);
       if (hasQuery) {
@@ -753,10 +790,17 @@
       renderHistory();
       return;
     }
+    /* 关键词本身有结果，只是当前题型没有：说清是筛选无结果，不是搜不到 */
+    if (!results.length) {
+      countEl.classList.remove("hidden");
+      countEl.textContent = "当前关键词没有匹配的" + searchFilterLabel(searchFilter, true);
+      if (hist && !hist.classList.contains("hidden")) { hist.classList.add("hidden"); }
+      return;
+    }
     countEl.classList.remove("hidden");
-    countEl.textContent = results.length > SEARCH_RENDER_LIMIT
-      ? "找到 " + results.length + " 道题，显示前 " + SEARCH_RENDER_LIMIT + " 道"
-      : "找到 " + results.length + " 道题";
+    countEl.textContent = "找到 " + results.length + " " +
+      (searchFilter === "all" ? "道题" : "道" + searchFilterLabel(searchFilter, true)) +
+      (results.length > SEARCH_RENDER_LIMIT ? "，显示前 " + SEARCH_RENDER_LIMIT + " 道" : "");
     if (hist && !hist.classList.contains("hidden")) { hist.classList.add("hidden"); }
     results.slice(0, SEARCH_RENDER_LIMIT).forEach(function (r) {
       var item = document.createElement("button");
@@ -781,6 +825,34 @@
         openSearchDetail(r.id);
       });
       box.appendChild(item);
+    });
+  }
+
+  /* 切换题型：立即用当前关键词重渲染（不重新输入、不按搜索键），搜索词与焦点保持不变 */
+  function applyFilter(key) {
+    if (!key || key === searchFilter) { return; }
+    searchFilter = key;
+    doSearch($("search-input").value);
+    var sc = $("search-scroll");
+    if (sc) { sc.scrollTop = 0; }
+    // 触摸端按住按钮会让搜索框失焦（软键盘收起）：刚刚还在输入就把焦点还回去
+    var input = $("search-input");
+    if (input && Date.now() - searchInputBlurAt < 800) {
+      try { input.focus({ preventScroll: true }); }
+      catch (e) { try { input.focus(); } catch (e2) { } }
+    }
+  }
+
+  function initSearchFilters() {
+    var box = $("search-filters");
+    if (!box) { return; }
+    /* 桌面端按下按钮不夺走搜索框焦点 */
+    box.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    box.addEventListener("click", function (e) {
+      var el = e.target;
+      while (el && el !== box && !el.classList.contains("filter-btn")) { el = el.parentNode; }
+      if (!el || el === box) { return; }
+      applyFilter(el.getAttribute("data-filter"));
     });
   }
 
@@ -1176,6 +1248,8 @@
       searchDebounceTimer = setTimeout(function () { doSearch(v); }, 60);
       if (!v.trim()) { renderHistory(); }
     });
+    searchInput.addEventListener("blur", function () { searchInputBlurAt = Date.now(); });
+    initSearchFilters();
     searchInput.addEventListener("keydown", function (e) {
       if (e.key === "Enter") {
         clearTimeout(searchDebounceTimer);

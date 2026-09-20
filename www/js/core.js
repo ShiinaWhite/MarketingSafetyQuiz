@@ -183,6 +183,26 @@
     return results;
   }
 
+  /* 文字搜题题型筛选：在 searchQuestions 已排好序的结果上做一次 Array.filter，
+     只按 type 摘取，不重新搜索、不重新排序，原相关度顺序原样保留。
+     type 为 "all"/空/未知 时原样返回同一数组（不因取值异常把结果清空）。 */
+  function filterSearchResults(results, type) {
+    var list = results || [];
+    if (type !== "single" && type !== "multi" && type !== "judge") { return list; }
+    return list.filter(function (r) { return r.type === type; });
+  }
+
+  /* 按题型统计原始搜索结果数量（筛选按钮上的数字与提示文案共用同一份真实计数）。 */
+  function countSearchResultsByType(results) {
+    var c = { all: 0, single: 0, multi: 0, judge: 0 };
+    var list = results || [];
+    for (var i = 0; i < list.length; i++) {
+      c.all++;
+      if (c[list[i].type] != null) { c[list[i].type]++; }
+    }
+    return c;
+  }
+
   /* ---------------- 拍照搜题（OCR 匹配，独立于手动搜索） ---------------- */
 
   /* OCR 文本规范化：NFKC + 小写；标点/符号转为空格（保留词边界供拆短语）；
@@ -341,6 +361,7 @@
     shuffleQuestionOptions: shuffleQuestionOptions, parseJumpTarget: parseJumpTarget,
     resolveSwipe: resolveSwipe,
     buildSearchIndex: buildSearchIndex, searchQuestions: searchQuestions,
+    filterSearchResults: filterSearchResults, countSearchResultsByType: countSearchResultsByType,
     normalizeOcrText: normalizeOcrText, buildOcrIndex: buildOcrIndex,
     searchQuestionsByOcr: searchQuestionsByOcr, ocrConfidence: ocrConfidence,
     generateExam: generateExam, scoreExam: scoreExam
