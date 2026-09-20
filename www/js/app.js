@@ -824,6 +824,85 @@
     show("view-search-detail");
   }
 
+  /* ---------------- 返回逻辑（页面返回按钮与 Android 系统 Back 共用） ---------------- */
+
+  function getAppPlugin() {
+    return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App) || null;
+  }
+
+  function exitApp() {
+    var App = getAppPlugin();
+    if (App && typeof App.exitApp === "function") { App.exitApp(); }
+    /* 浏览器环境无 App 插件：忽略，不循环 */
+  }
+
+  function currentViewId() {
+    var v = document.querySelector(".view:not(.hidden)");
+    return v ? v.id : "view-menu";
+  }
+
+  /* 模拟考试答题中返回：确认退出（确认后回首页，放弃答卷） */
+  function confirmExitExam() {
+    Modal.confirm("退出考试", "退出将放弃本次答卷，确定吗？", function () { E = null; renderMenu(); });
+  }
+
+  /* 刷题/背题/考试答题页返回（保留现有学习进度保存） */
+  function handleQuizBack() {
+    if (E) {
+      confirmExitExam();
+      return;
+    }
+    savePosition();
+    P = null;
+    renderMenu();
+  }
+
+  /* 错题回顾返回 → 成绩页 */
+  function handleReviewBack() {
+    if (E && E.result) {
+      renderResult();
+      return;
+    }
+    E = null;
+    renderMenu();
+  }
+
+  /* 搜题列表返回 → 首页（关键词/结果在 DOM 中自然保留，下次进入仍在） */
+  function handleSearchBack() {
+    renderMenu();
+  }
+
+  /* 搜题详情返回 → 搜题列表（不重建页面，关键词/结果/滚动位置保留） */
+  function handleSearchDetailBack() {
+    show("view-search");
+  }
+
+  /* 统一返回入口：系统 Back 与各页返回按钮共用同一套分层。
+     Modal 打开时优先关闭弹窗（只取消/关闭，绝不触发确定/删除/交卷）。
+     首页无更上一层：交给 Android 常规行为退出。 */
+  function handleBack() {
+    if (Modal.isOpen()) { Modal.close(); return; }
+    switch (currentViewId()) {
+      case "view-search-detail": handleSearchDetailBack(); return;
+      case "view-search": handleSearchBack(); return;
+      case "view-review": handleReviewBack(); return;
+      case "view-result": E = null; renderMenu(); return;
+      case "view-quiz": handleQuizBack(); return;
+      default: exitApp();
+    }
+  }
+  window.handleBack = handleBack; /* 设备端调试/自动化入口 */
+
+  /* 注册 Android 系统 Back（Capacitor App 插件 backButton）。
+     注意：注册后默认返回行为被接管，首页分支必须显式 exitApp。
+     输入法弹出时，第一次 Back 由 Android 系统消费（仅收起键盘），不会进入本回调。 */
+  function registerSystemBack() {
+    var App = getAppPlugin();
+    if (App && typeof App.addListener === "function") {
+      App.addListener("backButton", function () { handleBack(); });
+    }
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -897,21 +976,13 @@
   }
 
   function bindEvents() {
-    $("btn-back").addEventListener("click", function () {
-      if (E) {
-        Modal.confirm("退出考试", "退出将放弃本次答卷，确定吗？", function () { E = null; renderMenu(); });
-      } else {
-        savePosition(); P = null; renderMenu();
-      }
-    });
+    $("btn-back").addEventListener("click", handleQuizBack);
     $("btn-prev").addEventListener("click", goPrev);
     $("btn-next").addEventListener("click", goNext);
     $("btn-submit").addEventListener("click", submitPractice);
     $("btn-jump").addEventListener("click", openJump);
     $("btn-handin").addEventListener("click", handin);
-    $("btn-review-back").addEventListener("click", function () {
-      if (E && E.result) { renderResult(); } else { E = null; renderMenu(); }
-    });
+    $("btn-review-back").addEventListener("click", handleReviewBack);
     $("btn-settings").addEventListener("click", function () { Modal.settings(); });
     $("btn-clear").addEventListener("click", clearRecords);
     $("explain-toggle").addEventListener("click", function () {
@@ -920,8 +991,8 @@
       applyExplainState();
     });
     // 搜题
-    $("btn-search-back").addEventListener("click", renderMenu);
-    $("btn-detail-back").addEventListener("click", function () { show("view-search"); });
+    $("btn-search-back").addEventListener("click", handleSearchBack);
+    $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
@@ -949,6 +1020,7 @@
     bindEvents();
     renderMenu();
     registerSW();
+    registerSystemBack();
   }).catch(function (err) {
     document.body.innerHTML = "";
     var box = document.createElement("div");
