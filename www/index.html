@@ -63,6 +63,32 @@
     </footer>
   </section>
 
+  <!-- 搜题 -->
+  <section id="view-search" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-search-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">搜题</div>
+    </header>
+    <div class="search-bar-wrap">
+      <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
+             enterkeyhint="search" inputmode="search">
+    </div>
+    <main id="search-scroll">
+      <div id="search-history" class="search-history hidden"></div>
+      <div id="search-count" class="search-count hidden"></div>
+      <div id="search-results"></div>
+    </main>
+  </section>
+
+  <!-- 搜题详情 -->
+  <section id="view-search-detail" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-detail-back" class="backbtn">‹ 搜索</button>
+      <div class="qtitle">题目详情</div>
+    </header>
+    <main id="search-detail-body" class="pad"></main>
+  </section>
+
   <!-- 考试成绩 -->
   <section id="view-result" class="view hidden">
     <header class="quiz-head"><div class="qtitle center">模拟考试成绩</div></header>

@@ -239,6 +239,19 @@
 
     var box = $("menu-buttons");
     box.innerHTML = "";
+    // 搜题入口（独立于刷题模式的常驻功能）
+    if (!$("btn-search-entry")) {
+      var searchWrap = document.createElement("div");
+      searchWrap.className = "search-entry-wrap";
+      var searchBtn = document.createElement("button");
+      searchBtn.type = "button";
+      searchBtn.id = "btn-search-entry";
+      searchBtn.className = "search-entry";
+      searchBtn.textContent = "🔍 搜题";
+      searchBtn.addEventListener("click", openSearch);
+      searchWrap.appendChild(searchBtn);
+      box.parentNode.insertBefore(searchWrap, box);
+    }
     MODE_TITLES && Object.keys(MODE_TITLES).forEach(function (key) {
       var b = document.createElement("button");
       b.textContent = MODE_TITLES[key];
@@ -645,6 +658,209 @@
     });
   }
 
+  /* ---------------- 本地搜题 ---------------- */
+  var searchIndex = null;
+  var searchDebounceTimer = null;
+  var HISTORY_KEY = "msq.searchHistory.v1";
+  var SEARCH_RENDER_LIMIT = 30;
+
+  function getHistory() {
+    try {
+      var h = JSON.parse(localStorage.getItem(HISTORY_KEY));
+      return Array.isArray(h) ? h : [];
+    } catch (e) { return []; }
+  }
+
+  function pushHistory(raw) {
+    var q = String(raw || "").trim();
+    if (!q) { return; }
+    var h = getHistory().filter(function (x) { return x !== q; });
+    h.unshift(q);
+    h = h.slice(0, 10);
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h)); } catch (e) { }
+    renderHistory();
+  }
+
+  function clearHistory() {
+    try { localStorage.removeItem(HISTORY_KEY); } catch (e) { }
+    renderHistory();
+  }
+
+  function renderHistory() {
+    var box = $("search-history");
+    var h = getHistory();
+    if (!box) { return; }
+    box.innerHTML = "";
+    var empty = !$("search-input").value.trim();
+    if (!empty || !h.length) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    var head = document.createElement("div");
+    head.className = "hist-head";
+    var label = document.createElement("span");
+    label.textContent = "最近搜索";
+    var clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.textContent = "清除搜索历史";
+    clearBtn.addEventListener("click", clearHistory);
+    head.appendChild(label); head.appendChild(clearBtn);
+    box.appendChild(head);
+    var chips = document.createElement("div");
+    chips.className = "chips";
+    h.forEach(function (q) {
+      var c = document.createElement("button");
+      c.type = "button"; c.className = "chip"; c.textContent = q;
+      c.addEventListener("click", function () {
+        $("search-input").value = q;
+        doSearch(q);
+        pushHistory(q);
+      });
+      chips.appendChild(c);
+    });
+    box.appendChild(chips);
+  }
+
+  /* 安太高亮：全部用 DOM 文本节点 + <mark>，不拼接用户输入的 innerHTML */
+  function renderHighlighted(parent, text, kws) {
+    var nm = MSQ.normalizeWithMap(text);
+    var ranges = [];
+    kws.forEach(function (kw) {
+      if (!kw) { return; }
+      var from = 0;
+      while (true) {
+        var at = nm.text.indexOf(kw, from);
+        if (at < 0) { break; }
+        ranges.push([nm.map[at], nm.map[at + kw.length - 1] + 1]);
+        from = at + 1;
+      }
+    });
+    ranges.sort(function (a, b) { return a[0] - b[0]; });
+    var merged = [];
+    ranges.forEach(function (r) {
+      var last = merged[merged.length - 1];
+      if (last && r[0] <= last[1]) { last[1] = Math.max(last[1], r[1]); }
+      else { merged.push(r.slice()); }
+    });
+    var pos = 0;
+    merged.forEach(function (r) {
+      if (r[0] > pos) { parent.appendChild(document.createTextNode(text.slice(pos, r[0]))); }
+      var mark = document.createElement("mark");
+      mark.textContent = text.slice(r[0], r[1]);
+      parent.appendChild(mark);
+      pos = r[1];
+    });
+    if (pos < text.length) { parent.appendChild(document.createTextNode(text.slice(pos))); }
+  }
+
+  function queryKeywords(raw) {
+    var kws = String(raw || "").split(/\s+/).map(MSQ.normalizeSearchText)
+      .filter(function (k) { return k; });
+    return kws.length ? kws : [];
+  }
+
+  function doSearch(raw) {
+    var results = MSQ.searchQuestions(searchIndex, raw);
+    var box = $("search-results");
+    var countEl = $("search-count");
+    var hist = $("search-history");
+    box.innerHTML = "";
+    var kws = queryKeywords(raw);
+    if (!results.length) {
+      var hasQuery = String(raw || "").trim() !== "";
+      countEl.classList.toggle("hidden", !hasQuery);
+      if (hasQuery) {
+        countEl.textContent = "未找到相关题目";
+        countEl.classList.remove("hidden");
+      }
+      renderHistory();
+      return;
+    }
+    countEl.classList.remove("hidden");
+    countEl.textContent = results.length > SEARCH_RENDER_LIMIT
+      ? "找到 " + results.length + " 道题，显示前 " + SEARCH_RENDER_LIMIT + " 道"
+      : "找到 " + results.length + " 道题";
+    if (hist && !hist.classList.contains("hidden")) { hist.classList.add("hidden"); }
+    results.slice(0, SEARCH_RENDER_LIMIT).forEach(function (r) {
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "search-item";
+      var typeEl = document.createElement("div");
+      typeEl.className = "s-type";
+      typeEl.textContent = r.type_name;
+      item.appendChild(typeEl);
+      var stemEl = document.createElement("div");
+      stemEl.className = "s-stem";
+      renderHighlighted(stemEl, r.stem, kws);
+      item.appendChild(stemEl);
+      if (r.hitOption) {
+        var optEl = document.createElement("div");
+        optEl.className = "s-opt";
+        optEl.textContent = "命中选项：" + r.hitOption;
+        item.appendChild(optEl);
+      }
+      item.addEventListener("click", function () {
+        pushHistory(raw);
+        openSearchDetail(r.id);
+      });
+      box.appendChild(item);
+    });
+  }
+
+  function openSearch() {
+    show("view-search");
+    renderHistory();
+    setTimeout(function () {
+      try { $("search-input").focus(); } catch (e) { }
+    }, 60);
+  }
+
+  /* 搜题详情：展示题库原始选项顺序（不做选项随机化），直接显示答案与 V2 解析 */
+  function openSearchDetail(id) {
+    var q = null;
+    bank.questions.forEach(function (x) { if (x.id === id) { q = x; } });
+    if (!q) { return; }
+    var body = $("search-detail-body");
+    body.innerHTML = "";
+    var meta = document.createElement("p");
+    meta.className = "type-line";
+    meta.textContent = MSQ.TYPE_NAMES[q.type] + " ｜ 序号 " + q.id;
+    body.appendChild(meta);
+    var stemCard = document.createElement("div");
+    stemCard.className = "stem";
+    stemCard.textContent = q.stem;
+    body.appendChild(stemCard);
+    q.options.forEach(function (opt, i) {
+      var row = document.createElement("div");
+      row.className = "opt" + (q.answer.indexOf(i) >= 0 ? " correct" : " plain");
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = MSQ.LETTERS[i] + ".";
+      row.appendChild(tag);
+      row.appendChild(document.createTextNode(opt));
+      body.appendChild(row);
+    });
+    var ans = document.createElement("div");
+    ans.className = "feedback ok";
+    ans.textContent = "【答案】" + MSQ.answerText(q);
+    body.appendChild(ans);
+    var exp = getExplanation(q.id);
+    if (exp) {
+      [["为什么这么选", exp.reason, "explain-sec"],
+       ["记忆技巧", exp.memory, "explain-sec memory"]].forEach(function (def) {
+        var secEl = document.createElement("div");
+        secEl.className = def[2];
+        var h = document.createElement("div");
+        h.className = "explain-h";
+        h.textContent = def[0];
+        var t = document.createElement("p");
+        t.className = "explain-text";
+        t.textContent = def[1] || "";
+        secEl.appendChild(h); secEl.appendChild(t);
+        body.appendChild(secEl);
+      });
+    }
+    show("view-search-detail");
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -740,6 +956,23 @@
       explainOpen = !explainOpen;
       applyExplainState();
     });
+    // 搜题
+    $("btn-search-back").addEventListener("click", renderMenu);
+    $("btn-detail-back").addEventListener("click", function () { show("view-search"); });
+    var searchInput = $("search-input");
+    searchInput.addEventListener("input", function () {
+      clearTimeout(searchDebounceTimer);
+      var v = searchInput.value;
+      searchDebounceTimer = setTimeout(function () { doSearch(v); }, 60);
+      if (!v.trim()) { renderHistory(); }
+    });
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        clearTimeout(searchDebounceTimer);
+        doSearch(searchInput.value);
+        pushHistory(searchInput.value);
+      }
+    });
     bindSwipe();
     bindKeys();
   }
@@ -749,6 +982,7 @@
   loadBank().then(function (data) {
     bank = data;
     byType = MSQ.indexByType(bank.questions);
+    searchIndex = MSQ.buildSearchIndex(bank.questions, window.EXPLANATIONS_DATA || null);
     bindEvents();
     renderMenu();
     registerSW();

@@ -288,6 +288,96 @@ if (fs.existsSync(expJs)) {
   check("示例文件保留 _meta 结构", typeof sample._meta === "object");
 }
 
+/* ---------- 本地搜题 ---------- */
+section("本地搜题");
+const sWin = {};
+const sExpPath = path.join(__dirname, "www", "data", "explanations.js");
+let sExp = null;
+if (fs.existsSync(sExpPath)) {
+  new Function("window", fs.readFileSync(sExpPath, "utf8"))(sWin);
+  sExp = sWin.EXPLANATIONS_DATA || null;
+}
+const sIdx = MSQ.buildSearchIndex(qs, sExp);
+check("搜索索引数量 = 392", sIdx.length === 392, String(sIdx.length));
+check("索引字段完整（规范化题干/选项/全文）",
+  sIdx.every(it => typeof it.normalizedStem === "string" && it.normalizedStem.length > 0
+    && Array.isArray(it.normalizedOptions) && it.normalizedOptions.length >= 2
+    && typeof it.normalizedAll === "string"));
+const na = MSQ.normalizeSearchText("“工作负责人（监护人）”");
+const nb = MSQ.normalizeSearchText("工作负责人(监护人)");
+const nc = MSQ.normalizeSearchText("工作负责人 监护人");
+check("规范化：全角/半角/引号/空格 归一一致", na === nb && nb === nc && na === "工作负责人监护人",
+  JSON.stringify(na));
+check("规范化：换行与连续空白剔除",
+  MSQ.normalizeSearchText("工作\n负责人　  监护人") === "工作负责人监护人");
+
+const top1 = (q) => { const r = MSQ.searchQuestions(sIdx, q); return r.length ? r[0].id : null; };
+const TOP1 = [
+  ["禁止作业人员擅自", 1],
+  ["成套接地线宜存放在专用架上", 5],
+  ["工作票只能延期", 214],
+  ["变电站 不停电", 294],
+  ["一机一闸一保护", 359],
+  ["视频监控", 118],
+  ["低压验电前", 35],
+  ["中途新加入", 307],
+  ["高压部位需停电", 118],
+  ["漏电保护器", 168],
+  ["延期手续", 214],
+  ["口头通知", 3],
+  ["短信传达", 3],
+  ["宜开启 设备", 118],
+  ["安全工器具使用前", 51],
+  ["遮栏", 1],
+  ["互感器现场校验工作不得少于三人", 15],
+  ["工作负责人", 2],
+  ["接地线", 5],
+  ["一人", 46],
+  ["工作负人", 2],
+];
+for (const [q, id] of TOP1) {
+  check(`Top1: ${q} -> ${id}`, top1(q) === id, "实际 " + top1(q));
+}
+const TOP5 = [
+  ["确认手续", 307],
+  ["二次工作安全措施票", 4],
+  ["变电站 不停电 工作票", 294],
+  ["工作负责人", 2],
+];
+for (const [q, id] of TOP5) {
+  const r = MSQ.searchQuestions(sIdx, q).slice(0, 5).map(x => x.id);
+  check(`Top5 含: ${q} -> ${id}`, r.includes(id), "Top5=" + r.join(","));
+}
+check("空查询返回空", MSQ.searchQuestions(sIdx, "").length === 0
+  && MSQ.searchQuestions(sIdx, "   ").length === 0);
+check("纯标点查询返回空", MSQ.searchQuestions(sIdx, "（）。！").length === 0);
+const q5full = qs.find(x => x.id === 5);
+check("完整题干精确命中 Top1", top1(q5full.stem) === 5);
+check("题干中间连续片段 Top1（延期手续应记录在）", top1("延期手续应记录在") === 214);
+const rc = MSQ.searchQuestions(sIdx, "确认手续");
+check("解析命中不压过题干命中（307 列第5，前三位均为题干层）",
+  rc.length >= 5 && rc[4].id === 307 && rc.slice(0, 3).every(x => x.tier <= 3),
+  "Top5=" + rc.slice(0, 5).map(x => x.id + "/T" + x.tier).join(","));
+const rsyn = MSQ.searchQuestions(sIdx, "视频监控");
+check("选项命中在解析命中之前（118 选项层 Top1）",
+  rsyn[0].id === 118 && rsyn[0].tier === 4 && rsyn[1].id === 153 && rsyn[1].tier === 6);
+const rEx = MSQ.searchQuestions(sIdx, "禁止作业人员擅自");
+check("同一查询命中多题时原题（id1）排最前", rEx[0].id === 1 && rEx[0].tier === 1);
+/* 性能 */
+const timeQ = [...TOP1.map(x => x[0]), ...TOP5.map(x => x[0])];
+let sw_max = 0, sw_sum = 0, sw_n = 0;
+for (let round = 0; round < 5; round++) {
+  for (const q of timeQ) {
+    const a = performance.now();
+    MSQ.searchQuestions(sIdx, q);
+    const d = performance.now() - a;
+    sw_max = Math.max(sw_max, d); sw_sum += d; sw_n++;
+  }
+}
+const sw_avg = sw_sum / sw_n;
+check("平均搜索耗时 < 10ms", sw_avg < 10, sw_avg.toFixed(2) + "ms");
+check("最大搜索耗时 < 50ms", sw_max < 50, sw_max.toFixed(2) + "ms");
+
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {

@@ -136,6 +136,135 @@
     return null;
   }
 
+  /* ---------------- 本地搜题 ---------------- */
+
+  /* 搜索规范化：NFKC（全角->半角等） + 小写 + 去除所有非文字/数字字符
+     （空格、换行、中英文标点、引号等全部剔除），使
+     “工作负责人（监护人）”、工作负责人(监护人)、工作负责人 监护人 归一为 工作负责人监护人。 */
+  function normalizeSearchText(text) {
+    return String(text == null ? "" : text)
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "");
+  }
+
+  /* 规范化并保留 原文字符位置 映射（供 UI 高亮，把规范化命中位置映射回原文下标） */
+  function normalizeWithMap(text) {
+    var s = String(text == null ? "" : text).normalize("NFKC").toLowerCase();
+    var out = [], map = [];
+    for (var i = 0; i < s.length; i++) {
+      if (/[\p{L}\p{N}]/u.test(s[i])) { out.push(s[i]); map.push(i); }
+    }
+    return { text: out.join(""), map: map };
+  }
+
+  /* 一次性构建搜索索引（题库加载后调用，之后每次输入零预处理）。 */
+  function buildSearchIndex(questions, explanations) {
+    return (questions || []).map(function (q) {
+      var item = {
+        id: q.id,
+        type: q.type,
+        type_name: q.type_name,
+        stem: q.stem,
+        options: q.options,
+        normalizedStem: normalizeSearchText(q.stem),
+        normalizedOptions: (q.options || []).map(normalizeSearchText),
+        normalizedAll: normalizeSearchText(q.stem + "\n" + (q.options || []).join("\n"))
+      };
+      var exp = explanations ? explanations[String(q.id)] : null;
+      item.normalizedExplanation = exp
+        ? normalizeSearchText((exp.reason || "") + "\n" + (exp.memory || ""))
+        : "";
+      return item;
+    });
+  }
+
+  function gramSet(s) {
+    var g = {};
+    var n = 0;
+    if (s.length < 2) { if (s) { g[s] = true; n = 1; } return { g: g, n: n }; }
+    for (var i = 0; i < s.length - 1; i++) {
+      var b = s.slice(i, i + 2);
+      if (!g[b]) { g[b] = true; n++; }
+    }
+    return { g: g, n: n };
+  }
+
+  /* 查询 bigram 在目标串中的包含率（0~1）。轻量模糊：少打/错打一两个字仍能召回。 */
+  function bigramContainment(query, target) {
+    var qg = gramSet(query);
+    if (!qg.n) { return 0; }
+    var tg = gramSet(target).g;
+    var hit = 0;
+    for (var b in qg.g) { if (tg[b]) { hit++; } }
+    return hit / qg.n;
+  }
+
+  /* 分层搜题。返回按相关度降序的数组（每项含 score/tier/hitOption）。
+     匹配顺序固定：题干精确 > 题干全部关键词 > 题干部分关键词 > 选项 > 模糊 > 解析(最低)。 */
+  function searchQuestions(index, query) {
+    var qRaw = String(query == null ? "" : query).trim();
+    if (!qRaw) { return []; }
+    var qNorm = normalizeSearchText(qRaw);
+    if (!qNorm) { return []; }
+    var kws = qRaw.split(/\s+/).map(normalizeSearchText).filter(function (k) { return k; });
+    if (!kws.length) { kws = [qNorm]; }
+    var results = [];
+    for (var i = 0; i < index.length; i++) {
+      var it = index[i];
+      var score = 0, tier = 0, hitOption = null;
+      if (qNorm.length >= 2 && it.normalizedStem.indexOf(qNorm) >= 0) {
+        tier = 1;
+        score = 10000 + qNorm.length * 5;
+      }
+      if (tier === 0 && kws.every(function (k) { return it.normalizedStem.indexOf(k) >= 0; })) {
+        tier = 2;
+        var kwLen = kws.reduce(function (s, k) { return s + k.length; }, 0);
+        score = 8000 + Math.round(kwLen / Math.max(it.normalizedStem.length, 1) * 1000) + kwLen * 5;
+      }
+      if (tier === 0) {
+        var hits = kws.filter(function (k) { return it.normalizedStem.indexOf(k) >= 0; });
+        if (hits.length) {
+          tier = 3;
+          score = 5000 + hits.length * 200 + hits.reduce(function (s, k) { return s + k.length; }, 0);
+        }
+      }
+      if (tier === 0) {
+        var inOptions = function (k) {
+          return it.normalizedOptions.some(function (o) { return o.indexOf(k) >= 0; });
+        };
+        var exactOpt = qNorm.length >= 2 && it.normalizedOptions.some(function (o) { return o.indexOf(qNorm) >= 0; });
+        if (exactOpt || kws.every(inOptions)) {
+          tier = 4;
+          score = exactOpt ? 3500 : 3000;
+          for (var oi = 0; oi < it.normalizedOptions.length; oi++) {
+            var match = qNorm.length >= 2 && it.normalizedOptions[oi].indexOf(qNorm) >= 0;
+            if (!match) { match = kws.length && kws.every((function (o) {
+              return function (k) { return o.indexOf(k) >= 0; };
+            })(it.normalizedOptions[oi])); }
+            if (match) { hitOption = it.options[oi]; break; }
+          }
+        }
+      }
+      if (tier === 0 && qNorm.length >= 3) {
+        var sim = bigramContainment(qNorm, it.normalizedStem);
+        if (sim >= 0.5) { tier = 5; score = 1000 + Math.round(sim * 800); }
+      }
+      if (tier === 0 && it.normalizedExplanation && kws.every(function (k) {
+        return it.normalizedExplanation.indexOf(k) >= 0;
+      })) {
+        tier = 6;
+        score = 300;
+      }
+      if (score > 0) {
+        results.push({ id: it.id, type: it.type, type_name: it.type_name,
+          stem: it.stem, options: it.options, score: score, tier: tier, hitOption: hitOption });
+      }
+    }
+    results.sort(function (a, b) { return b.score - a.score || a.id - b.id; });
+    return results;
+  }
+
   return {
     LETTERS: LETTERS, TYPE_ORDER: TYPE_ORDER, TYPE_NAMES: TYPE_NAMES,
     DEFAULT_EXAM_CONFIG: DEFAULT_EXAM_CONFIG,
@@ -144,6 +273,8 @@
     isCorrect: isCorrect, answerText: answerText, shuffled: shuffled,
     shuffleQuestionOptions: shuffleQuestionOptions, parseJumpTarget: parseJumpTarget,
     resolveSwipe: resolveSwipe,
+    normalizeSearchText: normalizeSearchText, normalizeWithMap: normalizeWithMap,
+    buildSearchIndex: buildSearchIndex, searchQuestions: searchQuestions,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });
