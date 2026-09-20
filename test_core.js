@@ -497,6 +497,260 @@ check("OCR 置信度：接近分数 -> candidates", MSQ.ocrConfidence([
   { score: 900 }, { score: 850 }]).level === "candidates");
 check("OCR 置信度：空结果 -> none", MSQ.ocrConfidence([]).level === "none");
 
+/* ---------- 整页拍照搜题（模拟整页 OCR 数据，simulated） ----------
+   说明：以下全部是【模拟数据 simulated】，由本地私有题库 + 合成 OCR 噪声生成，
+   不是真机实拍结果。真实相机拍摄需要在真机上验证。 */
+section("整页拍照搜题（模拟数据 simulated）");
+const batchIdx = MSQ.buildBatchOcrIndex(qs);
+check("整页索引 = 392 且带答案字段", batchIdx.length === 392
+  && batchIdx.every(it => Array.isArray(it.answer)));
+
+const ansOf = (q) => q.type === "judge"
+  ? (q.answer[0] === 0 ? "√" : "×")
+  : q.answer.slice().sort((a, b) => a - b).map(i => "ABCDEF"[i]).join("");
+
+function noisyText(s, rand) {
+  const chars = String(s).split("");
+  for (let i = 0; i < chars.length; i++) {
+    const roll = rand();
+    if (roll < 0.05 && CONFUSABLE[chars[i]]) { chars[i] = CONFUSABLE[chars[i]]; }
+    else if (roll < 0.07) { chars[i] = ""; }
+    else if (roll < 0.10) { chars[i] = " " + chars[i]; }
+  }
+  return chars.join("").replace(/\s+/g, " ").trim();
+}
+function chunk(s, n) {
+  const out = [];
+  for (let i = 0; i < s.length; i += n) { out.push(s.slice(i, i + n)); }
+  return out.length ? out : [""];
+}
+function pickQuestions(type, n, rand) {
+  const pool = byType[type].slice();
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+  return pool.slice(0, n);
+}
+/* 合成"整页 OCR 行"：题号+题干（可换行）+ 选项（可换行）+ 页脚，带坐标 */
+function buildPage(rand, groups, opts) {
+  const o = opts || {};
+  const lines = [], expected = [];
+  let y = 60;
+  let num = o.startNumber || 1;
+  const push = (text, indent) => {
+    lines.push({ text, left: 40 + (indent || 0), top: y, right: 900, bottom: y + 46 });
+    y += 52;
+  };
+  groups.forEach(g => {
+    if (g.header) { push(g.header); y += 14; }
+    pickQuestions(g.type, g.n, rand).forEach(q => {
+      const screen = String(num++);
+      expected.push({ screenNumber: screen, type: g.type, id: q.id, answer: ansOf(q) });
+      const parts = chunk(noisyText(q.stem, rand), 18);
+      push(screen + ". " + parts[0]);
+      for (let i = 1; i < parts.length; i++) { push(parts[i], 14); }
+      q.options.forEach((op, i) => {
+        const t = "ABCDEF"[i] + ". " + noisyText(op, rand);
+        if (o.wrapOptions && t.length > 11) {
+          const c = chunk(t, 11);
+          push(c[0], 14);
+          for (let k = 1; k < c.length; k++) { push(c[k], 26); }
+        } else { push(t, 14); }
+      });
+    });
+  });
+  if (o.footer) { push(o.footer); }
+  return { lines, expected };
+}
+
+const M = { pages: 0, splitOk: 0, screen: 0, screenN: 0, type: 0, typeN: 0,
+  top1: 0, top3: 0, ans: 0, n: 0, splitMs: 0, matchMs: 0, totalMs: 0, misses: [] };
+const pageCases = [];
+
+/* 整页跑一遍并累计指标；返回 {blocks, expected, ok} */
+function runPage(label, built, defaultType, opts) {
+  const ts = performance.now();
+  MSQ.splitPageOcrLines(built.lines, defaultType);
+  const splitMs = performance.now() - ts;
+  const tm = performance.now();
+  const res = MSQ.searchPageQuestionsByOcr(batchIdx, built.lines, defaultType, opts);
+  const matchMs = performance.now() - tm;
+  const blocks = res.blocks;
+  M.pages++;
+  M.splitMs += splitMs; M.matchMs += matchMs; M.totalMs += splitMs + matchMs;
+  const splitOk = blocks.length === built.expected.length;
+  if (splitOk) { M.splitOk++; }
+  let screenHit = 0, typeHit = 0, top1 = 0, top3 = 0, ans = 0;
+  built.expected.forEach((exp, i) => {
+    const b = blocks[i];
+    if (!b) { return; }
+    if (b.screenNumber === exp.screenNumber) { screenHit++; }
+    if (b.type === exp.type) { typeHit++; }
+    const ids = (b.matches || []).map(m => m.id);
+    if (ids[0] === exp.id) { top1++; }
+    if (ids.indexOf(exp.id) >= 0) { top3++; }
+    if (b.answer === exp.answer && b.bankId === exp.id) { ans++; }
+    if (ids[0] !== exp.id) {
+      M.misses.push(label + " 题号" + exp.screenNumber + " 期望" + exp.id + " 实得" +
+        (ids[0] === undefined ? "无" : ids[0]) + "(" + b.confidence + ")");
+    }
+  });
+  M.screen += screenHit; M.screenN += built.expected.length;
+  M.type += typeHit; M.typeN += built.expected.length;
+  M.top1 += top1; M.top3 += top3; M.ans += ans; M.n += built.expected.length;
+  const rec = { label, blocks, expected: built.expected, splitOk, screenHit, typeHit, top1, top3, ans,
+    splitMs: Math.round(splitMs * 100) / 100, matchMs: Math.round(matchMs * 100) / 100 };
+  pageCases.push(rec);
+  return rec;
+}
+
+const pageRand = mulberry(20260921);
+
+/* 1) 单选一页 5 题（无大块标题，整页默认题型） */
+const p1 = runPage("单选5题", buildPage(pageRand, [{ type: "single", n: 5 }], { startNumber: 1, footer: "1 / 8" }), "single");
+check("单选一页 5 题：分题数量 = 5", p1.blocks.length === 5, String(p1.blocks.length));
+check("单选一页 5 题：题号顺序正确", p1.blocks.map(b => b.screenNumber).join(",") === "1,2,3,4,5",
+  p1.blocks.map(b => b.screenNumber).join(","));
+check("单选一页 5 题：题型全部 single", p1.blocks.every(b => b.type === "single"));
+check("单选一页 5 题：Top1 全中", p1.top1 === 5, p1.top1 + "/5");
+
+/* 2) 单选一页 10 题 */
+const p2 = runPage("单选10题", buildPage(pageRand, [{ type: "single", n: 10 }], { startNumber: 31 }), "single");
+check("单选一页 10 题：分题数量 = 10", p2.blocks.length === 10, String(p2.blocks.length));
+check("单选一页 10 题：题号 31~40", p2.blocks.map(b => b.screenNumber).join(",") === "31,32,33,34,35,36,37,38,39,40");
+check("单选一页 10 题：Top1 >= 9", p2.top1 >= 9, p2.top1 + "/10");
+
+/* 3) 多选一页（带大块标题）+ 选项换行 */
+const p3 = runPage("多选页", buildPage(pageRand,
+  [{ type: "multi", n: 6, header: "二、多项选择题（每题2分，共30分）" }],
+  { startNumber: 51, wrapOptions: true }), "multi");
+check("多选一页：分题数量 = 6", p3.blocks.length === 6, String(p3.blocks.length));
+check("多选一页：题型全部 multi", p3.blocks.every(b => b.type === "multi"));
+check("多选一页：答案格式为字母组合", p3.blocks.every(b => /^[A-F]+$/.test(b.answer)));
+check("多选一页：Top1 >= 5", p3.top1 >= 5, p3.top1 + "/6");
+
+/* 4) 判断一页（答案显示 √ / ×） */
+const p4 = runPage("判断页", buildPage(pageRand,
+  [{ type: "judge", n: 8, header: "三、判断题（每题1分）" }],
+  { startNumber: 66, footer: "第 5 页 共 8 页" }), "judge");
+check("判断一页：分题数量 = 8", p4.blocks.length === 8, String(p4.blocks.length));
+check("判断一页：题型全部 judge", p4.blocks.every(b => b.type === "judge"));
+check("判断一页：答案只出现 √ 或 ×", p4.blocks.every(b => b.answer === "√" || b.answer === "×"),
+  p4.blocks.map(b => b.answer).join(""));
+check("判断一页：Top1 >= 7", p4.top1 >= 7, p4.top1 + "/8");
+
+/* 5) 跨大块页：单选尾部 + 多选题标题 + 多选开头（中途切题型） */
+const p5 = runPage("单选→多选", buildPage(pageRand, [
+  { type: "single", n: 3 },
+  { type: "multi", n: 4, header: "二、多选题" }
+], { startNumber: 41 }), "single");
+check("跨大块页（单选→多选）：分题数量 = 7", p5.blocks.length === 7, String(p5.blocks.length));
+check("跨大块页（单选→多选）：标题前为 single", p5.blocks.slice(0, 3).every(b => b.type === "single"));
+check("跨大块页（单选→多选）：标题后为 multi", p5.blocks.slice(3).every(b => b.type === "multi"));
+check("跨大块页（单选→多选）：题型判定全对", p5.typeHit === 7, p5.typeHit + "/7");
+
+/* 6) 跨大块页：多选尾部 + 判断题标题 + 判断开头 */
+const p6 = runPage("多选→判断", buildPage(pageRand, [
+  { type: "multi", n: 3 },
+  { type: "judge", n: 5, header: "三、判断题" }
+], { startNumber: 58 }), "multi");
+check("跨大块页（多选→判断）：分题数量 = 8", p6.blocks.length === 8, String(p6.blocks.length));
+check("跨大块页（多选→判断）：标题前为 multi", p6.blocks.slice(0, 3).every(b => b.type === "multi"));
+check("跨大块页（多选→判断）：标题后为 judge", p6.blocks.slice(3).every(b => b.type === "judge"));
+
+/* 7) 题号 OCR 错一个字符（数字位被认成形近字母） */
+const p7page = buildPage(pageRand, [{ type: "single", n: 6 }], { startNumber: 11 });
+p7page.lines.forEach(l => {
+  if (/^14\s*[.．]/.test(l.text)) { l.text = l.text.replace(/^14/, "1A"); }  // 14 -> 1A（A 非形近数字，应合并）
+});
+const p7 = runPage("题号错字", p7page, "single");
+check("题号 OCR 错字：其余题号仍正确分题", p7.blocks.length >= 5 && p7.blocks.length <= 6,
+  "分题 " + p7.blocks.length + "（期望 5 或 6，取决于错字题号是否仍可识别）");
+
+/* 8) 某一选项 OCR 错字（选项辅助不参与主匹配，不应影响 Top1） */
+const p8page = buildPage(pageRand, [{ type: "single", n: 5 }], { startNumber: 21 });
+p8page.lines.forEach(l => {
+  if (/^C\s*[.．]/.test(l.text)) { l.text = l.text.replace(/^C/, "C").replace(/.$/, "错"); }
+});
+const p8 = runPage("选项错字", p8page, "single");
+check("选项 OCR 错字：Top1 仍全中", p8.top1 === 5, p8.top1 + "/5");
+
+/* 9) 大块标题变体识别 */
+check("大块标题识别：单选题/单项选择题/多选题/多项选择题/判断题",
+  MSQ.pageSectionType("单选题") === "single" && MSQ.pageSectionType("单项选择题") === "single"
+  && MSQ.pageSectionType("二、多选题") === "multi" && MSQ.pageSectionType("多项选择题") === "multi"
+  && MSQ.pageSectionType("3. 判断题") === "judge");
+check("大块标题识别：题干不会被误判成标题",
+  MSQ.pageSectionType("根据营销安规规定，多选题应全部选对") === null
+  && MSQ.pageSectionType("1. 单选题的做法是（ ）") === null);
+check("题号识别：1. / 1、/ （1）/ 第1题 / 31 题干",
+  MSQ.pageQuestionNumber("1. 题干").number === "1"
+  && MSQ.pageQuestionNumber("1、题干").number === "1"
+  && MSQ.pageQuestionNumber("（1）题干").number === "1"
+  && MSQ.pageQuestionNumber("第1题 题干").number === "1"
+  && MSQ.pageQuestionNumber("31 根据营销安规").number === "31");
+check("题号识别：选项行/页码不会被误判成题号",
+  MSQ.pageQuestionNumber("A. 停电") === null && MSQ.pageQuestionNumber("B、送电") === null
+  && MSQ.pageQuestionNumber("3 / 10") === null && MSQ.pageQuestionNumber("1.5米以上") === null
+  && MSQ.pageQuestionNumber("2026年") === null);
+check("分题：题干换行 + 选项换行不拆题", (() => {
+  const b = MSQ.splitPageOcrLines([
+    { text: "7. 根据营销安规规定，作业人员", top: 10, left: 10, bottom: 40 },
+    { text: "进入现场应正确佩戴安全帽。", top: 50, left: 30, bottom: 80 },
+    { text: "A. 正确", top: 90, left: 30, bottom: 120 },
+    { text: "B. 错误", top: 130, left: 30, bottom: 160 },
+    { text: "8. 下一题", top: 170, left: 10, bottom: 200 }
+  ], "judge");
+  return b.length === 2 && b[0].screenNumber === "7"
+    && b[0].stemText === "根据营销安规规定，作业人员进入现场应正确佩戴安全帽。"
+    && b[0].optionsText === "A. 正确 B. 错误";
+})());
+check("分题：题型强约束只在对应题型内匹配", (() => {
+  const blocks = MSQ.splitPageOcrLines([
+    { text: "1. 禁止作业人员擅自移动或拆除遮栏（围栏）和标示牌。", top: 10, left: 10, bottom: 40 }
+  ], "multi");
+  const r = MSQ.matchPageQuestionBlock(batchIdx, blocks[0], { limit: 3 });
+  return r.length > 0 && r.every(x => x.type === "multi");
+})());
+
+/* 汇总指标（模拟数据） */
+const pct = (a, b) => b ? (a / b * 100) : 0;
+const SPLIT_ACC = pct(M.splitOk, M.pages), SCREEN_ACC = pct(M.screen, M.screenN);
+const TYPE_ACC = pct(M.type, M.typeN), TOP1_ACC = pct(M.top1, M.n);
+const TOP3_ACC = pct(M.top3, M.n), ANS_ACC = pct(M.ans, M.n);
+check("PAGE_SPLIT_COUNT_ACCURACY = 100%", M.splitOk === M.pages, SPLIT_ACC.toFixed(1) + "%");
+check("TYPE_ASSIGN_ACCURACY = 100%", M.type === M.typeN, TYPE_ACC.toFixed(1) + "%");
+check("TOP1_MATCH_ACCURACY >= 95%", TOP1_ACC >= 95, TOP1_ACC.toFixed(1) + "%");
+check("TOP3_MATCH_ACCURACY >= 99%", TOP3_ACC >= 99, TOP3_ACC.toFixed(1) + "%");
+check("ANSWER_ACCURACY >= 95%", ANS_ACC >= 95, ANS_ACC.toFixed(1) + "%");
+check("SCREEN_NUMBER_ACCURACY >= 97%", SCREEN_ACC >= 97, SCREEN_ACC.toFixed(1) + "%");
+/* 显示安全保证：高/中置信度给出的答案必须是对的；错的只能是 low（UI 显示 ?） */
+let confidentWrong = 0, confidentTotal = 0, lowShown = 0;
+pageCases.forEach(p => {
+  p.blocks.forEach((b, i) => {
+    const exp = p.expected[i];
+    if (!exp) { return; }
+    if (b.confidence === "high" || b.confidence === "medium") {
+      confidentTotal++;
+      if (b.bankId !== exp.id || b.answer !== exp.answer) { confidentWrong++; }
+    } else { lowShown++; }
+  });
+});
+check("高/中置信度答案 0 错误（低置信度才给 ?）", confidentWrong === 0,
+  confidentWrong + " 错 / " + confidentTotal + " 高·中（低置信度 " + lowShown + " 条显示 ?）");
+check("分题耗时 < 5ms/页", M.splitMs / M.pages < 5, (M.splitMs / M.pages).toFixed(2) + "ms/页");
+check("匹配总耗时 < 100ms/页", M.matchMs / M.pages < 100, (M.matchMs / M.pages).toFixed(1) + "ms/页");
+check("整页总耗时 < 100ms/页", M.totalMs / M.pages < 100, (M.totalMs / M.pages).toFixed(1) + "ms/页");
+console.log("  [INFO] (simulated) 页数=" + M.pages + " 题目=" + M.n +
+  " 分题=" + SPLIT_ACC.toFixed(1) + "% 题号=" + SCREEN_ACC.toFixed(1) + "% 题型=" + TYPE_ACC.toFixed(1) +
+  "% Top1=" + TOP1_ACC.toFixed(1) + "% Top3=" + TOP3_ACC.toFixed(1) + "% 答案=" + ANS_ACC.toFixed(1) + "%");
+console.log("  [INFO] (simulated) 分题 " + (M.splitMs / M.pages).toFixed(2) + "ms/页 · 匹配 " +
+  (M.matchMs / M.pages).toFixed(1) + "ms/页 · 合计 " + (M.totalMs / M.pages).toFixed(1) + "ms/页");
+if (M.misses.length) { console.log("  [INFO] (simulated) 未命中 Top1: " + M.misses.join(" | ")); }
+console.log("  [INFO] (simulated) 置信度分布 " + JSON.stringify(
+  pageCases.reduce((m, p) => { p.blocks.forEach(b => { m[b.confidence] = (m[b.confidence] || 0) + 1; }); return m; }, {})));
+
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {

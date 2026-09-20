@@ -961,6 +961,8 @@
     if (Modal.isOpen()) { Modal.close(); return; }
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
+      case "view-batch-results": handleBatchResultsBack(); return;
+      case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
@@ -1139,6 +1141,317 @@
       totalMs: Math.round(performance.now() - totalStart) });
   }
 
+  /* ---------------- 整页拍照搜题（分题 + 题型强约束批量匹配） ----------------
+     与单题拍照完全独立：单题路径 searchQuestionsByOcr 保持原样，这里走
+     searchPageQuestionsByOcr（先分题，再只在所选题型的子集里匹配）。 */
+  var batchIndex = null;
+  var batchPageType = "single";   /* 会话内保持，不写 localStorage；冷启动回到单选 */
+  var lastBatch = null;
+
+  function setBatchStatus(text) {
+    var el = $("batch-status");
+    if (el) { el.textContent = text; el.classList.remove("hidden"); }
+  }
+
+  function renderBatchTypes() {
+    var box = $("batch-type-row");
+    if (!box) { return; }
+    var btns = box.getElementsByClassName("batch-type-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute("data-type") === batchPageType;
+      btns[i].classList.toggle("active", on);
+      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function initBatchTypes() {
+    var box = $("batch-type-row");
+    if (!box) { return; }
+    box.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    box.addEventListener("click", function (e) {
+      var el = e.target;
+      while (el && el !== box && !el.classList.contains("batch-type-btn")) { el = el.parentNode; }
+      if (!el || el === box) { return; }
+      batchPageType = el.getAttribute("data-type") || "single";
+      renderBatchTypes();
+    });
+  }
+
+  function openBatchPhoto() {
+    show("view-batch-photo");
+    renderBatchTypes();
+    setBatchStatus("选好当前大题题型后拍整页：一页可以只拍一次，页内换大块会自动切换题型");
+  }
+
+  /* OCR 返回：优先用带坐标的 lines；旧版本插件只返回 text 时按行退化，仍可分题。 */
+  function normalizeOcrLines(res) {
+    var lines = res && res.lines;
+    if (lines && lines.length) {
+      var out = [];
+      for (var i = 0; i < lines.length; i++) {
+        var t = lines[i] && lines[i].text;
+        if (t && String(t).trim()) { out.push(lines[i]); }
+      }
+      if (out.length) { return out; }
+    }
+    var text = (res && res.text) || "";
+    return text.split(/\r?\n/).map(function (t) { return { text: t }; });
+  }
+
+  function batchAnswerDisplay(b) {
+    /* 低置信度不强行给确定答案：显示 ? 并在详情里给 Top3 候选 */
+    if (!b || b.confidence === "low" || b.confidence === "none" || b.answer === "?") { return "?"; }
+    return b.answer;
+  }
+
+  var BATCH_TYPE_NAMES = { single: "单选题", multi: "多选题", judge: "判断题" };
+
+  function batchDetail(b) {
+    var d = document.createElement("div");
+    d.className = "batch-detail hidden";
+    var add = function (label, value) {
+      var p = document.createElement("div");
+      var k = document.createElement("span"); k.className = "k"; k.textContent = label + "：";
+      var v = document.createElement("span"); v.className = "v"; v.textContent = value;
+      p.appendChild(k); p.appendChild(v); d.appendChild(p);
+    };
+    add("OCR识别到的题干", b.stemText || "（无）");
+    add("题库题号", b.bankId === null ? "未匹配到" : ("第 " + b.bankId + " 题 ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type)));
+    add("正确答案", b.answerItem ? b.answer : "—");
+    add("置信度", { high: "高", medium: "中", low: "低", none: "无匹配" }[b.confidence] || b.confidence);
+    if (b.matches && b.matches.assistedByOptions) { add("匹配方式", "题干 + 选项辅助"); }
+    if (b.matches && b.matches.length) {
+      var t1 = b.matches[0];
+      add("完整题干", t1.stem);
+      if (t1.options && t1.options.length) {
+        add("题库选项", t1.options.map(function (o, i) { return MSQ.LETTERS[i] + ". " + o; }).join("　"));
+      }
+    }
+    var cands = (b.matches || []).slice(0, 3);
+    if (cands.length > 1 || b.confidence === "low" || b.confidence === "none") {
+      var head = document.createElement("div");
+      head.className = "k";
+      head.textContent = cands.length ? "Top" + cands.length + " 候选（点开看原题）" : "没有找到候选";
+      d.appendChild(head);
+      cands.forEach(function (m, i) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "batch-cand";
+        btn.textContent = (i + 1) + ". 第" + m.id + "题 ｜ " + m.type_name + " ｜ 得分 " + m.score + "：" +
+          m.stem.slice(0, 40);
+        btn.addEventListener("click", function () { openSearchDetail(m.id); });
+        d.appendChild(btn);
+      });
+    }
+    return d;
+  }
+
+  function batchRow(b) {
+    var wrap = document.createElement("div");
+    var row = document.createElement("button");
+    row.type = "button";
+    row.className = "batch-row";
+    var no = document.createElement("span");
+    no.className = "batch-no";
+    no.textContent = b.label;
+    var ans = document.createElement("span");
+    var shown = batchAnswerDisplay(b);
+    ans.className = "batch-ans" + (shown === "?" ? " low" : (b.confidence === "medium" ? " mid" : ""));
+    ans.textContent = shown;
+    row.appendChild(no);
+    row.appendChild(ans);
+    if (b.type !== batchPageType) {
+      var tag = document.createElement("span");
+      tag.className = "batch-type-tag";
+      tag.textContent = BATCH_TYPE_NAMES[b.type] || b.type;
+      row.appendChild(tag);
+    }
+    var flag = document.createElement("span");
+    flag.className = "batch-flag";
+    flag.textContent = b.confidence === "medium" ? "◐" : (b.confidence === "low" || b.confidence === "none" ? "!" : "");
+    row.appendChild(flag);
+    var detail = batchDetail(b);
+    row.addEventListener("click", function () {
+      var open = detail.classList.toggle("hidden") === false;
+      row.classList.toggle("open", open);
+    });
+    wrap.appendChild(row);
+    wrap.appendChild(detail);
+    return wrap;
+  }
+
+  /* 折叠区：整页 OCR 原文 + 行坐标 / 分题结果（默认折叠，只用于排查） */
+  function batchCollapsible(parent, title, buildBody) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "explain-btn";
+    btn.textContent = title + " ▾";
+    var body = document.createElement("div");
+    body.className = "explain-body hidden";
+    buildBody(body);
+    btn.addEventListener("click", function () {
+      var open = body.classList.toggle("hidden") === false;
+      btn.textContent = title + (open ? " ▴" : " ▾");
+    });
+    parent.appendChild(btn);
+    parent.appendChild(body);
+    return body;
+  }
+
+  function appendBatchTools(state) {
+    var tools = $("batch-tools");
+    tools.innerHTML = "";
+    var again = document.createElement("button");
+    again.type = "button";
+    again.className = "barbtn primary";
+    again.textContent = "重新拍摄";
+    again.style.marginBottom = "12px";
+    again.addEventListener("click", function () { startBatchPageSearch(); });
+    tools.appendChild(again);
+
+    batchCollapsible(tools, "查看整页 OCR 文字", function (body) {
+      var sec = document.createElement("div");
+      sec.className = "explain-sec";
+      var head = document.createElement("p");
+      head.className = "explain-text";
+      head.textContent = "共 " + state.lines.length + " 行（含坐标）";
+      sec.appendChild(head);
+      state.lines.slice(0, 200).forEach(function (l) {
+        var p = document.createElement("p");
+        p.className = "batch-ocr-line";
+        var coord = (l.top === undefined || l.top === null)
+          ? ""
+          : ("  [" + Math.round(l.left) + "," + Math.round(l.top) + "→" + Math.round(l.right) + "," + Math.round(l.bottom) + "]");
+        p.textContent = l.text + coord;
+        sec.appendChild(p);
+      });
+      var full = document.createElement("p");
+      full.className = "explain-text";
+      full.textContent = "—— 全文 ——\n" + (state.text || "（无）");
+      sec.appendChild(full);
+      body.appendChild(sec);
+    });
+
+    batchCollapsible(tools, "查看分题结果", function (body) {
+      var sec = document.createElement("div");
+      sec.className = "explain-sec";
+      state.out.blocks.forEach(function (b) {
+        var p = document.createElement("p");
+        p.className = "explain-text";
+        p.textContent = b.label + " ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type) +
+          " ｜ y " + Math.round(b.top || 0) + "~" + Math.round(b.bottom || 0) +
+          " ｜ " + b.confidence + "\n" + (b.rawText || "");
+        sec.appendChild(p);
+      });
+      body.appendChild(sec);
+    });
+  }
+
+  function renderBatchResults(state) {
+    show("view-batch-results");
+    lastBatch = state;
+    var summary = $("batch-summary");
+    var list = $("batch-list");
+    var tools = $("batch-tools");
+    summary.className = "batch-summary";
+    summary.innerHTML = ""; list.innerHTML = ""; tools.innerHTML = "";
+    var blocks = state.out.blocks;
+    var textLen = MSQ.normalizeOcrText(state.text || "").length;
+    /* 识别出一大堆文字却几乎没有可靠题号：不硬塞成一道题，也不给答案 */
+    if (!blocks.length || (blocks.length === 1 && textLen >= 80)) {
+      summary.className = "batch-summary warn";
+      summary.textContent = "未能可靠识别本页题目边界，请重新拍摄";
+      var tip = document.createElement("div");
+      tip.className = "dim";
+      tip.textContent = "（识别到 " + state.lines.length + " 行文字，" + blocks.length +
+        " 个题号。可展开下方 OCR 原文与行坐标排查）";
+      summary.appendChild(tip);
+      appendBatchTools(state);
+      return;
+    }
+    var conf = { high: 0, medium: 0, low: 0, none: 0 };
+    blocks.forEach(function (b) { conf[b.confidence] = (conf[b.confidence] || 0) + 1; });
+    summary.textContent = "本页识别 " + blocks.length + " 道题";
+    var sub = document.createElement("div");
+    sub.className = "dim";
+    var parts = [];
+    if (conf.high) { parts.push("高 " + conf.high); }
+    if (conf.medium) { parts.push("中 " + conf.medium); }
+    if (conf.low) { parts.push("低 " + conf.low); }
+    if (conf.none) { parts.push("无匹配 " + conf.none); }
+    sub.textContent = "（置信度：" + parts.join(" · ") + " ｜ 识别 " + state.ocrMs + "ms · 分题 " +
+      state.splitMs + "ms · 匹配 " + state.matchMs + "ms · 合计 " + state.totalMs + "ms）";
+    summary.appendChild(sub);
+    blocks.forEach(function (b) { list.appendChild(batchRow(b)); });
+    appendBatchTools(state);
+  }
+
+  async function startBatchPageSearch() {
+    var Camera = getPlugin("Camera");
+    var Ocr = getPlugin("Ocr");
+    if (!Camera || !Ocr) {
+      show("view-batch-photo");
+      setBatchStatus(photoPluginMissingMessage(Camera, Ocr));
+      return;
+    }
+    setBatchStatus("正在打开相机…");
+    var photo;
+    try {
+      photo = await Camera.getPhoto({
+        quality: 85,
+        width: 2000,
+        resultType: "dataUrl",
+        source: "CAMERA",
+        saveToGallery: false,
+        allowEditing: false
+      });
+    } catch (e) {
+      var msg = String((e && e.message) || e);
+      setBatchStatus(/permission|denied/i.test(msg)
+        ? "无法使用相机，请授予相机权限后重试"
+        : "未拍摄照片（" + msg.slice(0, 40) + "）");
+      return;
+    }
+    setBatchStatus("正在识别整页文字…");
+    var totalStart = performance.now();
+    var ocrMs = 0, text = "", lines = [];
+    try {
+      var b64 = String(photo.dataUrl || "").split(",")[1] || "";
+      var res = await Ocr.recognizeText({ base64: b64 });
+      text = (res && res.text) || "";
+      ocrMs = (res && res.ms) || 0;
+      lines = normalizeOcrLines(res);
+    } catch (e) {
+      setBatchStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
+      return;
+    }
+    if (!lines.length) {
+      setBatchStatus("未识别到清晰文字，请重新拍摄（尽量拍全、拍正、光线均匀）");
+      return;
+    }
+    var tSplit = performance.now();
+    MSQ.splitPageOcrLines(lines, batchPageType);
+    var splitMs = Math.round(performance.now() - tSplit);
+    var tMatch = performance.now();
+    var out = MSQ.searchPageQuestionsByOcr(batchIndex, lines, batchPageType, { limit: 3 });
+    var matchMs = Math.round(performance.now() - tMatch);
+    setBatchStatus("识别完成（全程本地，图片不保存不上传）");
+    renderBatchResults({
+      lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
+      totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
+    });
+  }
+
+  /* 整页结果 → 整页拍照 → 搜题 → 首页 */
+  function handleBatchResultsBack() {
+    show("view-batch-photo");
+    renderBatchTypes();
+  }
+
+  function handleBatchBack() {
+    show("view-search");
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -1241,6 +1554,16 @@
     });
     $("btn-take-photo").addEventListener("click", startPhotoSearch);
     $("btn-photo-back").addEventListener("click", handlePhotoBack);
+    $("btn-batch-photo").addEventListener("click", function () {
+      var Camera = getPlugin("Camera");
+      var Ocr = getPlugin("Ocr");
+      openBatchPhoto();
+      if (!Camera || !Ocr) { setBatchStatus(photoPluginMissingMessage(Camera, Ocr)); }
+    });
+    $("btn-batch-back").addEventListener("click", handleBatchBack);
+    $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
+    $("btn-take-page").addEventListener("click", startBatchPageSearch);
+    initBatchTypes();
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
@@ -1268,6 +1591,7 @@
     byType = MSQ.indexByType(bank.questions);
     searchIndex = MSQ.buildSearchIndex(bank.questions);
     photoIndex = MSQ.buildOcrIndex(bank.questions);
+    batchIndex = MSQ.buildBatchOcrIndex(bank.questions);
     bindEvents();
     renderMenu();
     registerSW();

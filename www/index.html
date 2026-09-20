@@ -72,7 +72,8 @@
     <div class="search-bar-wrap">
       <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
              enterkeyhint="search" inputmode="search">
-      <button id="btn-photo-search" class="photo-btn" type="button">📷</button>
+      <button id="btn-photo-search" class="photo-btn" type="button" title="拍一道题">📷</button>
+      <button id="btn-batch-photo" class="photo-btn" type="button" title="拍整页">📄</button>
     </div>
     <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
       <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
@@ -98,6 +99,37 @@
       <p id="photo-status" class="search-count hidden"></p>
       <div id="photo-preview" class="hidden"></div>
       <div id="photo-results"></div>
+    </main>
+  </section>
+
+  <!-- 整页拍照搜题（选题型 → 拍整页 → 自动拆题 → 本页答案） -->
+  <section id="view-batch-photo" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-batch-back" class="backbtn">‹ 搜索</button>
+      <div class="qtitle">整页拍照搜题</div>
+    </header>
+    <main class="pad">
+      <div id="batch-type-row" class="batch-type-row" role="group" aria-label="本页题型">
+        <button type="button" class="batch-type-btn active" data-type="single" aria-pressed="true">单选</button>
+        <button type="button" class="batch-type-btn" data-type="multi" aria-pressed="false">多选</button>
+        <button type="button" class="batch-type-btn" data-type="judge" aria-pressed="false">判断</button>
+      </div>
+      <p class="batch-tip">先点一次当前大题题型，再拍整页。页面中间出现“多选题 / 判断题”大标题时会自动切换题型，一页可以跨大块。</p>
+      <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
+      <p id="batch-status" class="search-count hidden"></p>
+    </main>
+  </section>
+
+  <!-- 整页答案 -->
+  <section id="view-batch-results" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-batch-results-back" class="backbtn">‹ 重拍</button>
+      <div class="qtitle">整页答案</div>
+    </header>
+    <main id="batch-scroll" class="pad">
+      <div id="batch-summary" class="batch-summary"></div>
+      <div id="batch-list"></div>
+      <div id="batch-tools"></div>
     </main>
   </section>
 

@@ -243,10 +243,10 @@
 
   /* 查询 bigram 在目标中的包含率（容忍 OCR 少量错字/漏字）。
      可传入预计算的查询 grams（同一查询对 392 题复用，避免重复构建）。 */
-  function bigramRatio(query, target, precomputed) {
+  function bigramRatio(query, target, precomputed, targetGrams) {
     var qg = precomputed || gramCount(query);
     if (!qg.n) { return 0; }
-    var tg = gramCount(target).g;
+    var tg = targetGrams || gramCount(target).g;
     var hit = 0;
     for (var b in qg.g) { if (tg[b]) { hit++; } }
     return hit / qg.n;
@@ -254,11 +254,12 @@
 
   /* 在 phrase 中找最长的 8~20 字连续窗口，使其完整出现在 target 中（层1核心）。
      先用 bigram 粗筛跳过明显不相关的 phrase，避免全量窗口扫描。 */
-  function longestRunIn(phrase, target) {
-    if (phrase.length < 8) { return target.indexOf(phrase) >= 0 ? phrase.length : 0; }
-    if (bigramRatio(phrase, target) < 0.35) { return 0; }
+  function longestRunIn(phrase, target, minRun, targetGrams) {
+    var mr = minRun || 8;
+    if (phrase.length < mr) { return target.indexOf(phrase) >= 0 ? phrase.length : 0; }
+    if (bigramRatio(phrase, target, null, targetGrams) < 0.35) { return 0; }
     var maxLen = Math.min(20, phrase.length);
-    for (var len = maxLen; len >= 8; len--) {
+    for (var len = maxLen; len >= mr; len--) {
       for (var start = 0; start + len <= phrase.length; start++) {
         if (target.indexOf(phrase.substr(start, len)) >= 0) { return len; }
       }
@@ -270,8 +271,12 @@
      层1：较长连续片段直接命中题干（8~20 字，越长分越高）
      层2：多个 OCR 短语共同命中同一题（短语覆盖计数）
      层3：最长短语的 bigram 包含率容错（OCR 错字）
-     辅助：选项低权重加分，避免选项常见词反超题干命中。 */
-  function searchQuestionsByOcr(ocrIndex, ocrText) {
+     辅助：选项低权重加分，避免选项常见词反超题干命中。
+     candidates 为候选集合：单题拍照传入全部 392 题，整页模式传入题型过滤后的子集，
+     评分公式完全一致，IDF 在候选集合内统计。 */
+  function matchOcrCandidates(candidates, ocrText, options) {
+    var opts = options || {};
+    var MIN_RUN = opts.minRun || 8;
     var norm = normalizeOcrText(ocrText);
     if (!norm) { return []; }
     var seen = {};
@@ -286,18 +291,20 @@
 
     /* IDF：套话短语（如"根据营销安规规定"，几乎每题都有）判别力低，
        罕见短语命中权重高。df 在本次查询内统计。 */
-    var N = ocrIndex.length;
+    var N = candidates.length;
     var idf = phrases.map(function (p) {
       var df = 0;
       for (var d = 0; d < N; d++) {
-        if (ocrIndex[d].ocrStem.indexOf(p) >= 0) { df++; }
+        if (candidates[d].ocrStem.indexOf(p) >= 0) { df++; }
       }
       return Math.max(0.5, Math.log((N + 1) / (df + 1)) * 2);
     });
 
     var results = [];
-    for (var i = 0; i < ocrIndex.length; i++) {
-      var it = ocrIndex[i];
+    for (var i = 0; i < candidates.length; i++) {
+      var it = candidates[i];
+      /* 候选题干的 bigram 集合按题缓存一次（纯函数结果，不改变任何计算） */
+      var stemGrams = it.ocrStemGrams || (it.ocrStemGrams = gramCount(it.ocrStem).g);
       var bestRun = 0, bestRunIdf = 0, fullHitIdf = 0, weightedHits = 0, optHits = 0;
       for (var pi = 0; pi < phrases.length; pi++) {
         var p = phrases[pi];
@@ -307,7 +314,7 @@
           if (p.length > bestRun) { bestRun = p.length; bestRunIdf = idf[pi]; }
           continue;
         }
-        var run = longestRunIn(p, it.ocrStem);
+        var run = longestRunIn(p, it.ocrStem, MIN_RUN, stemGrams);
         if (run / p.length >= 0.6) { weightedHits += idf[pi] * 0.5; }
         if (run > bestRun) { bestRun = run; bestRunIdf = idf[pi]; }
         for (var oi = 0; oi < it.ocrOptions.length; oi++) {
@@ -318,7 +325,7 @@
          完整短语命中的 IDF 单独加分（真源通常完整包含多个短语）。 */
       var sim = 0;
       if (bestRun >= 6 || weightedHits > 0 || optHits > 0) {
-        var ratio = bigramRatio(longest, it.ocrStem, longestGrams);
+        var ratio = bigramRatio(longest, it.ocrStem, longestGrams, stemGrams);
         if (ratio >= 0.55) { sim = ratio; }
       }
       var score = Math.round(bestRun * (100 + bestRunIdf * 10))
@@ -338,6 +345,11 @@
     return results;
   }
 
+  /* 单题拍照搜题入口：候选为全部题目，行为与历史版本完全一致。 */
+  function searchQuestionsByOcr(ocrIndex, ocrText) {
+    return matchOcrCandidates(ocrIndex, ocrText);
+  }
+
   /* 置信度：不要把低分结果冒充确定答案。
      非常确定 = Top1 分数足够高且明显领先 Top2；否则给出候选列表。 */
   function ocrConfidence(matches) {
@@ -352,6 +364,256 @@
     return { level: ok ? "confident" : "candidates", matches: matches };
   }
 
+  /* ---------------- 整页拍照搜题（分题 + 题型强约束批量匹配） ----------------
+     考试页面结构固定：单选/多选/判断各自连续成块，只可能在一页中间换一次大块。
+     因此整页模式不做"逐题猜题型"，而是：用户选当前大块题型 → 页内大块标题可中途切换 →
+     每道题只在对应题型的题库子集中匹配。 */
+
+  function toCoord(v) {
+    return (typeof v === "number" && isFinite(v)) ? v : null;
+  }
+
+  /* 行排序：先按 top 分行（容忍半个行高的抖动），行内按 left；无坐标时保持原顺序。 */
+  function sortOcrLines(lines) {
+    var arr = (lines || []).map(function (l, i) {
+      var o = l || {};
+      return { text: String(o.text == null ? "" : o.text),
+        left: toCoord(o.left), top: toCoord(o.top),
+        right: toCoord(o.right), bottom: toCoord(o.bottom), i: i };
+    });
+    if (arr.length < 2) { return arr; }
+    var hasCoords = false;
+    for (var k = 0; k < arr.length; k++) { if (arr[k].top !== null) { hasCoords = true; break; } }
+    if (!hasCoords) { return arr; }
+    arr.sort(function (a, b) {
+      return (a.top === null ? 0 : a.top) - (b.top === null ? 0 : b.top) || a.i - b.i;
+    });
+    var out = [];
+    var p = 0;
+    while (p < arr.length) {
+      var rowTop = arr[p].top === null ? 0 : arr[p].top;
+      var row = [];
+      while (p < arr.length) {
+        var l = arr[p];
+        var h = (l.top !== null && l.bottom !== null) ? (l.bottom - l.top) : 0;
+        var tol = Math.max(8, Math.round(h / 2));
+        if ((l.top === null ? 0 : l.top) - rowTop > tol) { break; }
+        row.push(l); p++;
+      }
+      row.sort(function (a, b) {
+        return (a.left === null ? 0 : a.left) - (b.left === null ? 0 : b.left);
+      });
+      out = out.concat(row);
+    }
+    return out;
+  }
+
+  /* 大块标题：单选题/单项选择题/多选题/多项选择题/判断题（允许"二、"这类大题编号与
+     尾部计分说明）。标题之前沿用当前题型，标题之后自动切换到标题对应题型。 */
+  function pageSectionType(line) {
+    var s = String(line == null ? "" : line).normalize("NFKC").trim();
+    if (!s || s.length > 20) { return null; }
+    s = s.replace(/^[（(【\[]?\s*(?:[一二三四五六七八九十]+|\d{1,2})\s*[)）】\]]?\s*[、.．:：]?\s*/, "");
+    s = s.replace(/[（(【\[].*$/, "").trim();
+    s = s.replace(/[\s.．、:：,，;；]+$/, "");
+    if (s === "单项选择题" || s === "单选题" || s === "单选") { return "single"; }
+    if (s === "多项选择题" || s === "多选题" || s === "多选") { return "multi"; }
+    if (s === "判断题" || s === "判断") { return "judge"; }
+    return null;
+  }
+
+  /* 题号识别：1. / 1．/ 1、/ 1) / （1）/ 第1题 / "31 题干"。
+     只认行首题号；数字位允许少量 OCR 形近字母（3l -> 31），但必须至少含一个真数字，
+     避免把选项行 "B. 停电" 误判成题号。 */
+  var PAGE_NUM_CHARS = "0-9OoQlIiSsABZG";
+  var PAGE_NUM_MAP = { O: "0", o: "0", Q: "0", l: "1", I: "1", i: "1", S: "5", s: "5",
+    B: "8", A: "4", Z: "2", G: "6" };
+  var PAGE_QNUM_PATTERNS = [
+    new RegExp("^[（(]\\s*([" + PAGE_NUM_CHARS + "]{1,3})\\s*[)）]\\s*"),
+    new RegExp("^第\\s*([" + PAGE_NUM_CHARS + "]{1,3})\\s*题\\s*[.．、:：]?\\s*"),
+    new RegExp("^([" + PAGE_NUM_CHARS + "]{1,3})\\s*[.．、,，:：)）]\\s*(?!\\d)"),
+    new RegExp("^([" + PAGE_NUM_CHARS + "]{1,3})\\s+(?=[\\u4e00-\\u9fa5])")
+  ];
+
+  function pageNumberValue(token) {
+    if (!/\d/.test(token)) { return null; }
+    var s = "";
+    for (var i = 0; i < token.length; i++) {
+      var c = token.charAt(i);
+      s += PAGE_NUM_MAP[c] != null ? PAGE_NUM_MAP[c] : c;
+    }
+    if (!/^\d+$/.test(s)) { return null; }
+    var n = parseInt(s, 10);
+    return (n >= 1 && n <= 999) ? n : null;
+  }
+
+  function pageQuestionNumber(line) {
+    /* 直接在原串上匹配（不 NFKC）：题号前缀的正则已同时覆盖全角/半角分隔符，
+       这样 rest 保留 OCR 原文（全角标点不被改成半角）。 */
+    var s = String(line == null ? "" : line).trim();
+    if (!s) { return null; }
+    for (var i = 0; i < PAGE_QNUM_PATTERNS.length; i++) {
+      var m = s.match(PAGE_QNUM_PATTERNS[i]);
+      if (!m) { continue; }
+      var n = pageNumberValue(m[1]);
+      if (n === null) { continue; }
+      return { number: String(n), rest: s.slice(m[0].length).trim() };
+    }
+    return null;
+  }
+
+  /* 选项行：A. / A、/ （A）/ A．/ A: 开头。 */
+  function isPageOptionLine(text) {
+    return /^[（(【\[]?\s*[A-Fa-f]\s*[)）】\]]?\s*[.、．:：]\s*\S/.test(String(text == null ? "" : text).trim());
+  }
+
+  /* 页码/导航/分隔线：不参与匹配文本。 */
+  function isPageNoiseLine(text) {
+    var s = String(text == null ? "" : text).trim();
+    if (!s) { return true; }
+    if (/^\d{1,3}\s*\/\s*\d{1,3}$/.test(s)) { return true; }
+    if (/^第\s*\d{1,3}\s*页/.test(s) || /共\s*\d{1,3}\s*页/.test(s)) { return true; }
+    if (/^[-—–_=·\s\d]{1,12}$/.test(s)) { return true; }
+    if (/^[^\p{L}\p{N}]+$/u.test(s)) { return true; }
+    return false;
+  }
+
+  /* 按题号分题：新题号 = 上一题块结束、下一题块开始。
+     题干换行、A/B/C/D 选项都不拆题；大块标题只切题型、不属于任何题块。 */
+  function splitPageOcrLines(lines, defaultType) {
+    var def = defaultType || "single";
+    var sorted = sortOcrLines(lines);
+    var blocks = [];
+    var cur = null;
+    var curType = def;
+    var headers = [];
+    for (var i = 0; i < sorted.length; i++) {
+      var ln = sorted[i];
+      var text = String(ln.text == null ? "" : ln.text).trim();
+      if (!text) { continue; }
+      var sec = pageSectionType(text);
+      if (sec) {
+        curType = sec;
+        cur = null;
+        headers.push({ text: text, type: sec, top: ln.top, bottom: ln.bottom });
+        continue;
+      }
+      var qn = pageQuestionNumber(text);
+      if (qn) {
+        cur = { pageIndex: blocks.length, screenNumber: qn.number, type: curType,
+          lines: [], top: ln.top, bottom: ln.bottom };
+        blocks.push(cur);
+        if (qn.rest) {
+          cur.lines.push({ text: qn.rest, top: ln.top, left: ln.left, right: ln.right, bottom: ln.bottom });
+        }
+        continue;
+      }
+      if (cur) {
+        cur.lines.push({ text: text, top: ln.top, left: ln.left, right: ln.right, bottom: ln.bottom });
+        cur.bottom = ln.bottom;
+      }
+    }
+    blocks.forEach(function (b) {
+      var stem = [], opts = [];
+      b.lines.forEach(function (l) {
+        var t = l.text.trim();
+        if (!t || isPageNoiseLine(t)) { return; }
+        if (isPageOptionLine(t)) { opts.push(t); return; }
+        stem.push(t);
+      });
+      b.stemText = stem.join("");
+      b.optionsText = opts.join(" ");
+      b.rawText = b.lines.map(function (l) { return l.text; }).join("\n");
+      b.label = b.screenNumber ? b.screenNumber : ("本页第" + (b.pageIndex + 1) + "题");
+      if (b.bottom === null || b.bottom === undefined) { b.bottom = b.top; }
+    });
+    return blocks;
+  }
+
+  /* 整页匹配索引：在单题 OCR 索引基础上补上答案字段（不改动单题路径）。 */
+  function buildBatchOcrIndex(questions) {
+    var byId = {};
+    (questions || []).forEach(function (q) { byId[q.id] = q; });
+    return buildOcrIndex(questions).map(function (it) {
+      it.answer = byId[it.id] ? (byId[it.id].answer || []) : [];
+      return it;
+    });
+  }
+
+  /* 答案显示：单选 "B"，多选 "ACD"，判断 "√" / "×"。 */
+  function pageAnswerText(item) {
+    if (!item || !item.answer || !item.answer.length) { return "?"; }
+    if (item.type === "judge") { return item.answer[0] === 0 ? "√" : "×"; }
+    return item.answer.slice().sort(function (x, y) { return x - y; })
+      .map(function (i) { return LETTERS[i]; }).join("");
+  }
+
+  /* 领先度：Top1 相对 Top2 的倍数（只有一个候选时视为 2）。 */
+  function pageMatchLead(matches) {
+    if (!matches || !matches.length) { return { top1: 0, lead: 0 }; }
+    var t1 = matches[0];
+    var t2 = matches.length > 1 ? matches[1] : null;
+    return { top1: t1.score, lead: (t2 && t2.score > 0) ? t1.score / t2.score : 2 };
+  }
+
+  /* 题型是强约束：先把候选缩小到该题型，再在子集内评分（IDF 也按子集统计）。
+     题干优先；只有题干匹配不够确定（分数低/领先不足/题干太短）时才做第二遍让选项
+     以低权重辅助，且仅当第二遍得分更高才采用——选项辅助不会推翻题干的长连续片段。 */
+  function matchPageQuestionBlock(ocrIndex, block, options) {
+    var opts = options || {};
+    var type = (block && block.type) || opts.type || "single";
+    var limit = opts.limit || 3;
+    var minRun = opts.minRun || 5;
+    var pool = [];
+    for (var i = 0; i < ocrIndex.length; i++) {
+      if (ocrIndex[i].type === type) { pool.push(ocrIndex[i]); }
+    }
+    var stemText = (block && block.stemText) || "";
+    var matches = matchOcrCandidates(pool, stemText, { minRun: minRun }).slice(0, limit);
+    var lead = pageMatchLead(matches);
+    var weak = !matches.length || normalizeOcrText(stemText).length < 6 ||
+      lead.top1 < 900 || lead.lead < 1.6;
+    if (weak && opts.assistOptions !== false && (block && block.optionsText)) {
+      var assisted = matchOcrCandidates(pool, stemText + " " + block.optionsText,
+        { minRun: minRun }).slice(0, limit);
+      if (assisted.length && (!matches.length || assisted[0].score > matches[0].score)) {
+        matches = assisted;
+        matches.assistedByOptions = true;
+      }
+    }
+    return matches;
+  }
+
+  /* 置信度：高分且明显领先才算 high；领先不足是 medium；文本太少或候选接近是 low。 */
+  function pageBlockConfidence(matches, block) {
+    if (!matches || !matches.length) { return "none"; }
+    var textLen = normalizeOcrText((block && block.stemText) || "").length;
+    var lead = pageMatchLead(matches);
+    if (textLen < 8) { return "low"; }
+    if (lead.top1 >= 900 && lead.lead >= 1.6) { return "high"; }
+    if (lead.top1 >= 250 && lead.lead >= 1.25) { return "medium"; }
+    return "low";
+  }
+
+  /* 整页入口：lines -> 分题 -> 每题题型约束匹配 -> 答案。 */
+  function searchPageQuestionsByOcr(ocrIndex, lines, defaultType, options) {
+    var opts = options || {};
+    var byId = {};
+    for (var i = 0; i < ocrIndex.length; i++) { byId[ocrIndex[i].id] = ocrIndex[i]; }
+    var blocks = splitPageOcrLines(lines, defaultType);
+    var limit = opts.limit || 3;
+    var answered = 0;
+    blocks.forEach(function (b) {
+      b.matches = matchPageQuestionBlock(ocrIndex, b, { limit: limit });
+      b.confidence = pageBlockConfidence(b.matches, b);
+      b.bankId = b.matches.length ? b.matches[0].id : null;
+      b.answerItem = b.bankId === null ? null : (byId[b.bankId] || null);
+      b.answer = b.answerItem ? pageAnswerText(b.answerItem) : "?";
+      if (b.answer !== "?") { answered++; }
+    });
+    return { blocks: blocks, answered: answered };
+  }
+
   return {
     LETTERS: LETTERS, TYPE_ORDER: TYPE_ORDER, TYPE_NAMES: TYPE_NAMES,
     DEFAULT_EXAM_CONFIG: DEFAULT_EXAM_CONFIG,
@@ -364,6 +626,10 @@
     filterSearchResults: filterSearchResults, countSearchResultsByType: countSearchResultsByType,
     normalizeOcrText: normalizeOcrText, buildOcrIndex: buildOcrIndex,
     searchQuestionsByOcr: searchQuestionsByOcr, ocrConfidence: ocrConfidence,
+    buildBatchOcrIndex: buildBatchOcrIndex, splitPageOcrLines: splitPageOcrLines,
+    pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
+    matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
+    pageAnswerText: pageAnswerText, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });
