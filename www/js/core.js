@@ -457,7 +457,7 @@
       if (!m) { continue; }
       var n = pageNumberValue(m[1]);
       if (n === null) { continue; }
-      return { number: String(n), rest: s.slice(m[0].length).trim() };
+      return { number: String(n), rest: s.slice(m[0].length).trim(), raw: String(m[1]) };
     }
     return null;
   }
@@ -500,7 +500,8 @@
       }
       var qn = pageQuestionNumber(text);
       if (qn) {
-        cur = { pageIndex: blocks.length, screenNumber: qn.number, type: curType,
+        cur = { pageIndex: blocks.length, screenNumber: qn.number, rawScreenNumber: qn.raw,
+          numberSource: "ocr", type: curType,
           lines: [], top: ln.top, bottom: ln.bottom };
         blocks.push(cur);
         if (qn.rest) {
@@ -528,6 +529,173 @@
       if (b.bottom === null || b.bottom === undefined) { b.bottom = b.top; }
     });
     return blocks;
+  }
+
+  /* ---------------- 整页题号序列校正（独立纯函数，不参与匹配打分） ----------------
+     真机发现：ML Kit 可能把 24 识成 14、33 识成 3l，且块顺序不稳定，结果页会出现
+     23/14/22/21/20 这类乱序。这里只做三件事：
+       1) 保留 OCR 原始题号（rawScreenNumber 永不改写，方便排查）
+       2) 页内主连续段分析，仅在强证据下校正异常题号（numberSource = repaired）
+       3) 按校正后的题号升序返回
+     绝不改动 bankId / matches / confidence / answer；漏题造成的缺口（20 21 23 24）原样保留。 */
+
+  var SEQ_CLUSTER_MAX_GAP = 2;  /* 簇内允许的最大缺号数：20 与 23 仍算同一簇（中间漏一题） */
+  var SEQ_MAX_REPAIRS = 2;      /* 一页最多校正 2 个题号；再多有更多未知，宁可不动 */
+
+  function seqNum(block) {
+    var n = parseInt(block && block.screenNumber, 10);
+    return isNaN(n) ? null : n;
+  }
+
+  function seqRaw(block) {
+    if (block && block.rawScreenNumber != null) { return String(block.rawScreenNumber); }
+    if (block && block.screenNumber != null) { return String(block.screenNumber); }
+    return "";
+  }
+
+  /* OCR 原始题号与目标数字的差异：位数相同才可比（返回不同字符数），位数不同返回 -1 */
+  function seqDigitDiff(raw, target) {
+    var a = String(raw == null ? "" : raw).replace(/[^0-9A-Za-z]/g, "");
+    var b = String(target);
+    if (a.length !== b.length) { return -1; }
+    var diff = 0;
+    for (var i = 0; i < b.length; i++) {
+      if (a.charAt(i) !== b.charAt(i)) { diff++; }
+    }
+    return diff;
+  }
+
+  function seqMaxDiff(len) { return len <= 3 ? 1 : 2; }
+
+  /* 形近判定：位数相同且只有少量字符不同；或 OCR 掉了一位，剩余数字正好是目标的前/后缀 */
+  function seqLooksLike(raw, target) {
+    var a = String(raw == null ? "" : raw).replace(/[^0-9A-Za-z]/g, "");
+    var b = String(target);
+    var d = seqDigitDiff(a, b);
+    if (d >= 0 && d <= seqMaxDiff(a.length)) { return true; }
+    if (a.length > 0 && a.length < b.length) {
+      return b.slice(0, a.length) === a || b.slice(b.length - a.length) === a;
+    }
+    return false;
+  }
+
+  /* 近连续簇：排序后相邻两值相差 ≤ maxGap+1 视为同簇（允许漏题造成的小缺口） */
+  function seqClusters(values, maxGap) {
+    var clusters = [];
+    var cur = null;
+    for (var i = 0; i < values.length; i++) {
+      var v = values[i];
+      if (cur && v - cur.end <= maxGap + 1) { cur.end = v; cur.values.push(v); }
+      else { cur = { start: v, end: v, values: [v] }; clusters.push(cur); }
+    }
+    return clusters;
+  }
+
+  function normalizePageQuestionSequence(blocks) {
+    var list = (blocks || []).map(function (b, i) {
+      if (b.originalPageIndex === undefined) { b.originalPageIndex = i; }
+      return b;
+    });
+    /* 空间顺序：优先 top（像素位置），没有坐标时退回输入顺序 */
+    var order = list.map(function (b, i) { return i; }).sort(function (x, y) {
+      var a = list[x], b = list[y];
+      var at = (a && typeof a.top === "number") ? a.top : a.originalPageIndex;
+      var bt = (b && typeof b.top === "number") ? b.top : b.originalPageIndex;
+      return at - bt;
+    });
+    var pos = new Array(list.length);
+    order.forEach(function (idx, k) { pos[idx] = k; });
+    var posOf = function (b) { return pos[list.indexOf(b)]; };
+    var blockWithNumber = function (n) {
+      for (var i = 0; i < list.length; i++) { if (seqNum(list[i]) === n) { return list[i]; } }
+      return null;
+    };
+    var repair = function (b, target) {
+      b.screenNumber = String(target);
+      b.numberSource = "repaired";
+    };
+
+    var numbered = list.filter(function (b) { return seqNum(b) !== null; });
+    list.forEach(function (b) { if (seqNum(b) === null) { b.numberSource = "unknown"; } });
+    var repairs = 0;
+
+    if (numbered.length >= 3) {
+      var seen = {};
+      numbered.forEach(function (b) { seen[seqNum(b)] = true; });
+      var values = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
+      var clusters = seqClusters(values, SEQ_CLUSTER_MAX_GAP);
+      clusters.sort(function (a, b) {
+        return b.values.length - a.values.length ||
+          (b.end - b.start) - (a.end - a.start) || a.start - b.start;
+      });
+      var main = clusters[0];
+      var inMain = {};
+      main.values.forEach(function (v) { inMain[v] = true; });
+
+      var missing = [];
+      for (var v = main.start; v <= main.end; v++) { if (!seen[v]) { missing.push(v); } }
+      var byNum = {};
+      numbered.forEach(function (b) { (byNum[seqNum(b)] = byNum[seqNum(b)] || []).push(b); });
+      var taken = {};
+
+      /* 1) 同页重复题号：恰重复一对 + 主簇恰好缺一个号 + 其中一块空间上正落在缺口里
+        （如 31 32 3l 34 35：3l 被形近恢复成 31，与真 31 重复，缺口 33 正是它的位置） */
+      if (missing.length === 1) {
+        Object.keys(byNum).forEach(function (k) {
+          if (repairs >= SEQ_MAX_REPAIRS) { return; }
+          var grp = byNum[k];
+          if (grp.length !== 2 || !inMain[Number(k)]) { return; }
+          var m = missing[0];
+          var prev = blockWithNumber(m - 1), next = blockWithNumber(m + 1);
+          if (!prev || !next) { return; }
+          var odd = grp.filter(function (b) {
+            return posOf(b) > posOf(prev) && posOf(b) < posOf(next);
+          });
+          if (odd.length === 1 && !seen[m]) { repair(odd[0], m); taken[m] = true; repairs++; }
+        });
+      }
+
+      /* 2) 孤立异常值：必须空间位置紧贴主簇端点/缺口，且原题号与目标只差少量字符。
+        绝不因为“不连续”就批量改号。 */
+      var outliers = numbered.filter(function (b) {
+        return !inMain[seqNum(b)] && b.numberSource !== "repaired";
+      }).sort(function (a, b) { return posOf(a) - posOf(b); });
+      for (var oi = 0; oi < outliers.length && repairs < SEQ_MAX_REPAIRS; oi++) {
+        var o = outliers[oi];
+        var target = null;
+        var tail = blockWithNumber(main.end), head = blockWithNumber(main.start);
+        if (!seen[main.end + 1] && posOf(o) > posOf(tail)) {
+          target = main.end + 1;                       /* 尾部顺延：…23 + [14] → 24 */
+        } else if (main.start - 1 >= 1 && !seen[main.start - 1] && posOf(o) < posOf(head)) {
+          target = main.start - 1;                     /* 头部顺延 */
+        } else {
+          for (var g = main.start; g <= main.end; g++) {
+            if (!seen[g] && seen[g - 1] && seen[g + 1]) {
+              var pg = blockWithNumber(g - 1), ng = blockWithNumber(g + 1);
+              if (posOf(o) > posOf(pg) && posOf(o) < posOf(ng)) { target = g; break; }
+            }
+          }
+        }
+        if (target !== null && !seen[target] && !taken[target] && seqLooksLike(seqRaw(o), target)) {
+          repair(o, target);
+          taken[target] = true;
+          repairs++;
+        }
+      }
+    }
+
+    list.forEach(function (b) {
+      if (!b.numberSource) { b.numberSource = "ocr"; }
+      if (seqNum(b) !== null) { b.label = String(seqNum(b)); }
+    });
+    /* 最终给用户看的顺序：校正后的题号升序；无题号的块按原位置排在最后 */
+    return list.slice().sort(function (a, b) {
+      var an = seqNum(a), bn = seqNum(b);
+      if (an === null && bn === null) { return a.originalPageIndex - b.originalPageIndex; }
+      if (an === null) { return 1; }
+      if (bn === null) { return -1; }
+      return an - bn || a.originalPageIndex - b.originalPageIndex;
+    });
   }
 
   /* 整页匹配索引：在单题 OCR 索引基础上补上答案字段（不改动单题路径）。 */
@@ -611,7 +779,10 @@
       b.answer = b.answerItem ? pageAnswerText(b.answerItem) : "?";
       if (b.answer !== "?") { answered++; }
     });
-    return { blocks: blocks, answered: answered };
+    /* 题号校正 + 升序：只调整 screenNumber/label/numberSource 与块顺序，
+       不改写 bankId/matches/confidence/answer（匹配结果与题号无关） */
+    var ordered = normalizePageQuestionSequence(blocks);
+    return { blocks: ordered, answered: answered };
   }
 
   return {
@@ -627,6 +798,7 @@
     normalizeOcrText: normalizeOcrText, buildOcrIndex: buildOcrIndex,
     searchQuestionsByOcr: searchQuestionsByOcr, ocrConfidence: ocrConfidence,
     buildBatchOcrIndex: buildBatchOcrIndex, splitPageOcrLines: splitPageOcrLines,
+    normalizePageQuestionSequence: normalizePageQuestionSequence,
     pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
     matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
     pageAnswerText: pageAnswerText, searchPageQuestionsByOcr: searchPageQuestionsByOcr,

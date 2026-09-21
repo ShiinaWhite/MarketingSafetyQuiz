@@ -751,6 +751,113 @@ if (M.misses.length) { console.log("  [INFO] (simulated) 未命中 Top1: " + M.m
 console.log("  [INFO] (simulated) 置信度分布 " + JSON.stringify(
   pageCases.reduce((m, p) => { p.blocks.forEach(b => { m[b.confidence] = (m[b.confidence] || 0) + 1; }); return m; }, {})));
 
+/* ---------- 整页题号序列校正（第一次真机测试回归） ----------
+   真机现象：结果页出现 23/14/22/21/20 这类乱序，OCR 可能把 24 识成 14、33 识成 3l。 */
+section("整页题号序列校正（真机回归）");
+const mkNb = (specs) => specs.map((s, i) => ({
+  screenNumber: String(s.n), rawScreenNumber: s.raw || String(s.n),
+  type: "single", lines: [], top: s.top !== undefined ? s.top : i * 100,
+  bottom: (s.top !== undefined ? s.top : i * 100) + 40,
+  pageIndex: i, stemText: "题干内容", rawText: "", label: String(s.n)
+}));
+const seqOf = (blocks) => blocks.map(b => b.screenNumber).join(",");
+const srcOf = (blocks) => blocks.map(b => b.numberSource).join(",");
+
+/* Case A：真实案例——同页 20~24，其中 24 被 OCR 识成 14 */
+const caseA = MSQ.normalizePageQuestionSequence(mkNb([{n:20},{n:21},{n:22},{n:23},{n:14}]));
+check("Case A：14 判为序列异常并校正为 24（不放第一位）", seqOf(caseA) === "20,21,22,23,24", seqOf(caseA));
+check("Case A：rawScreenNumber 永远保留 OCR 原值 14", caseA[4].rawScreenNumber === "14");
+check("Case A：仅被校正块 numberSource=repaired", srcOf(caseA) === "ocr,ocr,ocr,ocr,repaired", srcOf(caseA));
+
+/* Case A2：块顺序被打乱（对应真机上结果页 23/14/22/21/20 的乱序） */
+const caseA2 = MSQ.normalizePageQuestionSequence(mkNb([
+  {n:23, top:400}, {n:14, top:500}, {n:22, top:300}, {n:21, top:200}, {n:20, top:100}]));
+check("Case A2：乱序输入仍按校正后题号升序输出", seqOf(caseA2) === "20,21,22,23,24", seqOf(caseA2));
+
+/* Case B：漏题造成的缺口（22 整块没识别）必须保留，绝不伪造 */
+check("Case B：20,21,23,24 保持原样，不伪造 22",
+  seqOf(MSQ.normalizePageQuestionSequence(mkNb([{n:20},{n:21},{n:23},{n:24}]))) === "20,21,23,24");
+
+/* Case C：正常连续段一个都不改 */
+const caseC = MSQ.normalizePageQuestionSequence(mkNb([{n:51},{n:52},{n:53},{n:54},{n:55}]));
+check("Case C：51~55 全部保持 numberSource=ocr", seqOf(caseC) === "51,52,53,54,55" && srcOf(caseC) === "ocr,ocr,ocr,ocr,ocr");
+
+/* Case D：形近字符 3l（复用 pageNumberValue 的转换 → 31 与真 31 重复）借缺口校正为 33 */
+const caseD = MSQ.normalizePageQuestionSequence(mkNb([{n:31},{n:32},{n:31,raw:"3l"},{n:34},{n:35}]));
+check("Case D：31,32,3l,34,35 恢复为 31~35", seqOf(caseD) === "31,32,33,34,35", seqOf(caseD));
+check("Case D：rawScreenNumber 保留 3l 且标记 repaired",
+  caseD[2].rawScreenNumber === "3l" && caseD[2].numberSource === "repaired");
+
+/* Case E：可靠题号只有 1~2 个时不做激进序列推断 */
+check("Case E：仅 2 个题号 → 不推断，只升序",
+  (() => { const r = MSQ.normalizePageQuestionSequence(mkNb([{n:35},{n:20}]));
+    return seqOf(r) === "20,35" && srcOf(r) === "ocr,ocr"; })());
+
+/* 补充边界：掉位数字 / 证据不足 / 无题号块 / 匹配字段不受影响 */
+check("OCR 掉位（24 识成 4）→ 尾部顺延校正为 24",
+  (() => { const r = MSQ.normalizePageQuestionSequence(mkNb([{n:20},{n:21},{n:22},{n:23},{n:4}]));
+    return seqOf(r) === "20,21,22,23,24" && r[4].numberSource === "repaired"; })());
+check("证据不足（90 与 24 差两位）不强行改号，仍升序放末尾",
+  (() => { const r = MSQ.normalizePageQuestionSequence(mkNb([{n:20},{n:21},{n:22},{n:23},{n:90}]));
+    return seqOf(r) === "20,21,22,23,90" && r[4].numberSource === "ocr"; })());
+check("无题号的块 numberSource=unknown 且排在最后",
+  (() => { const blocks = mkNb([{n:20},{n:21},{n:22}]);
+    blocks.push({ type: "single", lines: [], top: 300, bottom: 340, pageIndex: 3,
+      stemText: "题", rawText: "", label: "本页第4题" });
+    const r = MSQ.normalizePageQuestionSequence(blocks);
+    return r.length === 4 && r[r.length - 1].numberSource === "unknown"
+      && r[r.length - 1].screenNumber === undefined && seqOf(r.slice(0, 3)) === "20,21,22"; })());
+check("题号校正绝不改写 bankId/matches/confidence/answer",
+  (() => { const blocks = mkNb([{n:20},{n:21},{n:22},{n:23},{n:14}]);
+    blocks[4].bankId = 999; blocks[4].confidence = "high";
+    blocks[4].matches = [{ id: 999, score: 1234 }]; blocks[4].answer = "B";
+    const last = MSQ.normalizePageQuestionSequence(blocks)[4];
+    return last.bankId === 999 && last.confidence === "high" && last.answer === "B"
+      && last.matches.length === 1 && last.matches[0].id === 999; })());
+check("修复前的位置被记录在 originalPageIndex（输入序保留不重排）",
+  (() => { const input = mkNb([{n:23},{n:14},{n:22},{n:21},{n:20}]);
+    const r = MSQ.normalizePageQuestionSequence(input);
+    return r.every(b => typeof b.originalPageIndex === "number")
+      && r[0].screenNumber === "20" && r[0].originalPageIndex === 4
+      && input[0].originalPageIndex === 0 && input[0].screenNumber === "23"; })());
+
+/* 端到端：searchPageQuestionsByOcr 输出已按校正题号升序，匹配结果不受题号影响 */
+check("整页链路：末题 34 被识成 14 时仍输出 31~34 且匹配全对",
+  (() => {
+    const singles = byType.single.slice(0, 4);
+    const lines = [];
+    let y = 60;
+    singles.forEach((q, i) => {
+      const num = (i === 3) ? "14" : String(31 + i);
+      lines.push({ text: num + ". " + q.stem, left: 40, top: y, right: 900, bottom: y + 46 }); y += 52;
+      q.options.forEach((o, k) => {
+        lines.push({ text: "ABCDEF"[k] + ". " + o, left: 60, top: y, right: 900, bottom: y + 46 }); y += 52;
+      });
+    });
+    const res = MSQ.searchPageQuestionsByOcr(batchIdx, lines, "single", { limit: 3 });
+    const seq = res.blocks.map(b => b.screenNumber).join(",");
+    const matchOk = res.blocks.every((b, i) => b.bankId === singles[i].id);
+    return seq === "31,32,33,34" && matchOk
+      && res.blocks[3].rawScreenNumber === "14" && res.blocks[3].numberSource === "repaired";
+  })());
+check("整页链路：漏题（少一道）时缺口保留且其余升序",
+  (() => {
+    const singles = byType.single.slice(4, 8);   // 4 题页：题号 20,21,22,23
+    const lines = [];
+    let y = 60;
+    singles.forEach((q, i) => {
+      if (i === 2) { return; }                   // 第 22 题整块漏识别
+      lines.push({ text: (20 + i) + ". " + q.stem, left: 40, top: y, right: 900, bottom: y + 46 }); y += 52;
+      q.options.forEach((o, k) => {
+        lines.push({ text: "ABCDEF"[k] + ". " + o, left: 60, top: y, right: 900, bottom: y + 46 }); y += 52;
+      });
+    });
+    const res = MSQ.searchPageQuestionsByOcr(batchIdx, lines, "single", { limit: 3 });
+    return res.blocks.map(b => b.screenNumber).join(",") === "20,21,23"
+      && res.blocks.every(b => b.numberSource === "ocr");
+  })());
+
+/* ---------- utils ---------- */
 /* ---------- utils ---------- */
 function mulberry(seed) {
   return function () {

@@ -1335,12 +1335,18 @@
     batchCollapsible(tools, "查看分题结果", function (body) {
       var sec = document.createElement("div");
       sec.className = "explain-sec";
-      state.out.blocks.forEach(function (b) {
+      var srcName = { ocr: "ocr", repaired: "repaired（序列校正）", inferred: "inferred", unknown: "unknown（无题号）" };
+      state.out.blocks.forEach(function (b, i) {
         var p = document.createElement("p");
         p.className = "explain-text";
-        p.textContent = b.label + " ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type) +
-          " ｜ y " + Math.round(b.top || 0) + "~" + Math.round(b.bottom || 0) +
-          " ｜ " + b.confidence + "\n" + (b.rawText || "");
+        p.textContent = "block#" + (i + 1) +
+          "\nOCR题号：" + (b.rawScreenNumber != null ? b.rawScreenNumber : "（无）") +
+          "\n最终题号：" + (b.screenNumber != null ? b.screenNumber : b.label) +
+          "\n题号来源：" + (srcName[b.numberSource] || b.numberSource || "ocr") +
+          "\n" + (BATCH_TYPE_NAMES[b.type] || b.type) + " ｜ y=" + Math.round(b.top || 0) + "~" + Math.round(b.bottom || 0) +
+          " ｜ " + b.confidence + (b.rawScreenNumber != null && b.screenNumber != null &&
+            String(b.rawScreenNumber) !== String(b.screenNumber) ? "（原识别 " + b.rawScreenNumber + " → 已校正）" : "") +
+          "\n" + (b.rawText || "");
         sec.appendChild(p);
       });
       body.appendChild(sec);
