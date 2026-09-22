@@ -774,6 +774,17 @@
       .map(function (i) { return LETTERS[i]; }).join("");
   }
 
+  /* 整页结果展示门控（纯展示层）：置信度只通过颜色表达，不再隐藏答案。
+     high=绿色 / medium=橙色 / low=红色（只要有候选答案就显示原答案）；
+     none 或真无候选 = 显示 ?。返回 { text, cls }，cls 对应结果行答案的颜色类。
+     本函数只做展示决策，不参与置信度计算与匹配。 */
+  function pageAnswerDisplay(confidence, answer) {
+    var has = answer != null && answer !== "" && answer !== "?";
+    if (confidence === "none" || !has) { return { text: "?", cls: "none" }; }
+    var cls = confidence === "medium" ? "mid" : (confidence === "low" ? "low" : "high");
+    return { text: String(answer), cls: cls };
+  }
+
   /* 领先度：Top1 相对 Top2 的倍数（只有一个候选时视为 2）。 */
   function pageMatchLead(matches) {
     if (!matches || !matches.length) { return { top1: 0, lead: 0 }; }
@@ -864,7 +875,7 @@
     normalizePageQuestionSequence: normalizePageQuestionSequence,
     pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
     matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
-    pageAnswerText: pageAnswerText, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
+    pageAnswerText: pageAnswerText, pageAnswerDisplay: pageAnswerDisplay, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

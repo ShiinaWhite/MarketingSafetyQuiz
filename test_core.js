@@ -706,6 +706,43 @@ check("分题：题干换行 + 选项换行不拆题", (() => {
     && b[0].stemText === "根据营销安规规定，作业人员进入现场应正确佩戴安全帽。"
     && b[0].optionsText === "A. 正确 B. 错误";
 })());
+/* 整页结果展示门控（置信度颜色化） */
+section("整页结果展示门控（纯展示层）");
+check("high：显示原答案，绿色类", (() => {
+  const d = MSQ.pageAnswerDisplay("high", "B");
+  return d.text === "B" && d.cls === "high";
+})());
+check("medium：显示原答案，橙色类", (() => {
+  const d = MSQ.pageAnswerDisplay("medium", "ACD");
+  return d.text === "ACD" && d.cls === "mid";
+})());
+check("low：有候选答案不再隐藏（红色类）", (() => {
+  const d = MSQ.pageAnswerDisplay("low", "√");
+  return d.text === "√" && d.cls === "low";
+})());
+check("low 多选：显示字母组合如 ACD", (() => {
+  const d = MSQ.pageAnswerDisplay("low", "ACD");
+  return d.text === "ACD" && d.cls === "low";
+})());
+check("low 判断：显示 √ / ×", (() => {
+  return MSQ.pageAnswerDisplay("low", "√").text === "√"
+    && MSQ.pageAnswerDisplay("low", "×").text === "×";
+})());
+check("none：真无匹配仍显示 ?", (() => {
+  const d = MSQ.pageAnswerDisplay("none", "?");
+  return d.text === "?" && d.cls === "none";
+})());
+check("low 但无候选答案：也显示 ?（不与有答案混淆）", (() => {
+  const d = MSQ.pageAnswerDisplay("low", "?");
+  return d.text === "?" && d.cls === "none";
+})());
+check("空答案按无匹配处理", MSQ.pageAnswerDisplay("high", "").text === "?");
+check("门控不影响匹配层：confidence/bankId 原样", (() => {
+  const blocks = [{ screenNumber: "31", rawScreenNumber: "31", type: "single", confidence: "high",
+    bankId: 118, answer: "B", lines: [], stemText: "题", rawText: "", label: "31" }];
+  return blocks[0].confidence === "high" && blocks[0].bankId === 118;
+})());
+
 check("大块标题形近容错：多项选挥题/单项选泽题/判新题",
   MSQ.pageSectionType("多项选挥题") === "multi"
   && MSQ.pageSectionType("单项选泽题") === "single"

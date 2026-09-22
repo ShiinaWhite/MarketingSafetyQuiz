@@ -1199,9 +1199,9 @@
   }
 
   function batchAnswerDisplay(b) {
-    /* 低置信度不强行给确定答案：显示 ? 并在详情里给 Top3 候选 */
-    if (!b || b.confidence === "low" || b.confidence === "none" || b.answer === "?") { return "?"; }
-    return b.answer;
+    /* 置信度只通过颜色表达：low 有候选答案就显示原答案（红色），
+       仅 none / 真无候选时显示 ?。展示层决策见 core.pageAnswerDisplay。 */
+    return MSQ.pageAnswerDisplay(b ? b.confidence : "none", b ? b.answer : "?");
   }
 
   var BATCH_TYPE_NAMES = { single: "单选题", multi: "多选题", judge: "判断题" };
@@ -1255,21 +1255,12 @@
     no.className = "batch-no";
     no.textContent = b.label;
     var ans = document.createElement("span");
-    var shown = batchAnswerDisplay(b);
-    ans.className = "batch-ans" + (shown === "?" ? " low" : (b.confidence === "medium" ? " mid" : ""));
-    ans.textContent = shown;
+    var disp = batchAnswerDisplay(b);
+    /* 结果行只保留 题号 + 答案：置信度用颜色（绿/橙/红/灰）表达，无右侧任何标记 */
+    ans.className = "batch-ans" + (disp.cls === "high" ? "" : " " + disp.cls);
+    ans.textContent = disp.text;
     row.appendChild(no);
     row.appendChild(ans);
-    if (b.type !== batchPageType) {
-      var tag = document.createElement("span");
-      tag.className = "batch-type-tag";
-      tag.textContent = BATCH_TYPE_NAMES[b.type] || b.type;
-      row.appendChild(tag);
-    }
-    var flag = document.createElement("span");
-    flag.className = "batch-flag";
-    flag.textContent = b.confidence === "medium" ? "◐" : (b.confidence === "low" || b.confidence === "none" ? "!" : "");
-    row.appendChild(flag);
     var detail = batchDetail(b);
     row.addEventListener("click", function () {
       var open = detail.classList.toggle("hidden") === false;
