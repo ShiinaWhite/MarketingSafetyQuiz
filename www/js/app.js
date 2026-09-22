@@ -1539,16 +1539,6 @@
     // 搜题
     $("btn-search-back").addEventListener("click", handleSearchBack);
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
-    $("btn-photo-search").addEventListener("click", function () {
-      var Camera = getPlugin("Camera");
-      var Ocr = getPlugin("Ocr");
-      if (!Camera || !Ocr) {
-        show("view-photo");
-        setPhotoStatus(photoPluginMissingMessage(Camera, Ocr));
-        return;
-      }
-      startPhotoSearch();
-    });
     $("btn-take-photo").addEventListener("click", startPhotoSearch);
     $("btn-photo-back").addEventListener("click", handlePhotoBack);
     $("btn-batch-photo").addEventListener("click", function () {
