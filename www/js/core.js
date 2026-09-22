@@ -774,6 +774,23 @@
       .map(function (i) { return LETTERS[i]; }).join("");
   }
 
+  /* 人工框选（整页拍照）：归一化裁剪矩形的默认值与钳制（纯函数，可 Node 单测）。
+     矩形用 { x, y, w, h }（0~1，相对照片显示方向），默认四周留 margin 边距，
+     最小尺寸 minSize 防止误操作成几像素宽。只描述选区，不参与 OCR/匹配。 */
+  function pageCropClamp(rect, minSize) {
+    var ms = minSize == null ? 0.05 : minSize;
+    var w = Math.min(Math.max(rect.w, ms), 1);
+    var h = Math.min(Math.max(rect.h, ms), 1);
+    var x = Math.min(Math.max(rect.x, 0), 1 - w);
+    var y = Math.min(Math.max(rect.y, 0), 1 - h);
+    return { x: x, y: y, w: w, h: h };
+  }
+
+  function pageCropDefault(margin) {
+    var m = margin == null ? 0.04 : margin;
+    return pageCropClamp({ x: m, y: m, w: 1 - 2 * m, h: 1 - 2 * m }, 0.05);
+  }
+
   /* 整页结果展示门控（纯展示层）：置信度只通过颜色表达，不再隐藏答案。
      high=绿色 / medium=橙色 / low=红色（只要有候选答案就显示原答案）；
      none 或真无候选 = 显示 ?。返回 { text, cls }，cls 对应结果行答案的颜色类。
@@ -875,7 +892,8 @@
     normalizePageQuestionSequence: normalizePageQuestionSequence,
     pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
     matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
-    pageAnswerText: pageAnswerText, pageAnswerDisplay: pageAnswerDisplay, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
+    pageAnswerText: pageAnswerText, pageAnswerDisplay: pageAnswerDisplay,
+    pageCropClamp: pageCropClamp, pageCropDefault: pageCropDefault, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

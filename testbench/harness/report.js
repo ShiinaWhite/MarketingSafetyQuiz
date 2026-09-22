@@ -90,6 +90,7 @@ function aggregate(records) {
     questions: 0, pagesOcrOk: 0, pagesSplitOk: 0,
     screenOk: 0, typeOk: 0, top1Ok: 0, top3Ok: 0, answerOk: 0, answerRawOk: 0,
     shown: 0, shownOk: 0,
+    confShown: { high: 0, medium: 0, low: 0 }, confShownOk: { high: 0, medium: 0, low: 0 },
     confidence: { high: 0, medium: 0, low: 0, none: 0 },
     confidenceWrong: { high: 0, medium: 0, low: 0, none: 0 },
     confidenceFalseNegative: 0,
@@ -122,6 +123,11 @@ function aggregate(records) {
       if (raw === exp.answer) { out.answerRawOk++; }
       const conf = b ? b.confidence : "none";
       out.confidence[conf] = (out.confidence[conf] || 0) + 1;
+      if (conf === "none") { out.confShown.none = (out.confShown.none || 0) + 1; }
+      if (displayed !== "?") {
+        out.confShown[conf]++;
+        if (displayed === exp.answer) { out.confShownOk[conf]++; }
+      }
       const wrong = displayed !== exp.answer;
       if (wrong) { out.confidenceWrong[conf] = (out.confidenceWrong[conf] || 0) + 1; }
       /* 假阴性：其实匹配对了，却因低置信度把答案藏成 ?（阈值过于保守） */
@@ -155,6 +161,24 @@ function aggregate(records) {
   out.ANSWER_ACCURACY_RAW = pct(out.answerRawOk, out.questions);
   out.ANSWER_COVERAGE = pct(out.shown, out.questions);
   out.ANSWERED_PRECISION = pct(out.shownOk, out.shown);
+  const lvlPct = (k) => {
+    const n = out.confShown[k] || 0, ok = out.confShownOk[k] || 0;
+    return n ? pct(ok, n) : null;
+  };
+  out.HIGH_COUNT = out.confShown.high || 0;
+  out.HIGH_CORRECT = out.confShownOk.high || 0;
+  out.HIGH_PRECISION = lvlPct("high");
+  out.MEDIUM_COUNT = out.confShown.medium || 0;
+  out.MEDIUM_CORRECT = out.confShownOk.medium || 0;
+  out.MEDIUM_PRECISION = lvlPct("medium");
+  out.LOW_COUNT = out.confShown.low || 0;
+  out.LOW_CORRECT = out.confShownOk.low || 0;
+  out.LOW_PRECISION = lvlPct("low");
+  out.NONE_COUNT = out.confidence.none || 0;
+  out.OVERALL_DISPLAY_COUNT = out.shown;
+  out.OVERALL_DISPLAY_CORRECT = out.shownOk;
+  out.OVERALL_DISPLAY_PRECISION = out.ANSWERED_PRECISION;
+  out.OVERALL_DISPLAY_COVERAGE = out.ANSWER_COVERAGE;
   out.HIGH_CONFIDENCE_WRONG = out.confidenceWrong.high || 0;
   out.MEDIUM_CONFIDENCE_WRONG = out.confidenceWrong.medium || 0;
   out.LOW_CONFIDENCE_WRONG = out.confidenceWrong.low || 0;
@@ -209,6 +233,20 @@ function renderMarkdown(meta, agg) {
   L.push("| ANSWER_ACCURACY_RAW（不看置信度掩码） | " + p(agg.ANSWER_ACCURACY_RAW) + " |");
   L.push("| ANSWER_COVERAGE（给出答案的比例） | " + p(agg.ANSWER_COVERAGE) + " |");
   L.push("| ANSWERED_PRECISION（给出答案中答对比例） | " + p(agg.ANSWERED_PRECISION) + " |");
+  L.push("");
+  L.push("## 分置信度显示精度（当前绿/橙/红 UI 的真实显示行为）");
+  L.push("");
+  L.push("| 置信度 | 显示数 | 答对 | 精度 |");
+  L.push("| --- | --- | --- | --- |");
+  [["high", "高(绿)"], ["medium", "中(橙)"], ["low", "低(红)"]].forEach(([k, name]) => {
+    const n = agg.confShown[k] || 0, ok = agg.confShownOk[k] || 0;
+    L.push("| " + name + " | " + n + " | " + ok + " | " + (n ? (ok / n * 100).toFixed(2) + "%" : "—") + " |");
+  });
+  L.push("| none(灰 ?) | " + (agg.confidence.none || 0) + " | — | — |");
+  L.push("");
+  L.push("- OVERALL_DISPLAY_COUNT = " + agg.OVERALL_DISPLAY_COUNT);
+  L.push("- OVERALL_DISPLAY_PRECISION = " + (agg.OVERALL_DISPLAY_PRECISION === null ? "—" : p(agg.OVERALL_DISPLAY_PRECISION)));
+  L.push("- OVERALL_DISPLAY_COVERAGE = " + p(agg.OVERALL_DISPLAY_COVERAGE));
   L.push("");
   L.push("## 置信度分布");
   L.push("");

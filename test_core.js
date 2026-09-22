@@ -743,6 +743,37 @@ check("门控不影响匹配层：confidence/bankId 原样", (() => {
   return blocks[0].confidence === "high" && blocks[0].bankId === 118;
 })());
 
+/* 人工框选：归一化裁剪矩形数学 */
+section("人工框选裁剪数学");
+check("默认选区：四周 4% 且合法", (() => {
+  const d = MSQ.pageCropDefault();
+  return d.x === 0.04 && d.y === 0.04 && Math.abs(d.w - 0.92) < 1e-9 && Math.abs(d.h - 0.92) < 1e-9;
+})());
+check("选区不越界：拖出右/下边界被钳回", (() => {
+  const c = MSQ.pageCropClamp({ x: 0.98, y: 0.98, w: 0.2, h: 0.2 });
+  return Math.abs(c.x - 0.8) < 1e-9 && Math.abs(c.y - 0.8) < 1e-9 && c.w === 0.2 && c.h === 0.2;
+})());
+check("选区不越界：负坐标被钳到 0", (() => {
+  const c = MSQ.pageCropClamp({ x: -0.3, y: -0.1, w: 0.3, h: 0.2 });
+  return c.x === 0 && c.y === 0 && c.w === 0.3 && c.h === 0.2;
+})());
+check("四角 resize：小于最小尺寸自动放大", (() => {
+  const c = MSQ.pageCropClamp({ x: 0.5, y: 0.5, w: 0.01, h: 0.02 });
+  return c.w === 0.05 && c.h === 0.05;
+})());
+check("最小尺寸可自定义", (() => {
+  const c = MSQ.pageCropClamp({ x: 0, y: 0, w: 0.01, h: 0.01 }, 0.2);
+  return c.w === 0.2 && c.h === 0.2;
+})());
+check("全图选区（恢复全图）= 0,0,1,1", (() => {
+  const c = MSQ.pageCropClamp({ x: 0, y: 0, w: 1, h: 1 });
+  return c.x === 0 && c.y === 0 && c.w === 1 && c.h === 1;
+})());
+check("归一化坐标恒在 0~1", (() => {
+  const c = MSQ.pageCropClamp({ x: -5, y: -5, w: 99, h: 99 });
+  return c.x === 0 && c.y === 0 && c.w === 1 && c.h === 1;
+})());
+
 check("大块标题形近容错：多项选挥题/单项选泽题/判新题",
   MSQ.pageSectionType("多项选挥题") === "multi"
   && MSQ.pageSectionType("单项选泽题") === "single"

@@ -72,8 +72,7 @@
     <div class="search-bar-wrap">
       <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
              enterkeyhint="search" inputmode="search">
-      <button id="btn-photo-search" class="photo-btn" type="button" title="拍一道题">📷</button>
-      <button id="btn-batch-photo" class="photo-btn" type="button" title="拍整页">📄</button>
+      <button id="btn-batch-photo" class="photo-btn" type="button" title="整页拍照搜题">📷</button>
     </div>
     <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
       <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
@@ -120,10 +119,34 @@
     </main>
   </section>
 
+  <!-- 选择识别区域（人工框选） -->
+  <section id="view-batch-crop" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-crop-retake" class="backbtn">‹ 重拍</button>
+      <div class="qtitle">选择识别区域</div>
+    </header>
+    <main class="crop-stage">
+      <div id="crop-wrap">
+        <img id="crop-img" alt="待识别照片" draggable="false">
+        <div id="crop-rect">
+          <div class="crop-handle" data-h="nw"></div>
+          <div class="crop-handle" data-h="ne"></div>
+          <div class="crop-handle" data-h="sw"></div>
+          <div class="crop-handle" data-h="se"></div>
+        </div>
+      </div>
+    </main>
+    <footer class="crop-foot">
+      <button id="btn-crop-reset" class="cropbtn">恢复全图</button>
+      <button id="btn-crop-run" class="cropbtn primary">开始识别</button>
+    </footer>
+    <p id="crop-status" class="search-count hidden"></p>
+  </section>
+
   <!-- 整页答案 -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 重拍</button>
+      <button id="btn-batch-results-back" class="backbtn">‹ 调框</button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">

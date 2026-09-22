@@ -24,10 +24,10 @@ import java.util.List;
 
 /**
  * 本地 OCR 插件：ML Kit Text Recognition v2 中文（bundled 模型，随 APK 分发，离线可用）。
- * 输入 base64 图片（JPEG），输出识别全文、耗时，以及带空间坐标的行列表。
- *
- * lines 为 ML Kit TextBlock/Line 的展平结果，按页面从上到下、同一行从左到右排序，
- * 供整页拍照搜题做分题（题号定位）使用；单题拍照只读 text/ms，返回结构向后兼容。
+ * 输入 base64 图片（JPEG），可选 0~1 归一化 crop 矩形：
+ *   传 crop → 先按 EXIF 归一化方向解码，再按原图实际像素尺寸原生裁剪（无二次 JPEG 压缩），
+ *   返回的 width/height/lines 全部以裁剪后的位图为坐标系，lines 按阅读顺序排列；
+ *   不传 crop → 整图 OCR，行为与旧版本完全一致。
  * 使用 ML Kit 异步回调，不阻塞调用线程；成功/失败均关闭 recognizer。
  */
 @CapacitorPlugin(name = "Ocr")
@@ -47,13 +47,33 @@ public class OcrPlugin extends Plugin {
             call.reject("DECODE_FAILED", e.getMessage());
             return;
         }
-        final Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-        if (bitmap == null) {
-            call.reject("DECODE_FAILED");
+        JSObject crop = call.getObject("crop");
+        final Bitmap working;
+        final int origW;
+        final int origH;
+        try {
+            Bitmap normalized = OcrBitmap.decodeNormalized(bytes, getContext().getCacheDir());
+            if (normalized == null) {
+                call.reject("DECODE_FAILED");
+                return;
+            }
+            origW = normalized.getWidth();
+            origH = normalized.getHeight();
+            if (crop != null && crop.has("left") && crop.has("top")
+                    && crop.has("right") && crop.has("bottom")) {
+                working = OcrBitmap.cropNormalized(normalized,
+                        crop.getDouble("left"), crop.getDouble("top"),
+                        crop.getDouble("right"), crop.getDouble("bottom"));
+                normalized.recycle();
+            } else {
+                working = normalized;
+            }
+        } catch (Exception e) {
+            call.reject("CROP_FAILED", e.getMessage());
             return;
         }
         final long start = System.currentTimeMillis();
-        InputImage image = InputImage.fromBitmap(bitmap, 0);
+        InputImage image = InputImage.fromBitmap(working, 0);
         final TextRecognizer recognizer = TextRecognition.getClient(
                 new ChineseTextRecognizerOptions.Builder().build());
         recognizer.process(image)
@@ -62,13 +82,17 @@ public class OcrPlugin extends Plugin {
                     JSObject ret = new JSObject();
                     ret.put("text", text.getText());
                     ret.put("ms", System.currentTimeMillis() - start);
-                    ret.put("width", bitmap.getWidth());
-                    ret.put("height", bitmap.getHeight());
+                    ret.put("width", working.getWidth());
+                    ret.put("height", working.getHeight());
+                    ret.put("origWidth", origW);
+                    ret.put("origHeight", origH);
                     ret.put("lines", flattenLines(text));
+                    working.recycle();
                     call.resolve(ret);
                 })
                 .addOnFailureListener(e -> {
                     recognizer.close();
+                    working.recycle();
                     call.reject("OCR_FAILED", e.getMessage());
                 });
     }

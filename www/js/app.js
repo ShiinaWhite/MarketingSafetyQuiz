@@ -962,6 +962,7 @@
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
+      case "view-batch-crop": handleBatchCropBack(); return;
       case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
@@ -1383,6 +1384,13 @@
     appendBatchTools(state);
   }
 
+  /* 拍照 → 进入框选页（不立即 OCR）。人工框选只产生归一化裁剪矩形，
+     原始 base64 与 crop 参数一起交给 OcrPlugin 原生裁剪，避免二次 JPEG 压缩。 */
+  var batchPhotoState = null;   /* { dataUrl }，Back 往返期间保留 */
+  var cropNorm = null;          /* { x, y, w, h } 归一化选区（相对照片显示方向） */
+  var CROP_DEFAULT_MARGIN = 0.04;
+  var CROP_MIN_SIZE = 0.06;
+
   async function startBatchPageSearch() {
     var Camera = getPlugin("Camera");
     var Ocr = getPlugin("Ocr");
@@ -1407,40 +1415,145 @@
       setBatchStatus(/permission|denied/i.test(msg)
         ? "无法使用相机，请授予相机权限后重试"
         : "未拍摄照片（" + msg.slice(0, 40) + "）");
+      /* 从框选页发起的重拍被取消：保留旧照片与旧选区，回到框选页继续 */
+      if (batchPhotoState) { openBatchCrop(); }
       return;
     }
-    setBatchStatus("正在识别整页文字…");
-    var totalStart = performance.now();
-    var ocrMs = 0, text = "", lines = [];
-    try {
-      var b64 = String(photo.dataUrl || "").split(",")[1] || "";
-      var res = await Ocr.recognizeText({ base64: b64 });
-      text = (res && res.text) || "";
-      ocrMs = (res && res.ms) || 0;
-      lines = normalizeOcrLines(res);
-    } catch (e) {
-      setBatchStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
-      return;
-    }
-    if (!lines.length) {
-      setBatchStatus("未识别到清晰文字，请重新拍摄（尽量拍全、拍正、光线均匀）");
-      return;
-    }
-    var tSplit = performance.now();
-    MSQ.splitPageOcrLines(lines, batchPageType);
-    var splitMs = Math.round(performance.now() - tSplit);
-    var tMatch = performance.now();
-    var out = MSQ.searchPageQuestionsByOcr(batchIndex, lines, batchPageType, { limit: 3 });
-    var matchMs = Math.round(performance.now() - tMatch);
-    setBatchStatus("识别完成（全程本地，图片不保存不上传）");
-    renderBatchResults({
-      lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
-      totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
-    });
+    batchPhotoState = { dataUrl: photo.dataUrl };
+    cropNorm = null;              /* 重拍后清空旧选区，恢复默认框 */
+    openBatchCrop();
   }
 
-  /* 整页结果 → 整页拍照 → 搜题 → 首页 */
+  /* ---------------- 选择识别区域（框选页） ---------------- */
+  function openBatchCrop() {
+    if (!batchPhotoState) { show("view-batch-photo"); return; }
+    show("view-batch-crop");
+    var img = $("crop-img");
+    img.onload = function () { renderCropRect(); };
+    img.src = batchPhotoState.dataUrl;
+    if (!cropNorm) { cropNorm = MSQ.pageCropDefault(CROP_DEFAULT_MARGIN); }
+    setTimeout(renderCropRect, 0);
+    setCropStatus("");
+  }
+
+  function setCropStatus(text) {
+    var el = $("crop-status");
+    if (!el) { return; }
+    el.textContent = text;
+    el.classList.toggle("hidden", !text);
+  }
+
+  function renderCropRect() {
+    var wrap = $("crop-wrap");
+    var rect = $("crop-rect");
+    if (!wrap || !rect || !cropNorm) { return; }
+    var W = wrap.clientWidth || 1;
+    var H = wrap.clientHeight || 1;
+    rect.style.left = (cropNorm.x * W) + "px";
+    rect.style.top = (cropNorm.y * H) + "px";
+    rect.style.width = (cropNorm.w * W) + "px";
+    rect.style.height = (cropNorm.h * H) + "px";
+  }
+
+  /* 拖动/四角缩放：显示像素操作，实时换算归一化并钳制 */
+  function bindCropGestures() {
+    var wrap = $("crop-wrap");
+    var rect = $("crop-rect");
+    if (!wrap || !rect || rect.dataset.bound === "1") { return; }
+    rect.dataset.bound = "1";
+    var drag = null;
+    function start(mode, e) {
+      e.preventDefault();
+      drag = { mode: mode, px: e.clientX, py: e.clientY, orig: Object.assign({}, cropNorm) };
+    }
+    rect.addEventListener("pointerdown", function (e) { start("move", e); rect.setPointerCapture(e.pointerId); });
+    Array.prototype.forEach.call(rect.getElementsByClassName("crop-handle"), function (h) {
+      h.addEventListener("pointerdown", function (e) {
+        e.stopPropagation();
+        start(h.getAttribute("data-h"), e);
+        h.setPointerCapture(e.pointerId);
+      });
+    });
+    rect.addEventListener("pointermove", function (e) {
+      if (!drag) { return; }
+      var W = wrap.clientWidth || 1, H = wrap.clientHeight || 1;
+      var dx = (e.clientX - drag.px) / W, dy = (e.clientY - drag.py) / H;
+      var o = drag.orig;
+      if (drag.mode === "move") {
+        cropNorm = MSQ.pageCropClamp({ x: o.x + dx, y: o.y + dy, w: o.w, h: o.h }, CROP_MIN_SIZE);
+      } else {
+        var l2 = o.x, t2 = o.y, rr = o.x + o.w, bb = o.y + o.h;
+        if (drag.mode.indexOf("w") >= 0) { l2 = o.x + dx; }
+        if (drag.mode.indexOf("e") >= 0) { rr = o.x + o.w + dx; }
+        if (drag.mode.indexOf("n") >= 0) { t2 = o.y + dy; }
+        if (drag.mode.indexOf("s") >= 0) { bb = o.y + o.h + dy; }
+        cropNorm = MSQ.pageCropClamp({ x: Math.min(l2, rr), y: Math.min(t2, bb),
+          w: Math.abs(rr - l2), h: Math.abs(bb - t2) }, CROP_MIN_SIZE);
+      }
+      renderCropRect();
+    });
+    rect.addEventListener("pointerup", function () { drag = null; });
+    rect.addEventListener("pointercancel", function () { drag = null; });
+    window.addEventListener("resize", renderCropRect);
+  }
+
+  async function runBatchOcrFromCrop() {
+    var Ocr = getPlugin("Ocr");
+    if (!Ocr) {
+      show("view-batch-photo");
+      setBatchStatus(photoPluginMissingMessage(getPlugin("Camera"), Ocr));
+      return;
+    }
+    if (!batchPhotoState || !cropNorm) { openBatchPhoto(); return; }
+    var btn = $("btn-crop-run");
+    btn.disabled = true;
+    btn.textContent = "正在识别…";
+    setCropStatus("正在识别选区…");
+    var totalStart = performance.now();   /* 计时从点击“开始识别”起，不含人工框选时间 */
+    var b64 = String(batchPhotoState.dataUrl || "").split(",")[1] || "";
+    var crop = { left: cropNorm.x, top: cropNorm.y,
+      right: cropNorm.x + cropNorm.w, bottom: cropNorm.y + cropNorm.h };
+    try {
+      var res = await Ocr.recognizeText({ base64: b64, crop: crop });
+      var text = (res && res.text) || "";
+      var lines = normalizeOcrLines(res);
+      if (!lines.length) {
+        setCropStatus("选区内未识别到清晰文字，请调整框选后重试");
+        return;
+      }
+      var tSplit = performance.now();
+      MSQ.splitPageOcrLines(lines, batchPageType);
+      var splitMs = Math.round(performance.now() - tSplit);
+      var tMatch = performance.now();
+      var out = MSQ.searchPageQuestionsByOcr(batchIndex, lines, batchPageType, { limit: 3 });
+      var matchMs = Math.round(performance.now() - tMatch);
+      batchPhotoState.cropMeta = {
+        cropNormalized: { left: crop.left, top: crop.top, right: crop.right, bottom: crop.bottom },
+        cropPixel: { left: Math.round(crop.left * (res.origWidth || 0)), top: Math.round(crop.top * (res.origHeight || 0)),
+          w: res.width || 0, h: res.height || 0 },
+        originalWidth: res.origWidth || 0, originalHeight: res.origHeight || 0,
+        croppedWidth: res.width || 0, croppedHeight: res.height || 0
+      };
+      setCropStatus("");
+      renderBatchResults({
+        lines: lines, text: text, ocrMs: (res && res.ms) || 0, splitMs: splitMs, matchMs: matchMs,
+        totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
+      });
+    } catch (e) {
+      setCropStatus("识别失败，请重试（" + String((e && e.message) || e).slice(0, 40) + "）");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "开始识别";
+    }
+  }
+
+  /* 整页结果 → 选择识别区域（保留照片与选区） */
   function handleBatchResultsBack() {
+    openBatchCrop();
+  }
+
+  /* 框选页 → 整页拍照入口（照片与选区保留，重拍才清空） */
+  function handleBatchCropBack() {
     show("view-batch-photo");
     renderBatchTypes();
   }
@@ -1539,18 +1652,6 @@
     // 搜题
     $("btn-search-back").addEventListener("click", handleSearchBack);
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
-    $("btn-photo-search").addEventListener("click", function () {
-      var Camera = getPlugin("Camera");
-      var Ocr = getPlugin("Ocr");
-      if (!Camera || !Ocr) {
-        show("view-photo");
-        setPhotoStatus(photoPluginMissingMessage(Camera, Ocr));
-        return;
-      }
-      startPhotoSearch();
-    });
-    $("btn-take-photo").addEventListener("click", startPhotoSearch);
-    $("btn-photo-back").addEventListener("click", handlePhotoBack);
     $("btn-batch-photo").addEventListener("click", function () {
       var Camera = getPlugin("Camera");
       var Ocr = getPlugin("Ocr");
@@ -1561,6 +1662,13 @@
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
     $("btn-take-page").addEventListener("click", startBatchPageSearch);
     initBatchTypes();
+    bindCropGestures();
+    $("btn-crop-reset").addEventListener("click", function () {
+      cropNorm = MSQ.pageCropDefault(CROP_DEFAULT_MARGIN);
+      renderCropRect();
+    });
+    $("btn-crop-retake").addEventListener("click", function () { startBatchPageSearch(); });
+    $("btn-crop-run").addEventListener("click", function () { runBatchOcrFromCrop(); });
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);

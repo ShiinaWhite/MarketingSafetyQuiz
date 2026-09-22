@@ -76,7 +76,7 @@ function runPage(page, gt, ocr) {
     screenNumber: b.screenNumber, label: b.label, type: b.type, confidence: b.confidence,
     bankId: b.bankId, answerRaw: b.answer,
     /* 界面实际显示：低置信度/无匹配显示 ?（与 App 的 batchAnswerDisplay 一致） */
-    answerDisplayed: (b.confidence === "low" || b.confidence === "none" || b.answer === "?") ? "?" : b.answer,
+    answerDisplayed: MSQ.pageAnswerDisplay(b.confidence, b.answer).text,
     stemText: b.stemText, optionsText: b.optionsText, rawText: b.rawText,
     top: b.top, bottom: b.bottom,
     matches: (b.matches || []).map(m => ({ id: m.id, score: m.score, type: m.type }))
@@ -174,7 +174,7 @@ function main() {
           b.answer = b.answerItem ? MSQ.pageAnswerText(b.answerItem) : "?";
           const conf = MSQ.pageBlockConfidence(chosen, { stemText: cropText });
           b.confidence = conf === "high" ? "medium" : conf;   /* 恢复路径保守封顶 medium */
-          b.answerDisplayed = (b.confidence === "low" || b.confidence === "none" || b.answer === "?") ? "?" : b.answer;
+          b.answerDisplayed = MSQ.pageAnswerDisplay(b.confidence, b.answer).text;
           b.secondPassInfo = { via: via, secondScore: second.score, firstScore: firstScore };
         }
       });

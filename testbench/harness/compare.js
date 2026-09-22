@@ -17,6 +17,16 @@ const metrics = [
   ["ANSWER_ACCURACY", "%", true],              /* 硬约束：不得下降 */
   ["ANSWER_COVERAGE", "%", false],
   ["ANSWERED_PRECISION", "%", false],
+  ["HIGH_COUNT", "条", false],
+  ["HIGH_PRECISION", "%", false],
+  ["MEDIUM_COUNT", "条", false],
+  ["MEDIUM_PRECISION", "%", false],
+  ["LOW_COUNT", "条", false],
+  ["LOW_PRECISION", "%", false],
+  ["NONE_COUNT", "条", false],
+  ["OVERALL_DISPLAY_COUNT", "条", false],
+  ["OVERALL_DISPLAY_PRECISION", "%", false],
+  ["OVERALL_DISPLAY_COVERAGE", "%", false],
   ["ANSWER_ACCURACY_RAW", "%", false],
   ["HIGH_CONFIDENCE_WRONG", "条", true],       /* 方向取反（越少越好），且为硬约束 */
   ["CONFIDENCE_FALSE_NEGATIVE", "条", false],
