@@ -46,3 +46,6 @@ testbench/private_questions.json
 
 # ---- Batch OCR Test Bench：自动基准测试产物（截图/GT/OCR输出/报告，禁止提交） ----
 testbench/.generated/
+
+# ---- BAT 启动器（本机工具，不入库） ----
+启动仿真考试测试台.bat
