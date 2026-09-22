@@ -791,6 +791,95 @@
     return pageCropClamp({ x: m, y: m, w: 1 - 2 * m, h: 1 - 2 * m }, 0.05);
   }
 
+  /* 自动题目区域定位（仅用于拍摄后的默认框建议，不做匹配、不出答案）。
+     输入 OCR lines + 图片尺寸；输出：
+       crop: {x,y,w,h} 归一化（找不到可靠结构时为 null，调用方保持默认框）
+       confidence: "strong" | "none"
+       anchors: { questionNumbers, optionLines }
+       reason: no_lines / no_quiz_structure / ok / ok_single_question
+     规则（保守，绝不乱缩）：
+       - 锚点 = 行首题号（pageQuestionNumber）+ 选项行（A./B./…）；
+       - 题号按行序聚成“递增连续段”（n 递增且步长 ≤30，容忍漏号），
+         取最大段为主块；段内行 + 段尾之后连续的选项/普通文本行都算主体
+         （容忍漏题号导致的合并）；遇到新的题号行即停；
+       - 水平范围取锚点行最小 left（浏览器左侧导航窄行不会拉宽/拉偏），
+         最大 right 取主体行（滚动条窄行影响有限），四周加 1.5 行高 padding。 */
+  function suggestQuizCrop(lines, imageWidth, imageHeight) {
+    var out = { crop: null, confidence: "none",
+      anchors: { questionNumbers: 0, optionLines: 0 }, reason: "no_lines" };
+    var W = imageWidth || 0, H = imageHeight || 0;
+    if (W <= 0 || H <= 0) { return out; }
+    var L = [];
+    (lines || []).forEach(function (l) {
+      var t = String(l.text == null ? "" : l.text).trim();
+      if (!t) { return; }
+      L.push({ text: t, top: l.top || 0,
+        bottom: l.bottom == null ? (l.top || 0) + 40 : l.bottom,
+        left: l.left || 0, right: l.right == null ? (l.left || 0) + 200 : l.right });
+    });
+    if (!L.length) { return out; }
+    L.sort(function (a, b) { return a.top - b.top || a.left - b.left; });
+    var hList = L.map(function (l) { return Math.max(1, l.bottom - l.top); })
+      .sort(function (a, b) { return a - b; });
+    var lineH = hList[Math.floor(hList.length / 2)] || 40;
+
+    var qAnchors = [], optCount = 0;
+    L.forEach(function (l, i) {
+      var qn = pageQuestionNumber(l.text);
+      if (qn) { qAnchors.push({ i: i, n: parseInt(qn.number, 10), line: l }); }
+      if (isPageOptionLine(l.text)) { optCount++; }
+    });
+    out.anchors = { questionNumbers: qAnchors.length, optionLines: optCount };
+
+    var runs = [];
+    qAnchors.forEach(function (q) {
+      var n = q.n;
+      var cur = runs.length ? runs[runs.length - 1] : null;
+      if (cur && n > cur.lastN && n - cur.lastN <= 30) { cur.items.push(q); cur.lastN = n; }
+      else { runs.push({ lastN: n, items: [q] }); }
+    });
+    runs.sort(function (a, b) {
+      return b.items.length - a.items.length ||
+        (b.lastN - b.items[0].n) - (a.lastN - a.items[0].n);
+    });
+    var best = runs.length ? runs[0] : null;
+    var enough = (best && best.items.length >= 2) || (qAnchors.length === 1 && optCount >= 4);
+    if (!best || !enough) { out.reason = "no_quiz_structure"; return out; }
+
+    var firstIdx = best.items[0].i;
+    var lastAnchor = best.items[best.items.length - 1];
+    var bottomPx = lastAnchor.line.bottom;
+    var prevBottom = bottomPx;
+    var endIdx = lastAnchor.i;
+    var gapLimit = lineH * 3.5;
+    for (var i = lastAnchor.i + 1; i < L.length; i++) {
+      var l = L[i];
+      if (l.top - prevBottom > gapLimit) { break; }
+      if (pageQuestionNumber(l.text)) { break; }   /* 新题号 = 主体结束 */
+      endIdx = i;
+      bottomPx = Math.max(bottomPx, l.bottom);
+      prevBottom = l.bottom;
+    }
+    var minLeft = W, maxRight = 0;
+    best.items.forEach(function (q) {
+      minLeft = Math.min(minLeft, q.line.left);      /* 左界取锚点行：左侧导航窄行不拉偏 */
+      maxRight = Math.max(maxRight, q.line.right);
+    });
+    for (var k = firstIdx; k <= endIdx; k++) {
+      maxRight = Math.max(maxRight, L[k].right);     /* 右界可含题干长行 */
+    }
+    var padY = lineH * 1.5, padX = lineH * 0.5;
+    var x0 = Math.max(0, minLeft - padX), x1 = Math.min(W, maxRight + padX);
+    var y0 = Math.max(0, best.items[0].line.top - padY);
+    var y1 = Math.min(H, bottomPx + padY);
+    var crop = pageCropClamp({ x: x0 / W, y: y0 / H, w: (x1 - x0) / W, h: (y1 - y0) / H }, 0.05);
+    if (crop.w <= 0.05 || crop.h <= 0.05) { out.reason = "degenerate_crop"; return out; }
+    out.crop = crop;
+    out.confidence = "strong";
+    out.reason = best.items.length >= 2 ? "ok" : "ok_single_question";
+    return out;
+  }
+
   /* 整页结果展示门控（纯展示层）：置信度只通过颜色表达，不再隐藏答案。
      high=绿色 / medium=橙色 / low=红色（只要有候选答案就显示原答案）；
      none 或真无候选 = 显示 ?。返回 { text, cls }，cls 对应结果行答案的颜色类。
@@ -893,7 +982,7 @@
     pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
     matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
     pageAnswerText: pageAnswerText, pageAnswerDisplay: pageAnswerDisplay,
-    pageCropClamp: pageCropClamp, pageCropDefault: pageCropDefault, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
+    pageCropClamp: pageCropClamp, pageCropDefault: pageCropDefault, suggestQuizCrop: suggestQuizCrop, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

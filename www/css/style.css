@@ -211,29 +211,46 @@ mark { background: #ffe58f; padding: 0 1px; border-radius: 2px; }
 .photo-take { width: 100%; min-height: 64px; font-size: 18px; margin-bottom: 14px; }
 
 /* ---------- 选择识别区域（人工框选） ---------- */
-.crop-stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: flex-start; justify-content: center; background: #111; padding: 6px 0; }
-#crop-wrap { position: relative; width: 100%; max-width: 640px; user-select: none; -webkit-user-select: none; }
+/* ---------- App 内相机（LIVE 实时取景 / REVIEW 冻结调框） ---------- */
+.camera-view { background: #000; }
+body.native-camera-live, body.native-camera-live #app,
+body.native-camera-live .camera-view,
+body.native-camera-live .cam-stage,
+body.native-camera-live #cam-live { background: transparent !important; }
+body.native-camera-live .cam-head, body.native-camera-live .cam-foot { background: rgba(0, 0, 0, 0.75); }
+body.native-camera-live .cam-head .qtitle { color: #fff; }
+body.native-camera-live .cam-backbtn { color: #fff; }
+.cam-stage { flex: 1 1 auto; min-height: 0; position: relative; }
+.cam-live { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; }
+.cam-live-hint { color: #fff; background: rgba(0, 0, 0, 0.5); border-radius: 8px;
+  padding: 6px 14px; margin-top: 24px; font-size: 14px; }
+.cam-review { position: absolute; inset: 0; overflow-y: auto; background: #000; }
+#crop-wrap { position: relative; width: 100%; user-select: none; -webkit-user-select: none; }
 #crop-img { display: block; width: 100%; height: auto; -webkit-user-drag: none; }
 #crop-rect {
   position: absolute; box-sizing: border-box;
-  border: 2px solid #4fc3f7; background: transparent;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   cursor: move; touch-action: none;
 }
-.crop-handle {
-  position: absolute; width: 26px; height: 26px; box-sizing: border-box;
-  border: 3px solid #4fc3f7; background: rgba(255, 255, 255, 0.9); border-radius: 50%;
-  touch-action: none;
-}
-.crop-handle[data-h="nw"] { left: -13px; top: -13px; cursor: nwse-resize; }
-.crop-handle[data-h="ne"] { right: -13px; top: -13px; cursor: nesw-resize; }
-.crop-handle[data-h="sw"] { left: -13px; bottom: -13px; cursor: nesw-resize; }
-.crop-handle[data-h="se"] { right: -13px; bottom: -13px; cursor: nwse-resize; }
-.crop-foot { display: flex; gap: 10px; padding: 10px 14px 18px; background: #f5f6f8; }
-.cropbtn { flex: 1 1 0; min-height: 48px; font-size: 16px; font-weight: 600;
-  border: 1px solid #d8dee6; border-radius: 10px; background: #fff; color: #1a1a1a; }
-.cropbtn.primary { background: #1565c0; border-color: #1565c0; color: #fff; }
-.cropbtn:disabled { opacity: .6; }
+.corner { position: absolute; width: 44px; height: 44px; touch-action: none; }
+.corner::before { content: ""; position: absolute; width: 24px; height: 24px; border: 0 solid #fff; }
+.c-nw { left: -6px; top: -6px; } .c-nw::before { left: 0; top: 0; border-left-width: 5px; border-top-width: 5px; }
+.c-ne { right: -6px; top: -6px; } .c-ne::before { right: 0; top: 0; border-right-width: 5px; border-top-width: 5px; }
+.c-sw { left: -6px; bottom: -6px; } .c-sw::before { left: 0; bottom: 0; border-left-width: 5px; border-bottom-width: 5px; }
+.c-se { right: -6px; bottom: -6px; } .c-se::before { right: 0; bottom: 0; border-right-width: 5px; border-bottom-width: 5px; }
+.cam-tip { color: #ffd54f; background: rgba(0, 0, 0, 0.6); border-radius: 8px;
+  padding: 6px 12px; margin: 10px auto 0; max-width: 92%; text-align: center; font-size: 13.5px; }
+.cam-foot { display: flex; align-items: center; justify-content: space-around;
+  padding: 14px 20px 22px; background: rgba(0, 0, 0, 0.75); }
+.cam-shutter { width: 74px; height: 74px; border-radius: 50%;
+  border: 4px solid #fff; background: rgba(255, 255, 255, 0.3); }
+.cam-shutter span { display: block; width: 56px; height: 56px; margin: 5px auto;
+  border-radius: 50%; background: #fff; }
+.cam-shutter:disabled { opacity: .5; }
+.cam-confirm { width: 68px; height: 68px; border-radius: 50%;
+  border: 3px solid #fff; background: #1565c0; color: #fff;
+  font-size: 30px; font-weight: 700; line-height: 1; }
+.cam-side { background: none; border: none; color: #fff; font-size: 16px; padding: 8px 4px; }
 
 /* ---------- 整页拍照搜题 ---------- */
 .batch-type-row { display: flex; gap: 10px; margin-bottom: 12px; }

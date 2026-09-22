@@ -1,0 +1,111 @@
+package com.jty.safetyquiz;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.Paint;
+
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
+
+import com.google.android.gms.tasks.Tasks;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import java.io.ByteArrayOutputStream;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
+/**
+ * App 内相机拍摄管线测试：合成一张带中文文字的 JPEG（模拟传感器输出），
+ * 验证 InAppCameraPlugin 的图像处理管线（旋转/缩放/双图输出/编码/ML Kit 识别）。
+ * CameraX 取景与快门的设备行为由真机验收，不在自动化范围内。
+ */
+@RunWith(AndroidJUnit4.class)
+public class InAppCameraPipelineTest {
+
+    private byte[] makeJpeg(int w, int h, boolean landscape) {
+        Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.drawColor(Color.WHITE);
+        Paint p = new Paint();
+        p.setColor(Color.BLACK);
+        p.setTextSize(64);
+        p.setAntiAlias(true);
+        if (landscape) {
+            c.drawText("21. 根据营销安规规定横拍测试题干", 60, h / 2f, p);
+            c.drawText("A. 甲乙", 60, h / 2f + 140, p);
+        } else {
+            c.drawText("21. 根据营销安规规定竖拍测试题干", 40, h / 4f, p);
+            c.drawText("A. 甲乙", 40, h / 4f + 140, p);
+        }
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        b.compress(Bitmap.CompressFormat.JPEG, 90, bo);
+        b.recycle();
+        return bo.toByteArray();
+    }
+
+    private String ocrText(Bitmap b) throws Exception {
+        TextRecognizer recognizer = TextRecognition.getClient(
+                new ChineseTextRecognizerOptions.Builder().build());
+        try {
+            Text t = Tasks.await(recognizer.process(InputImage.fromBitmap(b, 0)),
+                    60, TimeUnit.SECONDS);
+            return t.getText();
+        } finally {
+            recognizer.close();
+        }
+    }
+
+    @Test
+    public void processPipeline_outputsMainAndLayout() {
+        byte[] jpeg = makeJpeg(4000, 3000, true);
+        InAppCameraPlugin.CapturedImages r =
+                InAppCameraPlugin.processJpegForTest(jpeg, 0, 3000, 85, 1280);
+        assertNotNull(r);
+        assertTrue("主图宽 ≤ 3000", r.width <= 3000);
+        assertEquals("主图与布局图同比例", r.height * 1.0 / r.width,
+                r.layoutHeight * 1.0 / r.layoutWidth, 0.01);
+        assertTrue("布局图更小", r.layoutWidth < r.width);
+        assertTrue("dataUrl 是 JPEG", r.dataUrl.startsWith("data:image/jpeg;base64,"));
+        assertTrue("layoutDataUrl 是 JPEG", r.layoutDataUrl.startsWith("data:image/jpeg;base64,"));
+    }
+
+    @Test
+    public void processPipeline_rotation90_swapsDims() {
+        byte[] jpeg = makeJpeg(4000, 3000, true);
+        InAppCameraPlugin.CapturedImages r =
+                InAppCameraPlugin.processJpegForTest(jpeg, 90, 3000, 85, 1280);
+        assertTrue("旋转 90° 后宽 < 高", r.width < r.height);
+    }
+
+    @Test
+    public void processPipeline_smallInput_notUpscaled() {
+        byte[] jpeg = makeJpeg(1500, 1000, true);
+        InAppCameraPlugin.CapturedImages r =
+                InAppCameraPlugin.processJpegForTest(jpeg, 0, 3000, 85, 1280);
+        assertEquals("小图不放大：宽保持 1500", 1500, r.width);
+        assertTrue(r.layoutWidth <= 1500);
+    }
+
+    @Test
+    public void cropOcr_recognizesSyntheticText() throws Exception {
+        byte[] jpeg = makeJpeg(2000, 1500, false);
+        Bitmap b = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+        assertNotNull(b);
+        String text = ocrText(b);
+        assertTrue("合成文字应可被 ML Kit 识别", text.contains("营销安规") || text.contains("21"));
+        b.recycle();
+    }
+}

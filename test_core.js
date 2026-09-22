@@ -774,6 +774,107 @@ check("归一化坐标恒在 0~1", (() => {
   return c.x === 0 && c.y === 0 && c.w === 1 && c.h === 1;
 })());
 
+/* 自动题目区域定位 suggestQuizCrop（模拟整页 OCR 行，simulated） */
+const mkLines = (rows) => rows.map(r => ({ text: r[0], left: r[1], top: r[2], right: r[3], bottom: r[4] }));
+const quizPage = (startNum, n, optN) => {
+  const rows = [];
+  let y = 300, num = startNum;
+  for (let i = 0; i < n; i++) {
+    rows.push([num + ". 根据营销安规规定第" + num + "题的题干内容较长需要换行测试", 60, y, 1200, y + 48]); y += 58;
+    for (let k = 0; k < optN; k++) { rows.push(["ABCDEF"[k] + ". 选项内容甲乙丙丁戊", 120, y, 1100, y + 44]); y += 52; }
+    num++;
+  }
+  return rows;
+};
+const W = 1600, H = 4000;
+const cropOf = (rows) => MSQ.suggestQuizCrop(mkLines(rows), W, H);
+const inCrop = (c, r) => {
+  const cx0 = c.crop.x * W, cy0 = c.crop.y * H, cx1 = cx0 + c.crop.w * W, cy1 = cy0 + c.crop.h * H;
+  return r[1] >= cx0 - 130 && r[3] <= cx1 + 130 && r[2] >= cy0 - 130 && r[4] <= cy1 + 130;
+};
+const iouOf = (c, gt) => {
+  const cx0 = c.crop.x * W, cy0 = c.crop.y * H, cx1 = cx0 + c.crop.w * W, cy1 = cy0 + c.crop.h * H;
+  const ix = Math.max(0, Math.min(cx1, gt[2]) - Math.max(cx0, gt[0]));
+  const iy = Math.max(0, Math.min(cy1, gt[3]) - Math.max(cy0, gt[1]));
+  const inter = ix * iy, uni = (cx1 - cx0) * (cy1 - cy0) + (gt[2] - gt[0]) * (gt[3] - gt[1]) - inter;
+  return uni ? inter / uni : 0;
+};
+
+check("纯题目页：5 题连排，自动框包住全部并 strong", (() => {
+  const rows = quizPage(1, 5, 4);
+  const c = cropOf(rows);
+  const ok = c.crop && c.confidence === "strong" && c.reason === "ok"
+    && rows.every(r => inCrop(c, r));
+  return ok;
+})());
+check("浏览器顶部 chrome 行：不被包进自动框", (() => {
+  const rows = [["Summarize 标签栏", 200, 20, 1400, 90], ["https://exam.example.com/question?id=8", 200, 100, 1400, 170]];
+  rows.push(...quizPage(23, 4, 4));
+  const c = cropOf(rows);
+  const ok = c.crop && c.confidence === "strong" && rows.slice(0, 2).every(r => !inCrop(c, r))
+    && rows.slice(2).every(r => inCrop(c, r));
+  return ok;
+})());
+check("左侧导航窄行：自动框不向左偏移", (() => {
+  const rows = [["首页", 0, 300, 120, 350], ["模拟考试", 0, 700, 120, 750], ["错题重做", 0, 1100, 120, 1150]];
+  rows.push(...quizPage(31, 4, 4).map(r => [r[0], r[1] + 200, r[2], r[3] + 200, r[4]]));
+  const c = cropOf(rows);
+  return c.crop && c.crop.x * W > 130 && rows.slice(0, 3).every(r => !inCrop(c, r));
+})());
+check("连续 10 题长页：全部包住", (() => {
+  const rows = quizPage(41, 10, 4);
+  const c = cropOf(rows);
+  return c.crop && c.confidence === "strong" && rows.every(r => inCrop(c, r));
+})());
+check("单选→多选跨块页：大题标题行也被包住", (() => {
+  const rows = quizPage(51, 3, 4);
+  let y = rows[rows.length - 1][4] + 40;
+  const titleY = y;
+  rows.push(["二、多项选择题（每题2分）", 60, titleY, 800, titleY + 48]);
+  y = titleY + 60;
+  quizPage(54, 2, 4).forEach(r => { rows.push([r[0], r[1], r[2] + y - 300, r[3], r[4] + y - 300]); });
+  const c = cropOf(rows);
+  const titleRow = rows.find(r => r[0].indexOf("多项选择题") >= 0);
+  const titleIn = inCrop(c, titleRow);
+  return c.crop && c.confidence === "strong" && titleIn && rows.every(r => inCrop(c, r));
+})());
+check("OCR 漏一个题号（20,21,23,24）：不切断主体", (() => {
+  const rows = quizPage(20, 2, 4);
+  let y = rows[rows.length - 1][4] + 200;
+  quizPage(23, 2, 4).forEach(r => { rows.push([r[0], r[1], r[2] + y - 300, r[3], r[4] + y - 300]); });
+  const c = cropOf(rows);
+  return c.crop && c.confidence === "strong" && rows.every(r => inCrop(c, r));
+})());
+check("只有一个题号但选项齐全：单题模式 ok_single_question", (() => {
+  const rows = quizPage(66, 1, 5);
+  const c = cropOf(rows);
+  return c.crop && c.reason === "ok_single_question" && rows.every(r => inCrop(c, r));
+})());
+check("没有可靠题目结构：返回 null 走默认框", (() => {
+  const rows = [["某某某某某某", 100, 100, 800, 160], ["另外一些文字", 100, 300, 800, 360],
+    ["更多文字内容", 100, 500, 800, 560], ["最后一段文字", 100, 700, 800, 760]];
+  const c = cropOf(rows);
+  return c.crop === null && c.confidence === "none" && c.reason === "no_quiz_structure";
+})());
+check("AUTO_CROP IoU/召回：题目主体框 IoU >= 0.55 且召回 = 100%", (() => {
+  const rows = quizPage(71, 6, 4);
+  const c = cropOf(rows);
+  if (!c.crop) { return false; }
+  // GT 题目主体 = 除首行 padding 外的实际文字范围
+  const gt = [Math.min(...rows.map(r => r[1])), Math.min(...rows.map(r => r[2])),
+    Math.max(...rows.map(r => r[3])), Math.max(...rows.map(r => r[4]))];
+  const cx0 = c.crop.x * W, cy0 = c.crop.y * H, cx1 = cx0 + c.crop.w * W, cy1 = cy0 + c.crop.h * H;
+  const ix = Math.max(0, Math.min(cx1, gt[2]) - Math.max(cx0, gt[0]));
+  const iy = Math.max(0, Math.min(cy1, gt[3]) - Math.max(cy0, gt[1]));
+  const inter = ix * iy;
+  const gtArea = (gt[2] - gt[0]) * (gt[3] - gt[1]);
+  const uni = (cx1 - cx0) * (cy1 - cy0) + gtArea - inter;
+  const iou = uni ? inter / uni : 0;
+  const recall = gtArea ? inter / gtArea : 0;
+  return iou >= 0.55 && recall === 1;
+})(), "IoU=" + (0).toFixed(2));
+
+
 check("大块标题形近容错：多项选挥题/单项选泽题/判新题",
   MSQ.pageSectionType("多项选挥题") === "multi"
   && MSQ.pageSectionType("单项选泽题") === "single"
