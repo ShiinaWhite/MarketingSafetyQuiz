@@ -3,7 +3,6 @@ package com.jty.safetyquiz;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -11,8 +10,8 @@ import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Size;
 import android.view.ViewGroup;
-import android.webkit.WebView;
 
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
@@ -20,6 +19,8 @@ import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
+import androidx.camera.core.resolutionselector.ResolutionSelector;
+import androidx.camera.core.resolutionselector.ResolutionStrategy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
@@ -34,11 +35,16 @@ import com.getcapacitor.annotation.Permission;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
+import java.util.concurrent.Executor;
 
 @CapacitorPlugin(name = "InAppCamera", permissions = {
         @Permission(strings = { Manifest.permission.CAMERA })
 })
 public class InAppCameraPlugin extends Plugin {
+
+    /** 正式 OCR 图期望分辨率：接近 4:3 高分辨率上限（宽上限 3000，超宽再缩）。 */
+    private static final int TARGET_CAPTURE_W = 3000;
+    private static final int TARGET_CAPTURE_H = 4000;
 
     private PreviewView previewView;
     private ImageCapture imageCapture;
@@ -83,16 +89,22 @@ public class InAppCameraPlugin extends Plugin {
                     new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT));
         }
-        bridge.getWebView().setBackgroundColor(Color.TRANSPARENT);
 
         ProcessCameraProvider.getInstance(ctx()).addListener(() -> {
             try {
                 ProcessCameraProvider provider = ProcessCameraProvider.getInstance(ctx()).get();
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
-                ImageCapture.Builder cb = new ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY);
-                ImageCapture ic = cb.build();
+                // 分辨率策略：请求 3000×4000（4:3 高分辨率上限），优先取最接近的更高分辨率，
+                // 没有更高则取最接近的更低分辨率；设备达不到 3000 时如实保留实际宽度。
+                ImageCapture ic = new ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        .setResolutionSelector(new ResolutionSelector.Builder()
+                                .setResolutionStrategy(new ResolutionStrategy(
+                                        new Size(TARGET_CAPTURE_W, TARGET_CAPTURE_H),
+                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                                .build())
+                        .build();
                 provider.unbindAll();
                 Camera camera = provider.bindToLifecycle(
                         (LifecycleOwner) activity,
@@ -144,77 +156,106 @@ public class InAppCameraPlugin extends Plugin {
     }
 
     private JSObject processProxy(ImageProxy proxy, int maxW, int qual, int layW) {
-        if (proxy.getFormat() != ImageFormat.JPEG) {
+        byte[] jpeg;
+        int rotation;
+        try {
+            if (proxy.getFormat() != ImageFormat.JPEG) {
+                throw new IllegalArgumentException("UNSUPPORTED_FORMAT");
+            }
+            ByteBuffer buf = proxy.getPlanes()[0].getBuffer();
+            jpeg = new byte[buf.remaining()];
+            buf.get(jpeg);
+            rotation = proxy.getImageInfo().getRotationDegrees();
+        } finally {
+            // 异常路径也必须关闭 ImageProxy，否则相机管线阻塞在缓冲区上
             proxy.close();
-            throw new IllegalArgumentException("UNSUPPORTED_FORMAT");
         }
-        ByteBuffer buf = proxy.getPlanes()[0].getBuffer();
-        byte[] bytes = new byte[buf.remaining()];
-        buf.get(bytes);
-        int rotation = proxy.getImageInfo().getRotationDegrees();
-        proxy.close();
-
-        Bitmap raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-        if (raw == null) {
-            throw new IllegalArgumentException("DECODE_FAILED");
-        }
-        int sensorW = raw.getWidth();
-        int sensorH = raw.getHeight();
-        if (rotation != 0) {
-            Matrix m = new Matrix();
-            m.postRotate(rotation);
-            Bitmap r = Bitmap.createBitmap(raw, 0, 0, raw.getWidth(), raw.getHeight(), m, true);
-            if (r != raw) { raw.recycle(); }
-            raw = r;
-        }
-        int normW = raw.getWidth();
-        int normH = raw.getHeight();
-
-        Bitmap main = raw;
-        if (normW > maxW) {
-            float ratio = (float) maxW / normW;
-            Matrix m = new Matrix();
-            m.postScale(ratio, ratio);
-            Bitmap s = Bitmap.createBitmap(raw, 0, 0, normW, normH, m, true);
-            if (s != raw) { raw.recycle(); }
-            main = s;
-        }
-        String dataUrl = toDataUrl(main, qual);
-        int outW = main.getWidth();
-        int outH = main.getHeight();
-
-        Bitmap layout = main;
-        if (layW > 0 && main.getWidth() > layW) {
-            float ratio = (float) layW / main.getWidth();
-            Matrix m = new Matrix();
-            m.postScale(ratio, ratio);
-            layout = Bitmap.createBitmap(main, 0, 0, main.getWidth(), main.getHeight(), m, true);
-        }
-        String layoutUrl = toDataUrl(layout, 70);
-        int layW2 = layout.getWidth();
-        int layH2 = layout.getHeight();
-        if (layout != main) { layout.recycle(); }
-        main.recycle();
-        raw.recycle();
-
-        JSObject ret = new JSObject();
-        ret.put("dataUrl", dataUrl);
-        ret.put("width", outW);
-        ret.put("height", outH);
-        ret.put("layoutDataUrl", layoutUrl);
-        ret.put("layoutWidth", layW2);
-        ret.put("layoutHeight", layH2);
-        ret.put("sensorWidth", sensorW);
-        ret.put("sensorHeight", sensorH);
-        ret.put("normalizedWidth", normW);
-        ret.put("normalizedHeight", normH);
-        ret.put("outputWidth", outW);
-        ret.put("outputHeight", outH);
-        return ret;
+        return processJpeg(jpeg, rotation, maxW, qual, layW);
     }
 
-    private String toDataUrl(Bitmap b, int q) {
-        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+    /**
+     * Bitmap ownership 规则（管线是 rawBitmap → normalized → mainBitmap → layoutBitmap 的单向链，
+     * 每个变量只拥有"本阶段转换产物"；某阶段不做转换时，该变量就是上一阶段的同一引用）：
+     *   rawBitmap    = decode 后唯一拥有
+     *   normalized   = rotate 后唯一拥有（无旋转时 == rawBitmap）
+     *   mainBitmap   = 最终正式 OCR 图（宽 ≤ maxW 时 == normalized）
+     *   layoutBitmap = 独立低分辨率布局图（宽 ≤ layW 时 == mainBitmap）
+     * finally 沿别名链回收：每张 Bitmap 恰好 recycle 一次；decode/rotate/resize/encode
+     * 全部完成后位图才允许释放，任何阶段抛异常也都由 finally 兜底回收。
+     */
+    static JSObject processJpeg(byte[] jpegBytes, int rotation, int maxW, int qual, int layW) {
+        Bitmap rawBitmap = null;
+        Bitmap normalized = null;
+        Bitmap mainBitmap = null;
+        Bitmap layoutBitmap = null;
+        try {
+            rawBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.length);
+            if (rawBitmap == null) {
+                throw new IllegalArgumentException("DECODE_FAILED");
+            }
+            int sensorW = rawBitmap.getWidth();
+            int sensorH = rawBitmap.getHeight();
+
+            normalized = rawBitmap;
+            if (rotation != 0) {
+                Matrix m = new Matrix();
+                m.postRotate(rotation);
+                Bitmap r = Bitmap.createBitmap(rawBitmap, 0, 0, sensorW, sensorH, m, true);
+                if (r != normalized) { normalized.recycle(); }
+                normalized = r;
+            }
+            int normW = normalized.getWidth();
+            int normH = normalized.getHeight();
+
+            mainBitmap = normalized;
+            if (normW > maxW) {
+                float ratio = (float) maxW / normW;
+                Matrix m = new Matrix();
+                m.postScale(ratio, ratio);
+                Bitmap s = Bitmap.createBitmap(normalized, 0, 0, normW, normH, m, true);
+                if (s != mainBitmap) { mainBitmap.recycle(); }
+                mainBitmap = s;
+            }
+            String dataUrl = toDataUrl(mainBitmap, qual);
+            int outW = mainBitmap.getWidth();
+            int outH = mainBitmap.getHeight();
+
+            layoutBitmap = mainBitmap;
+            if (layW > 0 && mainBitmap.getWidth() > layW) {
+                float ratio = (float) layW / mainBitmap.getWidth();
+                Matrix m = new Matrix();
+                m.postScale(ratio, ratio);
+                layoutBitmap = Bitmap.createBitmap(mainBitmap, 0, 0,
+                        mainBitmap.getWidth(), mainBitmap.getHeight(), m, true);
+            }
+            String layoutUrl = toDataUrl(layoutBitmap, 70);
+            int layW2 = layoutBitmap.getWidth();
+            int layH2 = layoutBitmap.getHeight();
+
+            JSObject ret = new JSObject();
+            ret.put("dataUrl", dataUrl);
+            ret.put("width", outW);
+            ret.put("height", outH);
+            ret.put("layoutDataUrl", layoutUrl);
+            ret.put("layoutWidth", layW2);
+            ret.put("layoutHeight", layH2);
+            ret.put("sensorWidth", sensorW);
+            ret.put("sensorHeight", sensorH);
+            ret.put("normalizedWidth", normW);
+            ret.put("normalizedHeight", normH);
+            ret.put("outputWidth", outW);
+            ret.put("outputHeight", outH);
+            return ret;
+        } finally {
+            if (layoutBitmap != null && layoutBitmap != mainBitmap) { layoutBitmap.recycle(); }
+            if (mainBitmap != null && mainBitmap != normalized) { mainBitmap.recycle(); }
+            if (normalized != null && normalized != rawBitmap) { normalized.recycle(); }
+            if (rawBitmap != null) { rawBitmap.recycle(); }
+        }
+    }
+
+    private static String toDataUrl(Bitmap b, int q) {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
         b.compress(Bitmap.CompressFormat.JPEG, q, bo);
         return "data:image/jpeg;base64,"
                 + android.util.Base64.encodeToString(bo.toByteArray(), android.util.Base64.NO_WRAP);
@@ -239,6 +280,4 @@ public class InAppCameraPlugin extends Plugin {
         stopPreviewOnly();
         super.handleOnDestroy();
     }
-
-    private ProcessCameraProvider provider;
 }
