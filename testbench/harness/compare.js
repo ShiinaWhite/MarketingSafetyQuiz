@@ -15,6 +15,8 @@ const metrics = [
   ["TOP1_MATCH_ACCURACY", "%", true],          /* 硬约束：不得下降 */
   ["TOP3_MATCH_ACCURACY", "%", false],
   ["ANSWER_ACCURACY", "%", true],              /* 硬约束：不得下降 */
+  ["ANSWER_COVERAGE", "%", false],
+  ["ANSWERED_PRECISION", "%", false],
   ["ANSWER_ACCURACY_RAW", "%", false],
   ["HIGH_CONFIDENCE_WRONG", "条", true],       /* 方向取反（越少越好），且为硬约束 */
   ["CONFIDENCE_FALSE_NEGATIVE", "条", false],

@@ -706,6 +706,18 @@ check("分题：题干换行 + 选项换行不拆题", (() => {
     && b[0].stemText === "根据营销安规规定，作业人员进入现场应正确佩戴安全帽。"
     && b[0].optionsText === "A. 正确 B. 错误";
 })());
+check("大块标题形近容错：多项选挥题/单项选泽题/判新题",
+  MSQ.pageSectionType("多项选挥题") === "multi"
+  && MSQ.pageSectionType("单项选泽题") === "single"
+  && MSQ.pageSectionType("判新题") === "judge");
+check("大块标题：精确形式不受影响",
+  MSQ.pageSectionType("多项选择题") === "multi" && MSQ.pageSectionType("判断题") === "judge");
+check("大块标题：diff=2 不自动命中（多项选***题 两处不同）",
+  MSQ.pageSectionType("多项选乙丙题") === null);
+check("大块标题：长题干不会误判成标题",
+  MSQ.pageSectionType("根据营销安规规定，多项选择题的判分规则如下所述") === null
+  && MSQ.pageSectionType("下列关于多项选择题的说法正确的一项是") === null);
+
 check("分题：题型强约束只在对应题型内匹配", (() => {
   const blocks = MSQ.splitPageOcrLines([
     { text: "1. 禁止作业人员擅自移动或拆除遮栏（围栏）和标示牌。", top: 10, left: 10, bottom: 40 }

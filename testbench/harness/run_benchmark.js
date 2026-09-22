@@ -97,6 +97,17 @@ function main() {
   const profiles = both ? ["ceiling", "app_ideal"] : [String(arg("profile", "ceiling"))];
   const setName = String(arg("set", "all")).toLowerCase();
   if (["dev", "holdout", "all"].indexOf(setName) < 0) { throw new Error("--set 只支持 dev|holdout|all"); }
+  const secondName = arg("second", null);
+  let secondJobs = null, secondOcr = null;
+  if (secondName) {
+    const jp = path.join(OUT, "second_pass", String(secondName), "jobs.json");
+    const op = path.join(OUT, "ocr", String(secondName) + "-crops.jsonl");
+    secondJobs = JSON.parse(fs.readFileSync(jp, "utf8"));
+    secondOcr = new Map(fs.readFileSync(op, "utf8").split(/\r?\n/).filter(Boolean).map(l => {
+      const o = JSON.parse(l); return [o.file, o];
+    }));
+    console.log("[二次OCR] 触发块 " + secondJobs.jobs.length + "，裁图结果 " + secondOcr.size);
+  }
   const manifestPath = path.join(OUT, "manifest.json");
   if (!fs.existsSync(manifestPath)) {
     console.error("缺少 " + manifestPath + "\n先运行： node testbench/harness/generate_dataset.js");
@@ -121,6 +132,13 @@ function main() {
     const src = selftest ? buildSelftestOcr(manifest, profile) : loadOcr(ocrFile);
     const pagesInSet = manifest.pages.filter(p => setName === "all" || evalSet(p.pageId) === setName);
     const records = [];
+    const pageJobs = {};
+    if (secondJobs) {
+      secondJobs.jobs.forEach(j => {
+        if (setName !== "all" && evalSet(j.pageId) !== setName) { return; }
+        (pageJobs[j.pageId] = pageJobs[j.pageId] || []).push(j);
+      });
+    }
     pagesInSet.forEach(page => {
       const img = page.images[profile];
       if (!img) { return; }
@@ -129,6 +147,37 @@ function main() {
       if (!ocr) { return; }
       const gt = JSON.parse(fs.readFileSync(path.join(OUT, page.gt), "utf8"));
       const r = runPage(page, gt, ocr);
+      /* ---- 局部二次 OCR 合并：只对触发块，"更好才替换" ---- */
+      (pageJobs[page.pageId] || []).forEach(j => {
+        const cropO = secondOcr.get(j.cropFile);
+        const b = r.blocks[j.blockIdx];
+        if (!cropO || cropO.err || !b) { return; }
+        const cropText = String(cropO.text || "");
+        r.secondPass = r.secondPass || { triggered: 0, ocrMs: [] };
+        r.secondPass.triggered++; r.secondPass.ocrMs.push(cropO.ms || 0);
+        if (!cropText.trim() || !b.matches) { return; }
+        const secondMatches = MSQ.matchPageQuestionBlock(BATCH_INDEX, { stemText: cropText, optionsText: "", type: b.type }, { limit: 3 });
+        const first = b.matches[0] || null;
+        const second = secondMatches[0] || null;
+        if (!second) { return; }
+        const firstScore = first ? first.score : 0;
+        let via = null, chosen = null;
+        /* 保守合并：只救"原本显示 ?"的块；任何已显示的答案绝不被二次结果替换 */
+        const firstHidden = !first || b.answerDisplayed === "?";
+        if (!first) { chosen = secondMatches; via = "second_no_first"; }
+        else if (firstHidden && second.score > firstScore * 1.15) { chosen = secondMatches; via = "second_recover"; }
+        else { chosen = b.matches; via = "first_kept"; }
+        if (via && via.indexOf("second") === 0) {
+          b.matches = chosen;
+          b.bankId = chosen[0].id;
+          b.answerItem = BATCH_INDEX.find(x => String(x.id) === String(chosen[0].id)) || null;
+          b.answer = b.answerItem ? MSQ.pageAnswerText(b.answerItem) : "?";
+          const conf = MSQ.pageBlockConfidence(chosen, { stemText: cropText });
+          b.confidence = conf === "high" ? "medium" : conf;   /* 恢复路径保守封顶 medium */
+          b.answerDisplayed = (b.confidence === "low" || b.confidence === "none" || b.answer === "?") ? "?" : b.answer;
+          b.secondPassInfo = { via: via, secondScore: second.score, firstScore: firstScore };
+        }
+      });
       records.push({
         pageId: page.pageId, profile: profile, seed: page.seed, type: page.type, mode: page.mode,
         count: page.count, startNumber: page.startNumber, topUp: !!page.topUp,

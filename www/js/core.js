@@ -426,7 +426,7 @@
       if (k.length !== s.length) { continue; }
       var diff = 0;
       for (var i = 0; i < k.length; i++) { if (k.charAt(i) !== s.charAt(i)) { diff++; } }
-      if (diff <= 0) { return EXACT[k]; }
+      if (diff <= 1) { return EXACT[k]; }
     }
     return null;
   }

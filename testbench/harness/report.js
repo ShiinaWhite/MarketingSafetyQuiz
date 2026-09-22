@@ -89,6 +89,7 @@ function aggregate(records) {
     pages: pages,
     questions: 0, pagesOcrOk: 0, pagesSplitOk: 0,
     screenOk: 0, typeOk: 0, top1Ok: 0, top3Ok: 0, answerOk: 0, answerRawOk: 0,
+    shown: 0, shownOk: 0,
     confidence: { high: 0, medium: 0, low: 0, none: 0 },
     confidenceWrong: { high: 0, medium: 0, low: 0, none: 0 },
     confidenceFalseNegative: 0,
@@ -113,6 +114,10 @@ function aggregate(records) {
       if (top3.indexOf(String(exp.bankId)) >= 0) { out.top3Ok++; }
       const displayed = b ? b.answerDisplayed : "?";
       const raw = b ? b.answerRaw : "?";
+      if (displayed !== "?") {
+        out.shown++;
+        if (displayed === exp.answer) { out.shownOk++; }
+      }
       if (displayed === exp.answer) { out.answerOk++; }
       if (raw === exp.answer) { out.answerRawOk++; }
       const conf = b ? b.confidence : "none";
@@ -148,6 +153,8 @@ function aggregate(records) {
   out.TOP3_MATCH_ACCURACY = pct(out.top3Ok, out.questions);
   out.ANSWER_ACCURACY = pct(out.answerOk, out.questions);
   out.ANSWER_ACCURACY_RAW = pct(out.answerRawOk, out.questions);
+  out.ANSWER_COVERAGE = pct(out.shown, out.questions);
+  out.ANSWERED_PRECISION = pct(out.shownOk, out.shown);
   out.HIGH_CONFIDENCE_WRONG = out.confidenceWrong.high || 0;
   out.MEDIUM_CONFIDENCE_WRONG = out.confidenceWrong.medium || 0;
   out.LOW_CONFIDENCE_WRONG = out.confidenceWrong.low || 0;
@@ -198,8 +205,10 @@ function renderMarkdown(meta, agg) {
   L.push("| TYPE_ACCURACY | " + p(agg.TYPE_ACCURACY) + " |");
   L.push("| TOP1_MATCH_ACCURACY | " + p(agg.TOP1_MATCH_ACCURACY) + " |");
   L.push("| TOP3_MATCH_ACCURACY | " + p(agg.TOP3_MATCH_ACCURACY) + " |");
-  L.push("| ANSWER_ACCURACY（界面显示） | " + p(agg.ANSWER_ACCURACY) + " |");
+  L.push("| ANSWER_ACCURACY（全部题口径） | " + p(agg.ANSWER_ACCURACY) + " |");
   L.push("| ANSWER_ACCURACY_RAW（不看置信度掩码） | " + p(agg.ANSWER_ACCURACY_RAW) + " |");
+  L.push("| ANSWER_COVERAGE（给出答案的比例） | " + p(agg.ANSWER_COVERAGE) + " |");
+  L.push("| ANSWERED_PRECISION（给出答案中答对比例） | " + p(agg.ANSWERED_PRECISION) + " |");
   L.push("");
   L.push("## 置信度分布");
   L.push("");

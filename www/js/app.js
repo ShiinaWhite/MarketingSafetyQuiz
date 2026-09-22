@@ -1405,7 +1405,7 @@
     try {
       photo = await Camera.getPhoto({
         quality: 85,
-        width: 2000,
+        width: 3000,   /* 分辨率扫描实测：3000px 题干字符覆盖 97%（2000px 为 88%），Top1 97.5% vs 87.5% */
         resultType: "dataUrl",
         source: "CAMERA",
         saveToGallery: false,

@@ -26,6 +26,15 @@ const IMAGES = path.join(OUT, "images");
 const GT = path.join(OUT, "groundtruth");
 const PROFILES = {
   ceiling: { ext: "png", format: "png", quality: 0, scale: 1, desc: "PNG 无损 1:1" },
+  ...Object.fromEntries([
+    ["r1600q85", 1600, 85], ["r2400q85", 2400, 85], ["r3000q85", 3000, 85],
+    ["r3000q95", 3000, 95], ["r3600q90", 3600, 90], ["r4000q90", 4000, 90],
+    ["png2400", 2400, 0], ["png3000", 3000, 0]
+  ].map(([name, w, q]) => {
+    const fmt = name.startsWith("png") ? "png" : "jpeg";
+    return [name, { ext: fmt === "png" ? "png" : "jpg", format: fmt, quality: q,
+      scale: w / 720, desc: (fmt === "png" ? "PNG " : "JPEG q" + q + " ") + w + "px" }];
+  })),
   app_ideal: { ext: "jpg", format: "jpeg", quality: 85, scale: 2000 / 720, desc: "JPEG q85 宽2000px" },
   camera_stress: { ext: "jpg", format: "jpeg", quality: 70, scale: 2000 / 720, stress: true,
     desc: "模拟拍摄退化（旋转/透视/模糊/亮度对比度/纹理/q70），非真实手机拍摄" }
