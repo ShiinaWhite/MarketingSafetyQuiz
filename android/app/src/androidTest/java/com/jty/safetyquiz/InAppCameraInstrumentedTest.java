@@ -1,13 +1,19 @@
 package com.jty.safetyquiz;
 
 import android.Manifest;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.ParcelFileDescriptor;
+import android.view.ViewGroup;
 import android.webkit.WebView;
 
+import androidx.camera.view.PreviewView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 
+import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
 
 import org.json.JSONObject;
@@ -22,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -113,6 +120,25 @@ public class InAppCameraInstrumentedTest {
         assertEquals("Capacitor 桥未在 WebView 内就绪（最后结果: " + ready + "）", "true", ready);
     }
 
+    private Bridge bridge() throws Exception {
+        final AtomicReference<Bridge> ref = new AtomicReference<>();
+        scenario.onActivity(a -> ref.set(((BridgeActivity) a).getBridge()));
+        return ref.get();
+    }
+
+    private InAppCameraPlugin cameraPlugin() throws Exception {
+        return (InAppCameraPlugin) bridge().getPlugin("InAppCamera").getInstance();
+    }
+
+    /** 在主线程读 WebView 的 View 层背景（无 checked 异常，可在 onActivity 内直接用） */
+    private Drawable webViewBackgroundOnMain() throws Exception {
+        final AtomicReference<Drawable> ref = new AtomicReference<>();
+        final WebView wv = bridge().getWebView();
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+                ref.set(wv.getBackground()));
+        return ref.get();
+    }
+
     /** 在 WebView 内等待一个 JS Promise，结果写入 window.__msqLast */
     private String awaitJsPromise(String promiseExpr, long timeoutSec) throws Exception {
         evalJs("window.__msqLast=null; (function(){ var p=" + promiseExpr + ";"
@@ -185,6 +211,55 @@ public class InAppCameraInstrumentedTest {
                 + " normalized=" + normW + "x" + cap.getInt("normalizedHeight")
                 + " output=" + outW + "x" + outH
                 + " layout=" + layW + "x" + cap.getInt("layoutHeight"));
+    }
+
+    @Test
+    public void webViewTransparentDuringLive_previewBelowWebView() throws Exception {
+        Drawable original = webViewBackgroundOnMain();
+        String startRaw = awaitJsPromise("window.Capacitor.Plugins.InAppCamera.start()", 60);
+        assertTrue("start() 失败: " + startRaw,
+                new JSONObject(startRaw).getBoolean("ok"));
+
+        // 取景中：插件透明态必须为 true（WebView 内部底色透明，无读取接口，以布尔态为准）
+        assertTrue("取景中 WebView 应处于透明态", cameraPlugin().isWebViewTransparentForTest());
+        // View 层背景必须是透明 ColorDrawable
+        Drawable bg = webViewBackgroundOnMain();
+        assertTrue("取景中 WebView View 层背景应为透明 ColorDrawable，实际: " + bg,
+                bg instanceof ColorDrawable && ((ColorDrawable) bg).getColor() == Color.TRANSPARENT);
+        // PreviewView 必须插在 content 第 0 位，位于 WebView(CoordinatorLayout) 下层
+        final AtomicReference<Boolean> previewBelow = new AtomicReference<>(false);
+        scenario.onActivity(a -> {
+            ViewGroup content = a.findViewById(android.R.id.content);
+            previewBelow.set(content.getChildCount() >= 2
+                    && content.getChildAt(0) instanceof PreviewView);
+        });
+        assertEquals("PreviewView 应位于 WebView 下层", Boolean.TRUE, previewBelow.get());
+    }
+
+    @Test
+    public void webViewBackgroundRestoredAfterStop_noTransparentLeak() throws Exception {
+        Drawable original = webViewBackgroundOnMain();
+        assertTrue("start() 失败", new JSONObject(awaitJsPromise(
+                "window.Capacitor.Plugins.InAppCamera.start()", 60)).getBoolean("ok"));
+        assertTrue("透明态未生效", cameraPlugin().isWebViewTransparentForTest());
+
+        // stop() 在恢复完成后才 resolve（原生侧同一主线程任务内先 stopPreviewOnly 再 resolve）
+        assertTrue("stop() 失败", new JSONObject(awaitJsPromise(
+                "window.Capacitor.Plugins.InAppCamera.stop()", 30)).getBoolean("ok"));
+
+        assertFalse("stop 后 WebView 不得仍处于透明态",
+                cameraPlugin().isWebViewTransparentForTest());
+        Drawable after = webViewBackgroundOnMain();
+        assertEquals("stop 后必须恢复进入相机前的原背景 Drawable",
+                original, after);
+        // PreviewView 已移除，content 只剩 Capacitor 自身布局
+        final AtomicReference<Integer> childCount = new AtomicReference<>(0);
+        scenario.onActivity(a -> {
+            ViewGroup content = a.findViewById(android.R.id.content);
+            childCount.set(content.getChildCount());
+        });
+        assertEquals("stop 后 PreviewView 应从 content 移除", Integer.valueOf(1),
+                childCount.get());
     }
 
     @Test

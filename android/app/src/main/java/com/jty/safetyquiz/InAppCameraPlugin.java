@@ -8,10 +8,13 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Size;
 import android.view.ViewGroup;
+import android.webkit.WebView;
 
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
@@ -46,11 +49,23 @@ public class InAppCameraPlugin extends Plugin {
     private static final int TARGET_CAPTURE_W = 3000;
     private static final int TARGET_CAPTURE_H = 4000;
 
+    /**
+     * 相机非取景期的 WebView 正常底色。本应用 capacitor.config.json 未配置
+     * backgroundColor，Capacitor Bridge 不会调用 setBackgroundColor，
+     * WebView 默认底色即白色；stop 时恢复到该状态，避免其它页面被透明化。
+     */
+    private static final int WEBVIEW_NORMAL_BG = Color.WHITE;
+
     private PreviewView previewView;
     private ImageCapture imageCapture;
     private boolean previewRunning = false;
     private ProcessCameraProvider provider;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    /** WebView 透明态跟踪：取景期间为 true，恢复后为 false（供测试与防重入使用）。 */
+    private boolean webViewTransparent = false;
+    /** 进入相机前 WebView 的 View 层背景（可能为 null），stop 时原样恢复。 */
+    private Drawable webViewBackground;
 
     private boolean hasCameraPermission() {
         return ContextCompat.checkSelfPermission(
@@ -62,6 +77,9 @@ public class InAppCameraPlugin extends Plugin {
     }
 
     private Context ctx() { return getContext(); }
+
+    /** 仅测试用：WebView 是否处于透出相机取景的透明态。 */
+    boolean isWebViewTransparentForTest() { return webViewTransparent; }
 
     @PluginMethod
     public void start(final PluginCall call) {
@@ -85,10 +103,12 @@ public class InAppCameraPlugin extends Plugin {
             previewView = new PreviewView(ctx());
         }
         if (previewView.getParent() == null) {
+            // 插到 content 第 0 个：PreviewView 位于 WebView(CoordinatorLayout) 下层
             root.addView(previewView, 0,
                     new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT));
         }
+        makeWebViewTransparent();
 
         ProcessCameraProvider.getInstance(ctx()).addListener(() -> {
             try {
@@ -117,6 +137,33 @@ public class InAppCameraPlugin extends Plugin {
                 call.reject("CAMERA_BIND_FAILED", e != null ? e.getMessage() : "bind");
             }
         }, mainExecutor());
+    }
+
+    /**
+     * WebView 默认底色不透明，真机会盖住下层的 PreviewView。
+     * HTML 侧已有 body.native-camera-live 透明 CSS，这里补齐原生两层：
+     * ① WebView 内部底色 setBackgroundColor(TRANSPARENT)（该值无读取接口，
+     *    因此用 webViewTransparent 布尔显式跟踪状态，stop 恢复为 WEBVIEW_NORMAL_BG）；
+     * ② View 层背景换成透明 ColorDrawable（可读，测试直接断言），
+     *    原背景 Drawable 先保存，stopPreviewOnly 原样恢复。
+     */
+    private void makeWebViewTransparent() {
+        WebView webView = bridge != null ? bridge.getWebView() : null;
+        if (webView == null || webViewTransparent) { return; }
+        webViewBackground = webView.getBackground();
+        webView.setBackgroundColor(Color.TRANSPARENT);
+        webView.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        webViewTransparent = true;
+    }
+
+    private void restoreWebViewBackground() {
+        if (!webViewTransparent) { return; }
+        WebView webView = bridge != null ? bridge.getWebView() : null;
+        if (webView == null) { return; }
+        webView.setBackgroundColor(WEBVIEW_NORMAL_BG);
+        webView.setBackground(webViewBackground);
+        webViewBackground = null;
+        webViewTransparent = false;
     }
 
     @PluginMethod
@@ -174,14 +221,15 @@ public class InAppCameraPlugin extends Plugin {
     }
 
     /**
-     * Bitmap ownership 规则（管线是 rawBitmap → normalized → mainBitmap → layoutBitmap 的单向链，
-     * 每个变量只拥有"本阶段转换产物"；某阶段不做转换时，该变量就是上一阶段的同一引用）：
-     *   rawBitmap    = decode 后唯一拥有
-     *   normalized   = rotate 后唯一拥有（无旋转时 == rawBitmap）
-     *   mainBitmap   = 最终正式 OCR 图（宽 ≤ maxW 时 == normalized）
-     *   layoutBitmap = 独立低分辨率布局图（宽 ≤ layW 时 == mainBitmap）
-     * finally 沿别名链回收：每张 Bitmap 恰好 recycle 一次；decode/rotate/resize/encode
-     * 全部完成后位图才允许释放，任何阶段抛异常也都由 finally 兜底回收。
+     * Bitmap ownership 规则（移动语义：任一时刻每个变量要么为 null，
+     * 要么是某张 Bitmap 的唯一持有者，绝无两个变量同时引用同一张活图）：
+     *   rawBitmap    = decode 产物
+     *   normalized   = 旋转归一化产物（无旋转时直接接管 rawBitmap，rawBitmap 置 null）
+     *   mainBitmap   = 正式 OCR 图（宽 ≤ maxW 时直接接管 normalized）
+     *   layoutBitmap = 布局图（宽 ≤ layW 时直接接管 mainBitmap）
+     * 每个阶段结束时，上一阶段产物在完成"作为新图的采样源"这一最后用途后
+     * 立即 recycle 并把变量置 null，因此每个实例整个生命周期恰好 recycle 一次；
+     * finally 只兜底回收仍非空的变量（异常路径同样恰好一次），无 use-after-recycle。
      */
     static JSObject processJpeg(byte[] jpegBytes, int rotation, int maxW, int qual, int layW) {
         Bitmap rawBitmap = null;
@@ -196,37 +244,45 @@ public class InAppCameraPlugin extends Plugin {
             int sensorW = rawBitmap.getWidth();
             int sensorH = rawBitmap.getHeight();
 
-            normalized = rawBitmap;
             if (rotation != 0) {
                 Matrix m = new Matrix();
                 m.postRotate(rotation);
-                Bitmap r = Bitmap.createBitmap(rawBitmap, 0, 0, sensorW, sensorH, m, true);
-                if (r != normalized) { normalized.recycle(); }
-                normalized = r;
+                normalized = Bitmap.createBitmap(rawBitmap, 0, 0, sensorW, sensorH, m, true);
+                rawBitmap.recycle();
+                rawBitmap = null;
+            } else {
+                normalized = rawBitmap;
+                rawBitmap = null;
             }
             int normW = normalized.getWidth();
             int normH = normalized.getHeight();
 
-            mainBitmap = normalized;
             if (normW > maxW) {
                 float ratio = (float) maxW / normW;
                 Matrix m = new Matrix();
                 m.postScale(ratio, ratio);
-                Bitmap s = Bitmap.createBitmap(normalized, 0, 0, normW, normH, m, true);
-                if (s != mainBitmap) { mainBitmap.recycle(); }
-                mainBitmap = s;
+                mainBitmap = Bitmap.createBitmap(normalized, 0, 0, normW, normH, m, true);
+                normalized.recycle();
+                normalized = null;
+            } else {
+                mainBitmap = normalized;
+                normalized = null;
             }
             String dataUrl = toDataUrl(mainBitmap, qual);
             int outW = mainBitmap.getWidth();
             int outH = mainBitmap.getHeight();
 
-            layoutBitmap = mainBitmap;
             if (layW > 0 && mainBitmap.getWidth() > layW) {
                 float ratio = (float) layW / mainBitmap.getWidth();
                 Matrix m = new Matrix();
                 m.postScale(ratio, ratio);
                 layoutBitmap = Bitmap.createBitmap(mainBitmap, 0, 0,
                         mainBitmap.getWidth(), mainBitmap.getHeight(), m, true);
+                mainBitmap.recycle();
+                mainBitmap = null;
+            } else {
+                layoutBitmap = mainBitmap;
+                mainBitmap = null;
             }
             String layoutUrl = toDataUrl(layoutBitmap, 70);
             int layW2 = layoutBitmap.getWidth();
@@ -245,12 +301,17 @@ public class InAppCameraPlugin extends Plugin {
             ret.put("normalizedHeight", normH);
             ret.put("outputWidth", outW);
             ret.put("outputHeight", outH);
+
+            layoutBitmap.recycle();
+            layoutBitmap = null;
             return ret;
         } finally {
-            if (layoutBitmap != null && layoutBitmap != mainBitmap) { layoutBitmap.recycle(); }
-            if (mainBitmap != null && mainBitmap != normalized) { mainBitmap.recycle(); }
-            if (normalized != null && normalized != rawBitmap) { normalized.recycle(); }
+            // 兜底：异常路径下仅回收"仍在变量手里"的实例；正常路径全部已置 null。
+            // 因为从不别名，同一实例不可能被这里二次回收。
             if (rawBitmap != null) { rawBitmap.recycle(); }
+            if (normalized != null) { normalized.recycle(); }
+            if (mainBitmap != null) { mainBitmap.recycle(); }
+            if (layoutBitmap != null) { layoutBitmap.recycle(); }
         }
     }
 
@@ -263,8 +324,10 @@ public class InAppCameraPlugin extends Plugin {
 
     @PluginMethod
     public void stop(final PluginCall call) {
-        mainExecutor().execute(this::stopPreviewOnly);
-        if (call != null) { call.resolve(); }
+        mainExecutor().execute(() -> {
+            stopPreviewOnly();
+            if (call != null) { call.resolve(); }
+        });
     }
 
     private void stopPreviewOnly() {
@@ -273,6 +336,7 @@ public class InAppCameraPlugin extends Plugin {
         if (previewView != null && previewView.getParent() != null) {
             ((ViewGroup) previewView.getParent()).removeView(previewView);
         }
+        restoreWebViewBackground();
     }
 
     @Override
