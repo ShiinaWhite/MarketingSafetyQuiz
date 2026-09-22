@@ -71,8 +71,10 @@ public class OcrBatchBenchmarkTest {
         String inRel = args.getString("inDir", "benchmark/images/" + profile);
         String outRel = args.getString("outFile", "benchmark/ocr/" + profile + ".jsonl");
 
-        File inDir = new File(base, inRel);
-        File outFile = new File(base, outRel);
+        /* 绝对路径直接使用（如 /data/local/tmp/...，绕开 Android 11 对
+           /sdcard/Android/data 的作用域存储限制）；相对路径挂在应用外部私有目录下 */
+        File inDir = inRel.startsWith("/") ? new File(inRel) : new File(base, inRel);
+        File outFile = outRel.startsWith("/") ? new File(outRel) : new File(base, outRel);
         File parent = outFile.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IllegalStateException("无法创建输出目录 " + parent);

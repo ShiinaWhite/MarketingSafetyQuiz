@@ -33,6 +33,15 @@ function baselineCommit() {
   } catch (e) { return "(unknown)"; }
 }
 
+/* 固定 dev/holdout 切分：按 pageId 哈希，稳定且与内容无关（调参前先切，防过拟合）。
+   dev ≈ 70%，holdout ≈ 30%。优化过程只看 dev；holdout 仅在最终验收时跑。 */
+function evalSet(pageId) {
+  let h = 0;
+  const s = String(pageId);
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return (h % 100) < 70 ? "dev" : "holdout";
+}
+
 function mlkitVersion() {
   try {
     const g = fs.readFileSync(path.join(REPO, "android/app/build.gradle"), "utf8");
@@ -86,6 +95,8 @@ function main() {
   const selftest = !!arg("selftest", false);
   const both = !!arg("both", false);
   const profiles = both ? ["ceiling", "app_ideal"] : [String(arg("profile", "ceiling"))];
+  const setName = String(arg("set", "all")).toLowerCase();
+  if (["dev", "holdout", "all"].indexOf(setName) < 0) { throw new Error("--set 只支持 dev|holdout|all"); }
   const manifestPath = path.join(OUT, "manifest.json");
   if (!fs.existsSync(manifestPath)) {
     console.error("缺少 " + manifestPath + "\n先运行： node testbench/harness/generate_dataset.js");
@@ -108,8 +119,9 @@ function main() {
       return;
     }
     const src = selftest ? buildSelftestOcr(manifest, profile) : loadOcr(ocrFile);
+    const pagesInSet = manifest.pages.filter(p => setName === "all" || evalSet(p.pageId) === setName);
     const records = [];
-    manifest.pages.forEach(page => {
+    pagesInSet.forEach(page => {
       const img = page.images[profile];
       if (!img) { return; }
       const base = path.basename(img.file);
@@ -146,7 +158,9 @@ function main() {
         : "(selftest：无设备)",
       mlkit: src.header ? src.header.mlkit : "(selftest)",
       source: manifest.source, bankSize: manifest.bankSize, profile: profile,
-      coverage: manifest.coverage,
+      coverage: manifest.coverage, evalSet: setName,
+      pagesInSet: setName === "all" ? manifest.pages.length
+        : manifest.pages.filter(p => evalSet(p.pageId) === setName).length,
       timingNote: "OCR 耗时来自 Android 端 ML Kit（同一次进程、已预热模型）；" +
         "split/match 在电脑端 V8 上测量，非手机 CPU。TOTAL 为 image-to-answer，不含对焦/快门/Camera 启动。"
     };

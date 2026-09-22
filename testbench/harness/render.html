@@ -53,6 +53,30 @@
       });
       render(page, DISPLAY);
       window.__page = page;
+      /* 拍摄退化模拟（CAMERA_STRESS）：确定性参数由页 seed 派生，可复现。
+         只作用于渲染成像（CSS 变换 + 滤镜 + 纹理），不修改题目 DOM 文字本身。 */
+      if (params.stress === "1") {
+        var srng = Bench.mulberry32((page.seed * 7 + 13) >>> 0);
+        var rotZ = ((srng() - 0.5) * 1.2).toFixed(3);          /* ±0.6° 小角度旋转 */
+        var rotY = ((srng() - 0.5) * 1.6).toFixed(3);          /* ±0.8° 轻透视 */
+        var scl = (0.985 + srng() * 0.02).toFixed(4);          /* 轻缩放 */
+        var blur = (0.4 + srng() * 0.5).toFixed(2);            /* 0.4~0.9px 轻模糊 */
+        var bright = (1.02 + srng() * 0.06).toFixed(3);        /* 亮度 +2%~8% */
+        var contrast = (0.94 + srng() * 0.06).toFixed(3);      /* 对比度 -6%~0 */
+        var examEl = document.getElementById("exam");
+        examEl.style.transformOrigin = "center center";
+        examEl.style.transform = "perspective(2200px) rotateY(" + rotY + "deg) rotateZ(" +
+          rotZ + "deg) scale(" + scl + ")";
+        examEl.style.filter = "blur(" + blur + "px) brightness(" + bright + ") contrast(" + contrast + ")";
+        /* 轻度屏摄纹理（摩尔纹近似）：低透明度斜线 */
+        var moire = document.createElement("div");
+        moire.style.cssText = "position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;" +
+          "opacity:0.05;background:repeating-linear-gradient(7deg,#000 0 1px,#fff 1px 3px);z-index:9";
+        document.body.appendChild(moire);
+        window.__pad = 0.08;                                   /* 四周留 8% 取景边距（局部裁切近似） */
+        window.__stress = { rotZ: rotZ, rotY: rotY, scale: scl, blur: blur,
+          brightness: bright, contrast: contrast };
+      }
       window.__size = measure();
       /* 两帧之后再置就绪位，确保字体与布局已稳定 */
       requestAnimationFrame(function () {

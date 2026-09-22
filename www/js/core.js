@@ -409,7 +409,8 @@
   }
 
   /* 大块标题：单选题/单项选择题/多选题/多项选择题/判断题（允许"二、"这类大题编号与
-     尾部计分说明）。标题之前沿用当前题型，标题之后自动切换到标题对应题型。 */
+     尾部计分说明）。真实 ML Kit 会把标题识出错字（多项选择题→多项选挥题），
+     故在严格匹配外追加"等长+少量字符差异"的形近匹配；题干行较长不会命中。 */
   function pageSectionType(line) {
     var s = String(line == null ? "" : line).normalize("NFKC").trim();
     if (!s || s.length > 20) { return null; }
@@ -419,6 +420,14 @@
     if (s === "单项选择题" || s === "单选题" || s === "单选") { return "single"; }
     if (s === "多项选择题" || s === "多选题" || s === "多选") { return "multi"; }
     if (s === "判断题" || s === "判断") { return "judge"; }
+    var EXACT = { "单项选择题": "single", "单选题": "single", "多项选择题": "multi",
+      "多选题": "multi", "判断题": "judge" };
+    for (var k in EXACT) {
+      if (k.length !== s.length) { continue; }
+      var diff = 0;
+      for (var i = 0; i < k.length; i++) { if (k.charAt(i) !== s.charAt(i)) { diff++; } }
+      if (diff <= 0) { return EXACT[k]; }
+    }
     return null;
   }
 
@@ -487,6 +496,8 @@
     var cur = null;
     var curType = def;
     var headers = [];
+    var curOpts = {};      /* 当前块已出现的选项字母（用于选项重启检测） */
+    var curLast = "";      /* 最近一次出现的选项字母：A~D 完整走完后应为 D */
     for (var i = 0; i < sorted.length; i++) {
       var ln = sorted[i];
       var text = String(ln.text == null ? "" : ln.text).trim();
@@ -504,14 +515,37 @@
           numberSource: "ocr", type: curType,
           lines: [], top: ln.top, bottom: ln.bottom };
         blocks.push(cur);
+        curOpts = {};
         if (qn.rest) {
           cur.lines.push({ text: qn.rest, top: ln.top, left: ln.left, right: ln.right, bottom: ln.bottom });
         }
         continue;
       }
+      /* 选项重启二次分题：OCR 漏读某题的题号行时，两道题会并进一个块，表现为
+         A~D 选项后又出现一个 A 选项行。此时在第二个 A 处把块拆开，新块题号未知，
+         由 normalizePageQuestionSequence 依据前后邻块推断（numberSource=inferred）。
+         要求当前块已见到 >=3 个不同选项字母，避免误拆。 */
+      if (cur && curOpts && Object.keys(curOpts).length >= 3 && cur.lines.length >= 6 &&
+          /^[（(【\[]?\s*Aa?\s*[)）】\]]?\s*[.、．:：]/.test(text)) {
+        /* 上一块"最后一个选项行之后"的散行（漏号题的题干）归属新块 */
+        var carry = [];
+        while (cur.lines.length &&
+               !isPageOptionLine(cur.lines[cur.lines.length - 1].text)) {
+          carry.unshift(cur.lines.pop());
+        }
+        cur = { pageIndex: blocks.length, screenNumber: null, rawScreenNumber: null,
+          numberSource: "unknown", type: curType,
+          lines: carry, top: carry.length ? carry[0].top : ln.top,
+          left: carry.length ? carry[0].left : ln.left,
+          bottom: ln.bottom };
+        blocks.push(cur);
+        curOpts = {};
+      }
       if (cur) {
         cur.lines.push({ text: text, top: ln.top, left: ln.left, right: ln.right, bottom: ln.bottom });
         cur.bottom = ln.bottom;
+        var om = text.match(/^[（(【\[]?\s*([A-Fa-f])\s*[)）】\]]?\s*[.、．:：]/);
+        if (om) { var ol = om[1].toUpperCase(); curOpts[ol] = true; curLast = ol; }
       }
     }
     blocks.forEach(function (b) {
@@ -618,10 +652,11 @@
     var numbered = list.filter(function (b) { return seqNum(b) !== null; });
     list.forEach(function (b) { if (seqNum(b) === null) { b.numberSource = "unknown"; } });
     var repairs = 0;
+    var seen = {};
+    var taken = {};
+    numbered.forEach(function (b) { seen[seqNum(b)] = true; });
 
     if (numbered.length >= 3) {
-      var seen = {};
-      numbered.forEach(function (b) { seen[seqNum(b)] = true; });
       var values = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
       var clusters = seqClusters(values, SEQ_CLUSTER_MAX_GAP);
       clusters.sort(function (a, b) {
@@ -636,7 +671,6 @@
       for (var v = main.start; v <= main.end; v++) { if (!seen[v]) { missing.push(v); } }
       var byNum = {};
       numbered.forEach(function (b) { (byNum[seqNum(b)] = byNum[seqNum(b)] || []).push(b); });
-      var taken = {};
 
       /* 1) 同页重复题号：恰重复一对 + 主簇恰好缺一个号 + 其中一块空间上正落在缺口里
         （如 31 32 3l 34 35：3l 被形近恢复成 31，与真 31 重复，缺口 33 正是它的位置） */
@@ -682,6 +716,30 @@
           repairs++;
         }
       }
+    }
+
+    /* 无题号块推断：双邻证据（恰夹在 n 与 n+2 之间且 n+1 未占用）才编号，
+       需要至少 2 个带号块；这不是对 1~2 个题号页做激进序列推断。 */
+    if (numbered.length >= 2) {
+      list.filter(function (b) { return seqNum(b) === null; }).forEach(function (ub) {
+        if (repairs >= SEQ_MAX_REPAIRS) { return; }
+        var up = posOf(ub), prevN = null, nextN = null;
+        for (var k = 0; k < order.length && nextN === null; k++) {
+          var nb = list[order[k]];
+          var nn = seqNum(nb);
+          if (nn === null || nb === ub) { continue; }
+          if (posOf(nb) < up) { prevN = nn; }
+          else { nextN = nn; break; }
+        }
+        if (prevN !== null && nextN !== null && nextN - prevN === 2 &&
+            !seen[prevN + 1] && !taken[prevN + 1]) {
+          ub.screenNumber = String(prevN + 1);
+          ub.numberSource = "inferred";
+          seen[prevN + 1] = true;
+          taken[prevN + 1] = true;
+          repairs++;
+        }
+      });
     }
 
     list.forEach(function (b) {
@@ -778,6 +836,11 @@
       b.answerItem = b.bankId === null ? null : (byId[b.bankId] || null);
       b.answer = b.answerItem ? pageAnswerText(b.answerItem) : "?";
       if (b.answer !== "?") { answered++; }
+      /* 编号来源不干净（拆出/推断/修复）的块证据较弱，置信度封顶 medium：
+         保证"高置信度"永远来自题号原文可靠的块 */
+      if (b.confidence === "high" && b.numberSource !== "ocr") { b.confidence = "medium"; }
+      /* 选项辅助匹配成功的块证据同样较弱（题干不足/严重 garble），不宣称高置信 */
+      if (b.confidence === "high" && b.matches && b.matches.assistedByOptions) { b.confidence = "medium"; }
     });
     /* 题号校正 + 升序：只调整 screenNumber/label/numberSource 与块顺序，
        不改写 bankId/matches/confidence/answer（匹配结果与题号无关） */

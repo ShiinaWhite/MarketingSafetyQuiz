@@ -26,7 +26,9 @@ const IMAGES = path.join(OUT, "images");
 const GT = path.join(OUT, "groundtruth");
 const PROFILES = {
   ceiling: { ext: "png", format: "png", quality: 0, scale: 1, desc: "PNG 无损 1:1" },
-  app_ideal: { ext: "jpg", format: "jpeg", quality: 85, scale: 2000 / 720, desc: "JPEG q85 宽2000px" }
+  app_ideal: { ext: "jpg", format: "jpeg", quality: 85, scale: 2000 / 720, desc: "JPEG q85 宽2000px" },
+  camera_stress: { ext: "jpg", format: "jpeg", quality: 70, scale: 2000 / 720, stress: true,
+    desc: "模拟拍摄退化（旋转/透视/模糊/亮度对比度/纹理/q70），非真实手机拍摄" }
 };
 const CHROME_CANDIDATES = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -124,6 +126,7 @@ async function capture(cdp, base, page, profile) {
     indent: "1", headerStyle: "standard", zoom: "100", noise: "0"
   });
   if (page.splitAt) { q.set("splitAt", String(page.splitAt)); }
+  if (prof.stress) { q.set("stress", "1"); }
   await cdp.send("Page.navigate", { url: base + "/harness/render.html?" + q.toString() });
   /* 等就绪（字体/布局稳定） */
   const t0 = Date.now();
@@ -135,11 +138,15 @@ async function capture(cdp, base, page, profile) {
   }
   const err = await cdp.send("Runtime.evaluate", { expression: "window.__error || ''", returnByValue: true });
   if (err.result && err.result.value) { throw new Error("渲染失败 " + page.pageId + ": " + err.result.value); }
-  /* 视口设成考试页主体尺寸，截出来就是页面本身 */
+  /* 视口设成考试页主体尺寸（拍摄退化模式时四周留取景边距），截出来就是页面本身 */
   const size = await cdp.send("Runtime.evaluate", { expression: "JSON.stringify(window.__size)", returnByValue: true });
   const dim = JSON.parse(size.result.value);
+  const padRatio = prof.stress ? await cdp.send("Runtime.evaluate",
+    { expression: "window.__pad || 0", returnByValue: true }).then(r => r.result.value) : 0;
   await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: dim.width, height: dim.height, deviceScaleFactor: prof.scale, mobile: false
+    width: Math.round(dim.width * (1 + padRatio * 2)),
+    height: Math.round(dim.height * (1 + padRatio * 2)),
+    deviceScaleFactor: prof.scale, mobile: false
   });
   await new Promise(r => setTimeout(r, 60));
   const shot = await cdp.send("Page.captureScreenshot",
@@ -211,9 +218,38 @@ async function main() {
   child.stderr.on("data", d => { chromeErr += d.toString().slice(0, 400); });
   let cdp = null;
   const base = "http://127.0.0.1:" + srv.port;
+  /* manifest 按 profile 合并：补充生成新 Profile 时保留已有 Profile 的条目与图片索引 */
+  const manifestPath = path.join(OUT, "manifest.json");
+  const prevManifest = fs.existsSync(manifestPath)
+    ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) : null;
+  const prevByPage = {};
+  if (prevManifest) { (prevManifest.pages || []).forEach(pe => { prevByPage[pe.pageId] = pe; }); }
   const manifest = { generatedAt: new Date().toISOString(), source: DATA_SOURCE, bankSize: data.length,
     plannedPages: plan.ROUND_SEEDS.length * plan.PAGES_PER_ROUND, topUpPages: added.length,
-    coverage: { used: cov.used, total: cov.total }, profiles: {}, pages: [] };
+    coverage: { used: cov.used, total: cov.total },
+    profiles: prevManifest ? prevManifest.profiles : {}, pages: [] };
+
+
+  /* 单页渲染+截图（含 GT 落盘），失败可重试 */
+  async function renderOne(p, renav) {
+    const built = resolvePage(p);
+    const gt = Bench.buildGroundTruth(built, {
+      source: DATA_SOURCE, display: { fontSize: "md", lineHeight: "normal", pageWidth: "normal",
+        spacing: "normal", indent: true, headerStyle: "standard", zoom: 100, noise: false }
+    });
+    const gtFile = path.join(GT, p.pageId + ".json");
+    fs.writeFileSync(gtFile, JSON.stringify(gt, null, 2), "utf8");
+    const entry = { pageId: p.pageId, round: p.round, seed: p.seed, type: p.type, mode: p.mode,
+      count: p.count, startNumber: p.startNumber, splitAt: p.splitAt, topUp: !!p.topUp,
+      gt: path.relative(OUT, gtFile).replace(/\\/g, "/"), images: (prevByPage[p.pageId] || {}).images || {} };
+    for (const prof of profiles) {
+      const shot = await capture(cdp, base, p, prof);
+      const rel = path.join(prof, p.pageId + "." + PROFILES[prof].ext);
+      fs.writeFileSync(path.join(IMAGES, rel), Buffer.from(shot.base64, "base64"));
+      entry.images[prof] = { file: rel.replace(/\\/g, "/"), cssWidth: shot.width, cssHeight: shot.height };
+    }
+    return entry;
+  }
 
   let done = 0;
   const total = pages.length * profiles.length;
@@ -235,27 +271,21 @@ async function main() {
       " · 静态服务端口 " + srv.port);
 
     for (const p of pages) {
-      const built = resolvePage(p);
-      const gt = Bench.buildGroundTruth(built, {
-        source: DATA_SOURCE, display: { fontSize: "md", lineHeight: "normal", pageWidth: "normal",
-          spacing: "normal", indent: true, headerStyle: "standard", zoom: 100, noise: false }
-      });
-      const gtFile = path.join(GT, p.pageId + ".json");
-      fs.writeFileSync(gtFile, JSON.stringify(gt, null, 2), "utf8");
-      const entry = { pageId: p.pageId, round: p.round, seed: p.seed, type: p.type, mode: p.mode,
-        count: p.count, startNumber: p.startNumber, splitAt: p.splitAt, topUp: !!p.topUp,
-        gt: path.relative(OUT, gtFile).replace(/\\/g, "/"), images: {} };
-      for (const prof of profiles) {
-        const shot = await capture(cdp, base, p, prof);
-        const rel = path.join(prof, p.pageId + "." + PROFILES[prof].ext);
-        fs.writeFileSync(path.join(IMAGES, rel), Buffer.from(shot.base64, "base64"));
-        entry.images[prof] = { file: rel.replace(/\\/g, "/"), cssWidth: shot.width, cssHeight: shot.height };
-        done++;
-        if (done % 10 === 0 || done === total) {
-          process.stdout.write("\r[截图] " + done + "/" + total + "  " + p.pageId + " " + prof + "        ");
+      let entry = null, lastErr = null;
+      for (let attempt = 0; attempt < 3 && !entry; attempt++) {
+        try {
+          entry = await renderOne(p, attempt > 0);
+        } catch (e) {
+          lastErr = e;
+          console.log("[重试] " + p.pageId + " 第 " + (attempt + 1) + " 次失败: " + e.message);
+          await new Promise(r => setTimeout(r, 800));
         }
       }
+      if (!entry) { throw new Error(p.pageId + " 连续 3 次失败: " + (lastErr && lastErr.message)); }
       manifest.pages.push(entry);
+      fs.writeFileSync(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+      done++;
+      console.log("[截图] " + done + "/" + total + "  " + p.pageId);
     }
   } finally {
     if (cdp) { cdp.close(); }
