@@ -119,33 +119,8 @@
     </main>
   </section>
 
-  <!-- 整页拍照（App 内相机：LIVE 实时取景 / REVIEW 冻结调框） -->
-  <section id="view-batch-camera" class="view hidden camera-view">
-    <header class="quiz-head cam-head">
-      <button id="btn-cam-back" class="backbtn">‹ 返回</button>
-      <div class="qtitle">整页拍照搜题</div>
-    </header>
-    <main class="cam-stage">
-      <div id="cam-live" class="cam-live">
-        <p class="cam-hint">将整页题目置于取景框内</p>
-      </div>
-      <div id="cam-review" class="cam-review hidden">
-        <div id="crop-wrap">
-          <img id="crop-img" alt="拍摄的整页照片" draggable="false">
-          <div id="crop-rect">
-            <i class="corner c-nw"></i><i class="corner c-ne"></i>
-            <i class="corner c-sw"></i><i class="corner c-se"></i>
-          </div>
-        </div>
-        <p id="crop-tip" class="cam-tip hidden"></p>
-      </div>
-    </main>
-    <footer class="cam-foot">
-      <button id="btn-cam-retake" class="cam-side hidden">重拍</button>
-      <button id="btn-cam-shutter" class="cam-shutter" aria-label="快门"><span></span></button>
-      <button id="btn-cam-confirm" class="cam-confirm hidden">✓</button>
-    </footer>
-  </section>
+  <!-- 整页拍照的 LIVE 取景 / REVIEW 调框 / 裁剪确认已全部 Native 化（CameraActivity），
+       Web 侧只保留入口页与答案页。 -->
 
   <!-- 整页答案 -->
   <section id="view-batch-results" class="view hidden">

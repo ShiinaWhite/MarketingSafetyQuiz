@@ -962,7 +962,6 @@
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
-      case "view-batch-camera": handleBatchCropBack(); return;
       case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
@@ -1385,211 +1384,97 @@
     appendBatchTools(state);
   }
 
-  /* 拍照 → 进入框选页（不立即 OCR）。人工框选只产生归一化裁剪矩形，
-     原始 base64 与 crop 参数一起交给 OcrPlugin 原生裁剪，避免二次 JPEG 压缩。 */
-  var batchPhotoState = null;   /* { dataUrl }，Back 往返期间保留 */
-  var cropNorm = null;          /* { x, y, w, h } 归一化选区（相对照片显示方向） */
-  var CROP_DEFAULT_MARGIN = 0.04;
-  var CROP_MIN_SIZE = 0.06;
-
-  var CROP_MIN_SIZE = 0.06;
-  var camState = "idle";        /* idle | live | review */
-  var cropTouchedByUser = false;
-  var autoCropApplied = false;
+  /* 拍照 → 原生相机页（LIVE/REVIEW/裁剪全部 Native 化）。确认后只回传
+     归一化裁剪矩形 + 照片数据，原始 base64 与 crop 参数一起交给 OcrPlugin
+     原生裁剪，避免二次 JPEG 压缩。 */
+  var batchPhotoState = null;   /* { dataUrl, width, height, layoutDataUrl, ... } */
+  var cropNorm = null;          /* { x, y, w, h } 归一化选区（来自原生 cropNormalized） */
 
   function getInAppCamera() { return getPlugin("InAppCamera"); }
 
-  /* 入口页“📷 拍摄整页”：打开 App 内相机 LIVE 取景（不再跳系统相机） */
+  /* 权限流：先查（alias=camera），prompt/denied 都发系统授权请求；
+     返回 null 表示已授权，否则返回用户可读的中文原因（不透出裸错误码）。 */
+  async function ensureCameraPermission(Cam) {
+    var state = "";
+    try {
+      var perm = await Cam.checkPermissions();
+      state = (perm && perm.camera) || "";
+    } catch (e) { state = ""; }
+    if (state === "granted") { return null; }
+    if (state !== "" && state !== "prompt" && state !== "prompt-with-rationale"
+      && state !== "denied") {
+      return "相机权限状态异常（" + state + "），请到系统设置中开启相机权限";
+    }
+    try {
+      var req = await Cam.requestPermissions();
+      if (req && req.camera === "granted") { return null; }
+    } catch (e) { /* 继续用状态复查兜底 */ }
+    try {
+      var again = await Cam.checkPermissions();
+      if (again && again.camera === "granted") { return null; }
+      if (again && again.camera === "denied") {
+        return "相机权限已被拒绝：请到系统设置 → 应用 → 营销安规刷题 → 权限中开启相机后重试";
+      }
+    } catch (e) { }
+    return "需要相机权限才能整页拍照，请在弹窗中允许相机权限";
+  }
+
+  function cameraErrorMessage(e) {
+    var code = String((e && e.message) || e);
+    if (code.indexOf("CAMERA_PERMISSION_PERMANENTLY_DENIED") >= 0) {
+      return "相机权限已被拒绝：请到系统设置 → 应用 → 营销安规刷题 → 权限中开启相机后重试";
+    }
+    if (code.indexOf("CAMERA_PERMISSION_DENIED") >= 0) {
+      return "需要相机权限才能整页拍照，请允许相机权限后重试";
+    }
+    if (code.indexOf("CAMERA_BUSY") >= 0) {
+      return "上一次拍摄还未结束，请稍后再试";
+    }
+    return "相机启动失败（" + code.slice(0, 40) + "）";
+  }
+
+  /* 入口页“📷 拍摄整页”：进入原生相机页（不再跳系统相机，也不再有 Web 取景页） */
   async function openBatchCameraLive() {
     var Cam = getInAppCamera();
-    if (!Cam || !Cam.start) {
-      show("view-batch-photo");
+    if (!Cam || !Cam.open) {
       setBatchStatus("App 内相机插件未加载，请安装最新安装包");
       return;
     }
+    var permMsg = await ensureCameraPermission(Cam);
+    if (permMsg) { setBatchStatus(permMsg); return; }
+    setBatchStatus("正在打开相机…");
+    var res;
     try {
-      var perm = await Cam.checkPermissions();
-      if (perm && perm.camera && perm.camera !== "granted") {
-        var req = await Cam.requestPermissions();
-        if (!req || req.camera !== "granted") {
-          show("view-batch-photo");
-          setBatchStatus("需要相机权限才能整页拍照");
-          return;
-        }
-      }
-    } catch (e) { /* 权限查询失败不阻断，交给原生 start 兜底 */ }
-    show("view-batch-camera");
-    document.body.classList.add("native-camera-live");
-    camState = "live";
-    enterLiveUI();
-    setCamTip("正在启动相机…");
-    try {
-      await Cam.start();
-      setCamTip("");
+      res = await Cam.open({ maxWidth: 3000, quality: 85, layoutMaxWidth: 1280 });
     } catch (e) {
-      document.body.classList.remove("native-camera-live");
-      camState = "idle";
-      show("view-batch-photo");
-      setBatchStatus("相机启动失败（" + String((e && e.message) || e).slice(0, 40) + "）");
-    }
-  }
-
-  /* REVIEW 的“重拍”：回到 LIVE 重新取景 */
-  async function restartBatchCamera() {
-    var Cam = getInAppCamera();
-    if (!Cam || !Cam.start) { return; }
-    show("view-batch-camera");
-    document.body.classList.add("native-camera-live");
-    camState = "live";
-    enterLiveUI();
-    setCamTip("");
-    try { await Cam.start(); }
-    catch (e) { setCamTip("相机重启失败，请返回后重试"); }
-  }
-
-  function enterLiveUI() {
-    $("cam-live").classList.remove("hidden");
-    $("cam-review").classList.add("hidden");
-    $("btn-cam-retake").classList.add("hidden");
-    $("btn-cam-confirm").classList.add("hidden");
-    $("btn-cam-shutter").classList.remove("hidden");
-    $("btn-cam-shutter").disabled = false;
-    $("btn-cam-back").textContent = "‹ 返回";
-  }
-
-  function enterReviewUI() {
-    document.body.classList.remove("native-camera-live");
-    camState = "review";
-    $("cam-live").classList.add("hidden");
-    $("cam-review").classList.remove("hidden");
-    $("btn-cam-retake").classList.remove("hidden");
-    $("btn-cam-confirm").classList.remove("hidden");
-    $("btn-cam-shutter").classList.add("hidden");
-    $("btn-cam-back").textContent = "‹ 返回";
-    var img = $("crop-img");
-    img.src = batchPhotoState.dataUrl;
-    img.onload = function () { renderCropRect(); };
-    setCamTip("正在自动定位题目区域…");
-    setTimeout(renderCropRect, 0);
-  }
-
-  function setCamTip(text) {
-    var el = $("cam-tip");
-    if (!el) { return; }
-    el.textContent = text;
-    el.classList.toggle("hidden", !text);
-  }
-
-  function renderCropRect() {
-    var wrap = $("crop-wrap");
-    var rect = $("crop-rect");
-    if (!wrap || !rect || !cropNorm) { return; }
-    var W = wrap.clientWidth || 1;
-    var H = wrap.clientHeight || 1;
-    rect.style.left = (cropNorm.x * W) + "px";
-    rect.style.top = (cropNorm.y * H) + "px";
-    rect.style.width = (cropNorm.w * W) + "px";
-    rect.style.height = (cropNorm.h * H) + "px";
-  }
-
-  /* 拖动/四角缩放：显示像素操作，实时换算归一化并钳制。
-     用户第一次触碰即标记 cropTouchedByUser，迟到的自动定位结果不得覆盖用户框。 */
-  function bindCropGestures() {
-    var wrap = $("crop-wrap");
-    var rect = $("crop-rect");
-    if (!wrap || !rect || rect.dataset.bound === "1") { return; }
-    rect.dataset.bound = "1";
-    var drag = null;
-    function start(mode, e) {
-      e.preventDefault();
-      cropTouchedByUser = true;
-      setCamTip("");
-      drag = { mode: mode, px: e.clientX, py: e.clientY, orig: Object.assign({}, cropNorm) };
-    }
-    rect.addEventListener("pointerdown", function (e) { start("move", e); rect.setPointerCapture(e.pointerId); });
-    Array.prototype.forEach.call(rect.getElementsByClassName("corner"), function (h) {
-      h.addEventListener("pointerdown", function (e) {
-        e.stopPropagation();
-        start(h.getAttribute("data-c"), e);
-        h.setPointerCapture(e.pointerId);
-      });
-    });
-    rect.addEventListener("pointermove", function (e) {
-      if (!drag) { return; }
-      var W = wrap.clientWidth || 1, H = wrap.clientHeight || 1;
-      var dx = (e.clientX - drag.px) / W, dy = (e.clientY - drag.py) / H;
-      var o = drag.orig;
-      if (drag.mode === "move") {
-        cropNorm = MSQ.pageCropClamp({ x: o.x + dx, y: o.y + dy, w: o.w, h: o.h }, CROP_MIN_SIZE);
-      } else {
-        var l2 = o.x, t2 = o.y, rr = o.x + o.w, bb = o.y + o.h;
-        if (drag.mode.indexOf("w") >= 0) { l2 = o.x + dx; }
-        if (drag.mode.indexOf("e") >= 0) { rr = o.x + o.w + dx; }
-        if (drag.mode.indexOf("n") >= 0) { t2 = o.y + dy; }
-        if (drag.mode.indexOf("s") >= 0) { bb = o.y + o.h + dy; }
-        cropNorm = MSQ.pageCropClamp({ x: Math.min(l2, rr), y: Math.min(t2, bb),
-          w: Math.abs(rr - l2), h: Math.abs(bb - t2) }, CROP_MIN_SIZE);
-      }
-      renderCropRect();
-    });
-    rect.addEventListener("pointerup", function () { drag = null; });
-    rect.addEventListener("pointercancel", function () { drag = null; });
-    window.addEventListener("resize", renderCropRect);
-  }
-
-  /* 快门：App 内相机捕获 3000px 主图 + 1280px 布局图，冻结画面进入 REVIEW */
-  async function onCamShutter() {
-    if (camState !== "live") { return; }
-    var Cam = getInAppCamera();
-    if (!Cam) { return; }
-    var btn = $("btn-cam-shutter");
-    btn.disabled = true;
-    setCamTip("正在捕获…");
-    try {
-      var cap = await Cam.capture({ maxWidth: 3000, quality: 85, layoutMaxWidth: 1280 });
-      batchPhotoState = { dataUrl: cap.dataUrl, width: cap.width, height: cap.height,
-        layoutDataUrl: cap.layoutDataUrl, layoutWidth: cap.layoutWidth, layoutHeight: cap.layoutHeight };
-      cropNorm = MSQ.pageCropDefault(CROP_DEFAULT_MARGIN);
-      cropTouchedByUser = false;
-      autoCropApplied = false;
-      enterReviewUI();
-      updateAutoCropSuggestion();
-    } catch (e) {
-      setCamTip("捕获失败，请再按一次快门（" + String((e && e.message) || e).slice(0, 40) + "）");
-      btn.disabled = false;
-    }
-  }
-
-  /* 后台自动定位题目区域：低分辨率布局 OCR + suggestQuizCrop。
-     迟到结果或用户已触摸时直接放弃；识别不出时保持默认框。 */
-  async function updateAutoCropSuggestion() {
-    var Ocr = getPlugin("Ocr");
-    if (!Ocr || !batchPhotoState.layoutDataUrl) {
-      setCamTip("请框住需要识别的题目区域");
+      setBatchStatus(cameraErrorMessage(e));
       return;
     }
-    try {
-      var res = await Ocr.recognizeText({ base64: batchPhotoState.layoutDataUrl });
-      if (camState !== "review" || cropTouchedByUser) { return; }
-      var lines = normalizeOcrLines(res);
-      var sug = MSQ.suggestQuizCrop(lines, res.width || 0, res.height || 0);
-      if (camState !== "review" || cropTouchedByUser) { return; }
-      if (sug && sug.crop) {
-        cropNorm = MSQ.pageCropClamp(sug.crop, CROP_MIN_SIZE);
-        autoCropApplied = true;
-        renderCropRect();
-        setCamTip(sug.confidence === "strong"
-          ? "已自动框出题目区域，可拖动四角微调"
-          : "已粗略框出题目区域，建议拖动四角对准题目");
-      } else {
-        setCamTip("请框住需要识别的题目区域");
-      }
-    } catch (e) {
-      setCamTip("请框住需要识别的题目区域");
+    if (!res || res.cancelled) {
+      /* 用户在原生相机页按返回：留在入口页即可 */
+      setBatchStatus("");
+      return;
     }
+    if (!res.dataUrl) {
+      setBatchStatus("相机返回数据异常，请重试");
+      return;
+    }
+    batchPhotoState = {
+      dataUrl: res.dataUrl, width: res.width, height: res.height,
+      layoutDataUrl: res.layoutDataUrl, layoutWidth: res.layoutWidth,
+      layoutHeight: res.layoutHeight,
+      sensorWidth: res.sensorWidth, sensorHeight: res.sensorHeight,
+      normalizedWidth: res.normalizedWidth, normalizedHeight: res.normalizedHeight,
+      outputWidth: res.outputWidth, outputHeight: res.outputHeight
+    };
+    var cn = res.cropNormalized || { left: 0.04, top: 0.04, right: 0.96, bottom: 0.96 };
+    cropNorm = { x: cn.left, y: cn.top, w: cn.right - cn.left, h: cn.bottom - cn.top };
+    runBatchOcr();
   }
 
-  async function runBatchOcrFromCrop() {
+  /* 原生相机确认后：照片 + 归一化裁剪交给 OcrPlugin 原生裁剪（无二次压缩），
+     继续使用现有 JS：splitPageOcrLines + searchPageQuestionsByOcr → 答案页。 */
+  async function runBatchOcr() {
     var Ocr = getPlugin("Ocr");
     if (!Ocr) {
       show("view-batch-photo");
@@ -1597,10 +1482,10 @@
       return;
     }
     if (!batchPhotoState || !cropNorm) { openBatchPhoto(); return; }
-    var btn = $("btn-cam-confirm");
-    btn.disabled = true;
-    setCamTip("正在识别选区…");
-    var totalStart = performance.now();   /* 计时从点击 ✓ 起，不含人工框选时间 */
+    show("view-batch-photo");
+    renderBatchTypes();
+    setBatchStatus("正在识别选区…");
+    var totalStart = performance.now();   /* 计时从确认 ✓ 起，不含取景与调框时间 */
     var b64 = String(batchPhotoState.dataUrl || "").split(",")[1] || "";
     var crop = { left: cropNorm.x, top: cropNorm.y,
       right: cropNorm.x + cropNorm.w, bottom: cropNorm.y + cropNorm.h };
@@ -1609,7 +1494,7 @@
       var text = (res && res.text) || "";
       var lines = normalizeOcrLines(res);
       if (!lines.length) {
-        setCamTip("选区内未识别到清晰文字，请调整框选后重试");
+        setBatchStatus("选区内未识别到清晰文字，请重新拍摄");
         return;
       }
       var tSplit = performance.now();
@@ -1630,26 +1515,12 @@
         totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
       });
     } catch (e) {
-      setCamTip("识别失败，请重试（" + String((e && e.message) || e).slice(0, 40) + "）");
-    } finally {
-      btn.disabled = false;
+      setBatchStatus("识别失败，请重试（" + String((e && e.message) || e).slice(0, 40) + "）");
     }
   }
 
   function handleBatchResultsBack() {
-    /* 整页结果 → REVIEW（照片与选区保留） */
-    camState = "review";
-    show("view-batch-camera");
-    enterReviewUI();
-  }
-
-  /* 框选页 Back：REVIEW → LIVE（重新取景）；LIVE → 停相机回入口页 */
-  function handleBatchCropBack() {
-    if (camState === "review") { restartBatchCamera(); return; }
-    var Cam = getInAppCamera();
-    if (Cam && Cam.stop) { Cam.stop(); }
-    document.body.classList.remove("native-camera-live");
-    camState = "idle";
+    /* 整页结果 → 入口页（重新拍摄走原生相机） */
     show("view-batch-photo");
     renderBatchTypes();
   }
@@ -1758,11 +1629,6 @@
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
     $("btn-take-page").addEventListener("click", openBatchCameraLive);
     initBatchTypes();
-    bindCropGestures();
-    $("btn-cam-back").addEventListener("click", handleBatchCropBack);
-    $("btn-cam-shutter").addEventListener("click", onCamShutter);
-    $("btn-cam-confirm").addEventListener("click", runBatchOcrFromCrop);
-    $("btn-cam-retake").addEventListener("click", restartBatchCamera);
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);

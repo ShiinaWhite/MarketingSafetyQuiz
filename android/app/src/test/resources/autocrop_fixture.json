@@ -1,0 +1,1004 @@
+{
+  "generator": "tools/gen_autocrop_fixture.js",
+  "note": "由 www/js/core.js 当前实现生成（node tools/gen_autocrop_fixture.js）；Java QuizCropSuggester 的 JVM 测试按同一输入断言等价输出，勿手工编辑。",
+  "cases": [
+    {
+      "name": "normal_multi_three_questions",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "第 1 页 共 3 页",
+          "left": 1000,
+          "top": 40,
+          "right": 1480,
+          "bottom": 110
+        },
+        {
+          "text": "5. 下列哪些选项符合营销现场作业安全规定",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "6. 低压验电时需要注意的事项",
+          "left": 200,
+          "top": 950,
+          "right": 2300,
+          "bottom": 1060
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 1090,
+          "right": 1100,
+          "bottom": 1200
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 1230,
+          "right": 1100,
+          "bottom": 1340
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 1370,
+          "right": 1100,
+          "bottom": 1480
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 1510,
+          "right": 1100,
+          "bottom": 1620
+        },
+        {
+          "text": "7. 工作票签发人的安全职责包括",
+          "left": 200,
+          "top": 1700,
+          "right": 2300,
+          "bottom": 1810
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 1840,
+          "right": 1100,
+          "bottom": 1950
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 1980,
+          "right": 1100,
+          "bottom": 2090
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 2120,
+          "right": 1100,
+          "bottom": 2230
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 2260,
+          "right": 1100,
+          "bottom": 2370
+        },
+        {
+          "text": "本页面由考试系统生成",
+          "left": 200,
+          "top": 3200,
+          "right": 1100,
+          "bottom": 3280
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.7242857142857143
+        },
+        "confidence": "strong",
+        "reason": "ok",
+        "anchors": {
+          "questionNumbers": 3,
+          "optionLines": 12
+        }
+      }
+    },
+    {
+      "name": "single_question_with_options",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "12. 在停电的低压装置或设备上工作时应",
+          "left": 200,
+          "top": 400,
+          "right": 2300,
+          "bottom": 510
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 540,
+          "right": 1100,
+          "bottom": 650
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 680,
+          "right": 1100,
+          "bottom": 790
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 820,
+          "right": 1100,
+          "bottom": 930
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 960,
+          "right": 1100,
+          "bottom": 1070
+        },
+        {
+          "text": "第 2 页 共 3 页",
+          "left": 1000,
+          "top": 3300,
+          "right": 1480,
+          "bottom": 3370
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.06714285714285714,
+          "right": 0.9495967741935484,
+          "bottom": 0.35285714285714287
+        },
+        "confidence": "strong",
+        "reason": "ok_single_question",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 4
+        }
+      }
+    },
+    {
+      "name": "no_quiz_structure_plain_text",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "安全生产重于泰山",
+          "left": 300,
+          "top": 300,
+          "right": 1200,
+          "bottom": 420
+        },
+        {
+          "text": "人人讲安全 个个会应急",
+          "left": 300,
+          "top": 600,
+          "right": 1400,
+          "bottom": 720
+        }
+      ],
+      "expect": {
+        "crop": null,
+        "confidence": "none",
+        "reason": "no_quiz_structure",
+        "anchors": {
+          "questionNumbers": 0,
+          "optionLines": 0
+        }
+      }
+    },
+    {
+      "name": "no_lines_empty",
+      "width": 2480,
+      "height": 3500,
+      "lines": [],
+      "expect": {
+        "crop": null,
+        "confidence": "none",
+        "reason": "no_lines",
+        "anchors": {
+          "questionNumbers": 0,
+          "optionLines": 0
+        }
+      }
+    },
+    {
+      "name": "misread_digit_shapes",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "31. 履带式起重设备现场作业的安全要求",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "3Z. 形近字母映射的下一题题干",
+          "left": 200,
+          "top": 950,
+          "right": 2300,
+          "bottom": 1060
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 1090,
+          "right": 1100,
+          "bottom": 1200
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 1230,
+          "right": 1100,
+          "bottom": 1340
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 1370,
+          "right": 1100,
+          "bottom": 1480
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 1510,
+          "right": 1100,
+          "bottom": 1620
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.51
+        },
+        "confidence": "strong",
+        "reason": "ok",
+        "anchors": {
+          "questionNumbers": 2,
+          "optionLines": 8
+        }
+      }
+    },
+    {
+      "name": "fullwidth_punct_and_bracket_numbers",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "（1）填写工作票时应注意",
+          "left": 200,
+          "top": 200,
+          "right": 2200,
+          "bottom": 310
+        },
+        {
+          "text": "A、甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B、乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C、丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D、丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "（2）工作许可制度的要求",
+          "left": 200,
+          "top": 1000,
+          "right": 2200,
+          "bottom": 1110
+        },
+        {
+          "text": "A、甲",
+          "left": 260,
+          "top": 1140,
+          "right": 1100,
+          "bottom": 1250
+        },
+        {
+          "text": "B、乙",
+          "left": 260,
+          "top": 1280,
+          "right": 1100,
+          "bottom": 1390
+        },
+        {
+          "text": "C、丙",
+          "left": 260,
+          "top": 1420,
+          "right": 1100,
+          "bottom": 1530
+        },
+        {
+          "text": "D、丁",
+          "left": 260,
+          "top": 1560,
+          "right": 1100,
+          "bottom": 1670
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9092741935483871,
+          "bottom": 0.5242857142857142
+        },
+        "confidence": "strong",
+        "reason": "ok",
+        "anchors": {
+          "questionNumbers": 2,
+          "optionLines": 8
+        }
+      }
+    },
+    {
+      "name": "left_nav_short_lines_do_not_widen",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "9. 倒闸操作应遵守的规定",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "9",
+          "left": 60,
+          "top": 200,
+          "right": 90,
+          "bottom": 260
+        },
+        {
+          "text": "10",
+          "left": 60,
+          "top": 500,
+          "right": 100,
+          "bottom": 560
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.2957142857142857
+        },
+        "confidence": "strong",
+        "reason": "ok_single_question",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 4
+        }
+      }
+    },
+    {
+      "name": "landscape_page",
+      "width": 4000,
+      "height": 3000,
+      "lines": [
+        {
+          "text": "21. 高处作业的安全要求",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "22. 脚手架搭设完成后的验收程序",
+          "left": 200,
+          "top": 950,
+          "right": 2300,
+          "bottom": 1060
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 1090,
+          "right": 1100,
+          "bottom": 1200
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 1230,
+          "right": 1100,
+          "bottom": 1340
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 1370,
+          "right": 1100,
+          "bottom": 1480
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 1510,
+          "right": 1100,
+          "bottom": 1620
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.03625,
+          "top": 0.011666666666666667,
+          "right": 0.58875,
+          "bottom": 0.5950000000000001
+        },
+        "confidence": "strong",
+        "reason": "ok",
+        "anchors": {
+          "questionNumbers": 2,
+          "optionLines": 8
+        }
+      }
+    },
+    {
+      "name": "tail_gap_beyond_limit_excluded",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "3. 第一道题的题干",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "距离很远页脚说明文字",
+          "left": 200,
+          "top": 3200,
+          "right": 1400,
+          "bottom": 3300
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.2957142857142857
+        },
+        "confidence": "strong",
+        "reason": "ok_single_question",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 4
+        }
+      }
+    },
+    {
+      "name": "distant_new_number_starts_new_run",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "5. 连续大段的第一题",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": "6. 连续大段的第二题",
+          "left": 200,
+          "top": 950,
+          "right": 2300,
+          "bottom": 1060
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 1090,
+          "right": 1100,
+          "bottom": 1200
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 1230,
+          "right": 1100,
+          "bottom": 1340
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 1370,
+          "right": 1100,
+          "bottom": 1480
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 1510,
+          "right": 1100,
+          "bottom": 1620
+        },
+        {
+          "text": "61. 页脚区域另一大段唯一题号",
+          "left": 200,
+          "top": 2600,
+          "right": 2300,
+          "bottom": 2710
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 2740,
+          "right": 1100,
+          "bottom": 2850
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 2880,
+          "right": 1100,
+          "bottom": 2990
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 3020,
+          "right": 1100,
+          "bottom": 3130
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 3160,
+          "right": 1100,
+          "bottom": 3270
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.51
+        },
+        "confidence": "strong",
+        "reason": "ok",
+        "anchors": {
+          "questionNumbers": 3,
+          "optionLines": 12
+        }
+      }
+    },
+    {
+      "name": "degenerate_thin_structure",
+      "width": 4000,
+      "height": 4000,
+      "lines": [
+        {
+          "text": "1. 窄",
+          "left": 3900,
+          "top": 100,
+          "right": 3960,
+          "bottom": 160
+        },
+        {
+          "text": "A. 甲",
+          "left": 3900,
+          "top": 200,
+          "right": 3960,
+          "bottom": 260
+        },
+        {
+          "text": "B. 乙",
+          "left": 3900,
+          "top": 300,
+          "right": 3960,
+          "bottom": 360
+        },
+        {
+          "text": "C. 丙",
+          "left": 3900,
+          "top": 400,
+          "right": 3960,
+          "bottom": 460
+        },
+        {
+          "text": "D. 丁",
+          "left": 3900,
+          "top": 500,
+          "right": 3960,
+          "bottom": 560
+        }
+      ],
+      "expect": {
+        "crop": null,
+        "confidence": "none",
+        "reason": "degenerate_crop",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 4
+        }
+      }
+    },
+    {
+      "name": "bare_lines_without_coords",
+      "width": 2000,
+      "height": 3000,
+      "lines": [
+        {
+          "text": "1. 只有文字没有坐标",
+          "left": 100,
+          "top": 100
+        },
+        {
+          "text": "A. 甲",
+          "left": 160,
+          "top": 240
+        },
+        {
+          "text": "B. 乙",
+          "left": 160,
+          "top": 380
+        },
+        {
+          "text": "C. 丙",
+          "left": 160,
+          "top": 520
+        },
+        {
+          "text": "D. 丁",
+          "left": 160,
+          "top": 660
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.04,
+          "top": 0.013333333333333334,
+          "right": 0.19,
+          "bottom": 0.2533333333333333
+        },
+        "confidence": "strong",
+        "reason": "ok_single_question",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 4
+        }
+      }
+    },
+    {
+      "name": "ideographic_and_nbsp_spaces",
+      "width": 2480,
+      "height": 3500,
+      "lines": [
+        {
+          "text": "4. 题干含全角空格　的情况",
+          "left": 200,
+          "top": 200,
+          "right": 2300,
+          "bottom": 310
+        },
+        {
+          "text": "A. 甲",
+          "left": 260,
+          "top": 340,
+          "right": 1100,
+          "bottom": 450
+        },
+        {
+          "text": "B. 乙",
+          "left": 260,
+          "top": 480,
+          "right": 1100,
+          "bottom": 590
+        },
+        {
+          "text": "C. 丙",
+          "left": 260,
+          "top": 620,
+          "right": 1100,
+          "bottom": 730
+        },
+        {
+          "text": "D. 丁",
+          "left": 260,
+          "top": 760,
+          "right": 1100,
+          "bottom": 870
+        },
+        {
+          "text": " A. nbsp 开头的选项",
+          "left": 260,
+          "top": 890,
+          "right": 1100,
+          "bottom": 1000
+        }
+      ],
+      "expect": {
+        "crop": {
+          "left": 0.05846774193548387,
+          "top": 0.01,
+          "right": 0.9495967741935484,
+          "bottom": 0.33285714285714285
+        },
+        "confidence": "strong",
+        "reason": "ok_single_question",
+        "anchors": {
+          "questionNumbers": 1,
+          "optionLines": 5
+        }
+      }
+    }
+  ],
+  "pageQuestionNumberCases": [
+    {
+      "line": "31. 根据规定选择正确答案",
+      "expect": 31
+    },
+    {
+      "line": "31．全角点号",
+      "expect": 31
+    },
+    {
+      "line": "7、下列说法正确的是",
+      "expect": 7
+    },
+    {
+      "line": "12) 括号形式",
+      "expect": 12
+    },
+    {
+      "line": "（25）全角括号题号",
+      "expect": 25
+    },
+    {
+      "line": "第 108 题 题干",
+      "expect": 108
+    },
+    {
+      "line": "3l. 形近字母映射",
+      "expect": 31
+    },
+    {
+      "line": "B. 停电",
+      "expect": null
+    },
+    {
+      "line": "多项选择题",
+      "expect": null
+    },
+    {
+      "line": "",
+      "expect": null
+    },
+    {
+      "line": "1000. 超范围题号",
+      "expect": null
+    },
+    {
+      "line": "0. 零号题",
+      "expect": null
+    },
+    {
+      "line": "5 题干以空格分隔",
+      "expect": 5
+    },
+    {
+      "line": "　4、全角空格前缀",
+      "expect": 4
+    }
+  ]
+}

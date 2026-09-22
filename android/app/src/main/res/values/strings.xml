@@ -4,4 +4,9 @@
     <string name="title_activity_main">营销安规刷题</string>
     <string name="package_name">com.jty.safetyquiz</string>
     <string name="custom_url_scheme">com.jty.safetyquiz</string>
+    <string name="cam_back_desc">返回</string>
+    <string name="cam_shutter_desc">快门</string>
+    <string name="cam_confirm_desc">确认</string>
+    <string name="cam_retake">重拍</string>
+    <string name="cam_review_photo_desc">拍摄的整页照片</string>
 </resources>

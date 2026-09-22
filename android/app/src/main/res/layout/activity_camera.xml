@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 原生相机页：LIVE（PreviewView 铺满 + 顶部返回 + 底部快门）
+     与 REVIEW（冻结照片 + CropOverlayView + 重拍/✓）共用同一 Native View hierarchy。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:keepScreenOn="true">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/cam_preview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- REVIEW：冻结照片 + 裁剪框（位于 topBar 之下，顶部返回键两态通用） -->
+    <LinearLayout
+        android:id="@+id/cam_review_root"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <FrameLayout
+            android:id="@+id/cam_review_area"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <ImageView
+                android:id="@+id/cam_review_image"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="@string/cam_review_photo_desc"
+                android:scaleType="fitCenter" />
+
+            <com.jty.safetyquiz.CropOverlayView
+                android:id="@+id/cam_crop_overlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="116dp"
+            android:background="@color/cam_bar_bg">
+
+            <TextView
+                android:id="@+id/cam_retake"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="28dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:drawableStart="@drawable/ic_cam_retake"
+                android:drawablePadding="6dp"
+                android:gravity="center"
+                android:minWidth="64dp"
+                android:minHeight="48dp"
+                android:padding="10dp"
+                android:text="@string/cam_retake"
+                android:textColor="@android:color/white"
+                android:textSize="16sp" />
+
+            <ImageButton
+                android:id="@+id/cam_confirm"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="28dp"
+                android:background="@drawable/cam_confirm_bg"
+                android:contentDescription="@string/cam_confirm_desc"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_cam_check" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <!-- LIVE：顶部返回（半透明黑色工具区） -->
+    <LinearLayout
+        android:id="@+id/cam_top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="72dp"
+        android:background="@color/cam_scrim_top"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageButton
+            android:id="@+id/cam_back"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_marginStart="6dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/cam_back_desc"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_cam_back" />
+    </LinearLayout>
+
+    <!-- LIVE：底部黑色操作区域，中央圆形快门（drawable 绘制，非 emoji/HTML） -->
+    <FrameLayout
+        android:id="@+id/cam_live_bottom"
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom"
+        android:background="@color/cam_bar_bg">
+
+        <ImageButton
+            android:id="@+id/cam_shutter"
+            android:layout_width="78dp"
+            android:layout_height="78dp"
+            android:layout_gravity="center"
+            android:background="@drawable/cam_shutter"
+            android:contentDescription="@string/cam_shutter_desc" />
+    </FrameLayout>
+
+    <!-- 状态提示（两态共用，短句、不占画面） -->
+    <TextView
+        android:id="@+id/cam_tip"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="84dp"
+        android:background="@color/cam_tip_bg"
+        android:paddingStart="14dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="6dp"
+        android:textColor="#FFD54F"
+        android:textSize="13sp"
+        android:visibility="gone" />
+</FrameLayout>

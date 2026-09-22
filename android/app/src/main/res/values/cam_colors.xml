@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 原生相机页专属颜色 -->
+    <color name="cam_scrim_top">#66000000</color>
+    <color name="cam_bar_bg">#E6000000</color>
+    <color name="cam_tip_bg">#99000000</color>
+</resources>

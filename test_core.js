@@ -1038,6 +1038,38 @@ check("整页链路：漏题（少一道）时缺口保留且其余升序",
       && res.blocks.every(b => b.numberSource === "ocr");
   })());
 
+/* ---------- 自动框定位共享 fixture（Native/JS 等价契约的 JS 侧校验） ---------- */
+/* android/app/src/test/resources/autocrop_fixture.json 由 tools/gen_autocrop_fixture.js
+   用当前 JS 实现生成；Java QuizCropSuggesterTest 按同一输入断言等价输出。
+   这里反向校验：当前 JS 对 fixture 输入仍必须给出 fixture 里的期望值，
+   任何一侧改动导致漂移都会在各自测试中显式暴露（而非悄悄不一致）。 */
+section("自动框定位 fixture（与 Native QuizCropSuggester 共享）");
+const fixturePath = path.join(__dirname, "android/app/src/test/resources/autocrop_fixture.json");
+const cropFixture = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+for (const c of cropFixture.cases) {
+  const sug = MSQ.suggestQuizCrop(c.lines, c.width, c.height);
+  const got = sug.crop
+    ? { left: sug.crop.x, top: sug.crop.y, right: sug.crop.x + sug.crop.w, bottom: sug.crop.y + sug.crop.h }
+    : null;
+  const same = (a, b) => Math.abs(a - b) <= 1e-9;
+  const cropOk = (c.expect.crop === null && got === null)
+    || (c.expect.crop !== null && got !== null
+      && same(got.left, c.expect.crop.left) && same(got.top, c.expect.crop.top)
+      && same(got.right, c.expect.crop.right) && same(got.bottom, c.expect.crop.bottom));
+  check("fixture/" + c.name + " crop+reason+anchors 与 fixture 一致",
+    cropOk && sug.reason === c.expect.reason && sug.confidence === c.expect.confidence
+    && sug.anchors.questionNumbers === c.expect.anchors.questionNumbers
+    && sug.anchors.optionLines === c.expect.anchors.optionLines,
+    got ? ("crop " + got.left.toFixed(4) + "," + got.top.toFixed(4) + ","
+      + got.right.toFixed(4) + "," + got.bottom.toFixed(4) + " " + sug.reason) : sug.reason);
+}
+for (const c of cropFixture.pageQuestionNumberCases) {
+  const got = MSQ.pageQuestionNumber(c.line);
+  const n = got ? parseInt(got.number, 10) : null;
+  check("fixture/qnum[" + c.line.slice(0, 12) + "] = " + c.expect, n === c.expect,
+    "got " + n);
+}
+
 /* ---------- utils ---------- */
 /* ---------- utils ---------- */
 function mulberry(seed) {

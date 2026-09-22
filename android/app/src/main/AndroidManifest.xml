@@ -24,6 +24,13 @@
 
         </activity>
 
+        <!-- 原生相机页（LIVE 取景 + REVIEW 裁剪确认），与 WebView 完全独立的窗口 -->
+        <activity
+            android:name=".CameraActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:exported="false"
+            android:theme="@style/CameraTheme" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
