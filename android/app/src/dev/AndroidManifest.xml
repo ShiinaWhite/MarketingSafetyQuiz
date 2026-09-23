@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- dev 变体与 debug 相同：允许明文 HTTP 供局域网真实样本采集使用。
+     release 不合并任何 overlay，保持系统默认禁止明文。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:usesCleartextTraffic="true" />
+</manifest>

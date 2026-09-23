@@ -21,6 +21,17 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+        /* DEV 独立身份：与稳定版 com.jty.safetyquiz 并存安装，互不覆盖。
+           只改 applicationId/label/versionName 后缀，namespace 与 Java 包名不动；
+           manifest 里的 ${applicationId} 占位符（FileProvider authorities 等）按变体自动解析。
+           产物：app/build/outputs/apk/dev/app-dev.apk；assembleDebug 路径与产物保持原样。 */
+        dev {
+            initWith debug
+            matchingFallbacks = ['debug']
+            applicationIdSuffix '.dev'
+            versionNameSuffix '-dev'
+            signingConfig signingConfigs.debug
+        }
     }
 }
 

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- dev 变体覆盖：桌面名称与稳定版明显区分（营销安规刷题 DEV）。
+     package_name / custom_url_scheme 保持主资源不动（运行时不参与应用身份）。 -->
+<resources>
+    <string name="app_name">营销安规刷题 DEV</string>
+    <string name="title_activity_main">营销安规刷题 DEV</string>
+</resources>
