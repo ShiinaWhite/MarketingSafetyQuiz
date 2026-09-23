@@ -41,6 +41,21 @@ repositories {
     }
 }
 
+/* SELF_UPDATE_V1：DEV 版本号注入（仅 dev buildType 的最终产物生效）。
+   用法：gradlew :app:assembleDev -PDEV_VERSION_CODE=2 -PDEV_VERSION_NAME=1.0.2
+   不传参数时保持默认（versionCode 1 / versionName 1.0-dev）；
+   正式 assembleDebug / assembleRelease 完全不受影响。 */
+androidComponents {
+    onVariants(selector().withBuildType("dev")) { variant ->
+        def devCodeProp = project.findProperty("DEV_VERSION_CODE")
+        def devNameProp = project.findProperty("DEV_VERSION_NAME")
+        variant.outputs.each { output ->
+            if (devCodeProp) { output.versionCode.set(devCodeProp.toString().toInteger()) }
+            if (devNameProp) { output.versionName.set(devNameProp.toString() + "-dev") }
+        }
+    }
+}
+
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
