@@ -308,3 +308,10 @@ mark { background: #ffe58f; padding: 0 1px; border-radius: 2px; }
 .sample-note { font-size: 13px; color: #6b7683; margin: 6px 0 0; }
 .sample-tools { margin-top: 14px; }
 .sample-tools .sample-line { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
+
+/* ---- AUTO_PAGE_TYPE：结果页题型行 / 切题型按钮行 / 轻量提示 ---- */
+.batch-type-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 14px; color: #33404d; }
+.batch-type-line .linkbtn { font-size: 13px; }
+.batch-type-switch { display: flex; gap: 6px; width: 100%; }
+.batch-type-switch .batch-type-btn { font-size: 13px; padding: 6px 14px; }
+.batch-hint { width: 100%; font-size: 13px; color: #8a6d1a; margin: 0; }

@@ -134,7 +134,13 @@
       schemaVersion: SCHEMA_VERSION,
       sampleId: input.sampleId || null,
       capturedAt: input.capturedAt || new Date().toISOString(),
+      /* pageType = 最终实际用于展示答案的题型（AUTO 判定结果或用户手动选择）。
+         以下 pageType* 诊断为可选增量字段，旧 collector 原样透传，不影响 schemaVersion=1。 */
       pageType: input.pageType || null,
+      pageTypeMode: input.pageTypeMode || undefined,                       /* auto | manual */
+      resolvedPageType: input.resolvedPageType || undefined,               /* single|multi|judge */
+      pageTypeResolutionMethod: input.pageTypeResolutionMethod || undefined, /* section-heading|match-quality|previous-page|manual */
+      autoTypeConfidence: input.autoTypeConfidence || undefined,           /* strong|medium|ambiguous */
       /* bytes/sha256/width/height 由 collector 保存时补充；
          ocr.width/height 是 ML Kit 实际解码位图的尺寸（OcrPlugin 返回值） */
       image: { filename: "capture.jpg" },
