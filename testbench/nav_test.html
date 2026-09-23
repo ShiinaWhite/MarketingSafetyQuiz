@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NAV 导航回归测试（开发工具，不入 APK）</title>
+<link rel="stylesheet" href="../www/css/style.css">
+<style>
+  #nav-report { position: fixed; right: 8px; top: 8px; z-index: 9999; max-width: 46vw;
+    max-height: 80vh; overflow: auto; background: #fff; border: 2px solid #1565c0;
+    border-radius: 8px; padding: 10px; font: 12px/1.7 Consolas, monospace; }
+  #nav-report .pass { color: #0a7d32; } #nav-report .fail { color: #c62828; font-weight: 700; }
+</style>
+</head>
+<body>
+<!-- 完整复刻 www/index.html 的视图结构（app.js 启动期 bindEvents 需要全部元素），数据脚本以 fixture 内联替代 -->
+
+<div id="app">
+
+  <!-- 主菜单 -->
+  <section id="view-menu" class="view">
+    <header class="menu-head">
+      <h1>营销安规刷题</h1>
+      <p id="menu-bank" class="sub"></p>
+      <p id="menu-stats" class="sub"></p>
+      <p id="menu-exam" class="sub dim"></p>
+    </header>
+    <div id="menu-buttons" class="grid"></div>
+    <div class="menu-foot">
+      <button id="btn-settings" class="linkbtn">模拟考试设置</button>
+      <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
+    </div>
+    <p class="foot-note">数据仅保存在本机 · 完全离线 · 无网络请求</p>
+  </section>
+
+  <!-- 刷题 / 模拟考试答题 -->
+  <section id="view-quiz" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-back" class="backbtn">‹ 返回</button>
+      <div id="quiz-title" class="qtitle"></div>
+    </header>
+    <main id="quiz-scroll">
+      <p id="type-line" class="type-line hidden"></p>
+      <div id="stem" class="stem"></div>
+      <div id="options"></div>
+      <div id="feedback" class="feedback hidden"></div>
+      <div id="explain-box" class="explain hidden">
+        <button id="explain-toggle" type="button" class="explain-btn"></button>
+        <div id="explain-body" class="explain-body hidden">
+          <div class="explain-sec">
+            <div class="explain-h">为什么这么选</div>
+            <p id="explain-reason" class="explain-text"></p>
+          </div>
+          <div class="explain-sec memory">
+            <div class="explain-h">记忆技巧</div>
+            <p id="explain-memory" class="explain-text"></p>
+          </div>
+        </div>
+      </div>
+    </main>
+    <footer class="quiz-bar">
+      <button id="btn-prev" class="barbtn">上一题</button>
+      <button id="btn-submit" class="barbtn primary hidden">提交答案</button>
+      <button id="btn-jump" class="barbtn hidden">跳转</button>
+      <button id="btn-next" class="barbtn">下一题</button>
+      <button id="btn-handin" class="barbtn danger hidden">交卷</button>
+    </footer>
+  </section>
+
+  <!-- 搜题 -->
+  <section id="view-search" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-search-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">搜题</div>
+    </header>
+    <div class="search-bar-wrap">
+      <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
+             enterkeyhint="search" inputmode="search">
+      <button id="btn-batch-photo" class="photo-btn" type="button" title="拍整页">📷</button>
+    </div>
+    <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
+      <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
+      <button type="button" class="filter-btn" data-filter="single" aria-pressed="false">单选</button>
+      <button type="button" class="filter-btn" data-filter="multi" aria-pressed="false">多选</button>
+      <button type="button" class="filter-btn" data-filter="judge" aria-pressed="false">判断</button>
+    </div>
+    <main id="search-scroll">
+      <div id="search-history" class="search-history hidden"></div>
+      <div id="search-count" class="search-count hidden"></div>
+      <div id="search-results"></div>
+    </main>
+  </section>
+
+  <!-- 拍照搜题 -->
+  <section id="view-photo" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-photo-back" class="backbtn">‹ 搜索</button>
+      <div class="qtitle">拍照搜题</div>
+    </header>
+    <main class="pad">
+      <button id="btn-take-photo" class="barbtn primary photo-take" type="button">📷 拍照搜题</button>
+      <p id="photo-status" class="search-count hidden"></p>
+      <div id="photo-preview" class="hidden"></div>
+      <div id="photo-results"></div>
+    </main>
+  </section>
+
+  <!-- 整页拍照搜题（选题型 → 拍整页 → 自动拆题 → 本页答案） -->
+  <section id="view-batch-photo" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-batch-back" class="backbtn">‹ 搜索</button>
+      <div class="qtitle">整页拍照搜题</div>
+    </header>
+    <main class="pad">
+      <div id="batch-type-row" class="batch-type-row" role="group" aria-label="本页题型">
+        <button type="button" class="batch-type-btn active" data-type="auto" aria-pressed="true">自动</button>
+        <button type="button" class="batch-type-btn" data-type="single" aria-pressed="false">单选</button>
+        <button type="button" class="batch-type-btn" data-type="multi" aria-pressed="false">多选</button>
+        <button type="button" class="batch-type-btn" data-type="judge" aria-pressed="false">判断</button>
+      </div>
+      <p class="batch-tip">默认自动识别题型：章节标题优先，识别不到时三种题型在本地各试跑一遍取最优。整页答案页可一键切换题型立即重算（不重拍）。手动锁定只在当前会话有效。</p>
+      <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
+      <p id="batch-status" class="search-count hidden"></p>
+      <details id="sample-panel" class="sample-panel">
+        <summary>测试样本采集</summary>
+        <label class="sample-row">
+          <input type="checkbox" id="sample-enabled">
+          <span>自动上传测试样本（仅开发调试）</span>
+        </label>
+        <div class="sample-row">
+          <input id="sample-server" type="url" placeholder="http://192.168.x.x:8787"
+                 autocomplete="off" spellcheck="false" inputmode="url">
+        </div>
+        <div class="sample-row">
+          <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
+        </div>
+        <p id="sample-test-status" class="sample-note hidden"></p>
+      </details>
+    </main>
+  </section>
+
+  <!-- 整页答案 -->
+  <section id="view-batch-results" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-batch-results-back" class="backbtn">‹ 重拍</button>
+      <div class="qtitle">整页答案</div>
+    </header>
+    <main id="batch-scroll" class="pad">
+      <div id="batch-summary" class="batch-summary"></div>
+      <div id="batch-list"></div>
+      <div id="batch-tools"></div>
+      <div id="batch-sample-tools" class="sample-tools hidden">
+        <p class="sample-line">
+          <span id="batch-sample-status" class="sample-note hidden"></span>
+          <button id="btn-sample-retry" class="linkbtn hidden" type="button">重试</button>
+        </p>
+        <button id="btn-sample-flag" class="linkbtn hidden" type="button">⚑ 标记本页有问题</button>
+      </div>
+    </main>
+  </section>
+
+  <!-- 搜题详情 -->
+  <section id="view-search-detail" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-detail-back" class="backbtn">‹ 搜索</button>
+      <div class="qtitle">题目详情</div>
+    </header>
+    <main id="search-detail-body" class="pad"></main>
+  </section>
+
+  <!-- 考试成绩 -->
+  <section id="view-result" class="view hidden">
+    <header class="quiz-head"><div class="qtitle center">模拟考试成绩</div></header>
+    <main id="result-body" class="pad"></main>
+  </section>
+
+  <!-- 考试错题回顾 -->
+  <section id="view-review" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-review-back" class="backbtn">‹ 成绩</button>
+      <div id="review-title" class="qtitle"></div>
+    </header>
+    <main id="review-body" class="pad"></main>
+  </section>
+
+</div>
+<div id="modal-root" class="hidden"></div>
+
+<div id="nav-report">运行中…</div>
+
+<script>
+/* 内联 fixture 题库：app.js 的 loadBank 优先读 window.QUESTIONS_DATA（与正式 app 同路径）。
+   题干含 NAVTEST 标记保证搜题命中且不与其它数据混淆；题干足够长保证 OCR 匹配 high。 */
+(function () {
+  const S = (id, stem, opts, ans) => ({ id, major: "NAV", type: "single", stem, options: opts, answer: ans });
+  const qs = [];
+  const stems = [
+    "NAVTEST 卡式电能表检定装置的试验变换器部分每（　）至少送检一次，检定项目包括绝缘电阻测定与工频耐压试验。",
+    "NAVTEST 现场检验计量装置时，工作人员应携带试验用的仪表设备，并遵守（　）的相关安全规定。",
+    "NAVTEST 计量箱（柜）内使用的开关设备应当具备（　）功能，防止因过载引发火灾事故。",
+    "NAVTEST 低压带电作业应设专人监护，使用有绝缘柄的工具，工作时站在（　）上进行，同时穿戴绝缘防护用品。",
+    "NAVTEST 电能计量装置的二次回路连接导线应采用铜质单芯绝缘导线，其截面积不应小于（　）平方毫米。",
+    "NAVTEST 新装与拆换电能表作业开始前，应当（　）方可开展工作，防止误碰带电设备。",
+    "NAVTEST 用电信息采集终端安装作业中，通信天线的安装位置应当（　），并可靠固定，避免信号遮挡。",
+    "NAVTEST 现场校验电流互感器时，严禁（　），防止产生高电压危及人身与设备安全。",
+    "NAVTEST 计量装置的轮换计划应结合（　）统一安排，确保现场作业与停电计划相衔接。",
+    "NAVTEST 采集终端与电能表之间的通信规约应当符合（　）的要求，保证数据抄读准确可靠。",
+    "NAVTEST 检定装置在使用前应当检查（　）是否完好，发现异常应当立即停止使用并登记。",
+    "NAVTEST 拆装电能表时，二次侧电流回路应（　）后方可拆线，防止开路产生危险。",
+    "NAVTEST 现场作业完毕后应当（　），并清理现场，确认无遗留工具后方可撤离。",
+    "NAVTEST 计量自动化系统主站应当对采集数据进行（　），发现异常数据应当及时现场核实。"
+  ];
+  stems.forEach((stem, i) => {
+    qs.push(S(9001 + i, stem, ["定期", "不定期", "按需", "口头约定"], [i % 4]));
+  });
+  qs.push({ id: 9101, major: "NAV", type: "multi", stem: "NAVTEST 现场校验作业时应采取的安全措施包括（　）。", options: ["专人监护", "戴绝缘手套", "先停电再作业", "随意操作"], answer: [0, 1, 2] });
+  qs.push({ id: 9102, major: "NAV", type: "multi", stem: "NAVTEST 电能表接线检查的内容包括（　）。", options: ["相序正确", "极性正确", "接地可靠", "导线颜色随意"], answer: [0, 1, 2] });
+  qs.push({ id: 9201, major: "NAV", type: "judge", stem: "NAVTEST 现场校验可以不办理任何手续直接进行。", options: ["正确", "错误"], answer: [1] });
+  window.QUESTIONS_DATA = { total: qs.length, questions: qs };
+  window.__NAV_FIXTURE = qs;
+
+  /* OCR fixture：12 道单选题的整页行（含坐标，页面足够长可滚动） */
+  window.__ocrFixture = function () {
+    const lines = [];
+    let y = 60;
+    const singles = qs.filter((q) => q.type === "single");
+    singles.forEach((q, i) => {
+      const line = (t) => { lines.push({ text: t, left: 40, top: y, right: 900, bottom: y + 42 }); y += 48; };
+      line((21 + i) + ". " + q.stem);
+      q.options.forEach((o, k) => line("ABCD"[k] + ". " + o));
+    });
+    return { text: lines.map((l) => l.text).join("\n"), ms: 8, width: 1000, height: y + 100, lines };
+  };
+})();
+</script>
+<script src="../www/js/core.js"></script>
+<script src="../www/js/sample-collector.js"></script>
+<script src="../www/js/app.js"></script>
+<script>
+(async function () {
+  const R = [];
+  const check = (id, cond, info) => { R.push({ id, pass: !!cond, info: info == null ? "" : String(info) }); };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const poll = async (fn, timeout) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < (timeout || 6000)) {
+      try { const v = fn(); if (v) { return v; } } catch (e) { }
+      await sleep(60);
+    }
+    return null;
+  };
+  const vis = (id) => { const v = document.getElementById(id); return !!v && !v.classList.contains("hidden"); };
+
+  try {
+    await poll(() => document.querySelector("#menu-buttons button"));
+    await sleep(120);
+
+    /* 注入 fake 插件与调用计数器（OCR once / 返回零重算 / 零上传的行为证据） */
+    window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
+    window.Capacitor = { Plugins: {
+      Camera: { getPhoto: async () => ({ dataUrl: "data:image/jpeg;base64,QUJD" }) },
+      Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
+      CapacitorHttp: { request: async () => { window.__c.http += 1; return { status: 200, data: { ok: true } }; } }
+    }};
+    const wrap = (name, key) => {
+      const orig = window.MSQ[name];
+      window.MSQ[name] = function () { window.__c[key] += 1; return orig.apply(this, arguments); };
+    };
+    wrap("searchPageQuestionsByOcr", "match");
+    wrap("splitPageOcrLines", "split");
+    wrap("recomputePageFromLines", "auto");
+
+    /* —— NAV-A：search → detail → 左上角返回 → search —— */
+    const searchBtn = document.getElementById("btn-search-entry") ||
+      Array.from(document.querySelectorAll("#view-menu button"))
+        .find((b) => /搜题/.test(b.textContent));
+    check("NAV-A0 菜单有搜题入口", !!searchBtn);
+    searchBtn.click();
+    check("NAV-A1 进入搜题页", vis("view-search"));
+    const input = document.getElementById("search-input");
+    input.value = "NAVTEST";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await poll(() => document.querySelector("#search-results .search-item"));
+    document.querySelector("#search-results .search-item").click();
+    check("NAV-A2 打开题目详情", vis("view-search-detail"));
+    document.getElementById("btn-detail-back").click();
+    check("NAV-A3 左上角返回 → 搜题页", vis("view-search") && !vis("view-search-detail"));
+
+    /* —— NAV-B/D/E：batch → Top2 detail → 左上角返回 → batch（滚动/展开保持） —— */
+    document.getElementById("btn-batch-photo").click();
+    check("NAV-B0 进入整页拍照页", vis("view-batch-photo"));
+    document.getElementById("btn-take-page").click();
+    await poll(() => document.querySelector("#batch-list .batch-row"));
+    await sleep(120);
+    check("NAV-B1 AUTO 出整页答案", vis("view-batch-results") &&
+      document.querySelectorAll("#batch-list .batch-row").length >= 10);
+
+    const c0 = JSON.parse(JSON.stringify(window.__c));
+    window.scrollTo(0, 100000);   /* 真实滚动通道：.view 为 min-height 时 window 滚动 */
+    const savedY = window.pageYOffset;
+    check("NAV-D0 整页答案可滚动", savedY > 40, "savedY=" + savedY);
+
+    const rows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
+    const openRow = rows[rows.length - 2];
+    openRow.click();
+    const detail0 = openRow.nextElementSibling;
+    const candBtns = detail0.querySelectorAll(".batch-cand");
+    check("NAV-E0 某题展开且 Top3 候选可见",
+      openRow.classList.contains("open") && !detail0.classList.contains("hidden") && candBtns.length >= 1);
+
+    candBtns[Math.min(1, candBtns.length - 1)].click();
+    check("NAV-B2 打开 Top2 原题详情", vis("view-search-detail"));
+    document.getElementById("btn-detail-back").click();
+    check("NAV-B3 左上角返回 → 整页答案", vis("view-batch-results") && !vis("view-search-detail"));
+    check("NAV-D1 滚动位置恢复（window 通道）",
+      Math.abs((window.pageYOffset || 0) - savedY) <= 3,
+      window.pageYOffset + " vs " + savedY);
+    check("NAV-E1 返回后展开/Top3 状态自然保留",
+      openRow.classList.contains("open") && !openRow.nextElementSibling.classList.contains("hidden") &&
+      openRow.nextElementSibling.querySelectorAll(".batch-cand").length === candBtns.length);
+
+    /* —— NAV-C：Top3 → 系统 back（handleBack 即系统返回唯一入口） —— */
+    candBtns[candBtns.length - 1].click();
+    check("NAV-C1 再次打开 Top3 详情（来源仍为 batch-results）", vis("view-search-detail"));
+    window.handleBack();
+    check("NAV-C2 系统 back → 整页答案", vis("view-batch-results") && !vis("view-search-detail"));
+
+    /* —— NAV-F/G/H：详情返回零重算、零上传 —— */
+    check("NAV-F OCR 调用 = 0（无重新识别）", window.__c.ocr === c0.ocr, "ocr=" + window.__c.ocr);
+    check("NAV-G match/split/auto 调用 = 0（无重新分题匹配/无 AUTO 重判）",
+      window.__c.match === c0.match && window.__c.split === c0.split && window.__c.auto === c0.auto,
+      JSON.stringify(window.__c));
+    check("NAV-H 样本上传调用 = 0", window.__c.http === 0);
+
+    /* —— NAV-J：一次 back 一层，不连退两级 —— */
+    window.handleBack();
+    check("NAV-J1 一次 back → 整页拍照页（不跳搜题页）", vis("view-batch-photo") && !vis("view-batch-results"));
+    window.handleBack();
+    check("NAV-J2 再一次 back → 搜题页", vis("view-search"));
+
+    /* —— NAV-I：search 详情与 batch 详情来源互不残留 —— */
+    input.value = "NAVTEST";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await poll(() => document.querySelector("#search-results .search-item"));
+    document.querySelector("#search-results .search-item").click();
+    document.getElementById("btn-detail-back").click();
+    check("NAV-I1 batch 详情之后再开 search 详情 → 返回仍回 search",
+      vis("view-search") && !vis("view-search-detail"));
+
+    document.getElementById("btn-batch-photo").click();
+    document.getElementById("btn-take-page").click();   /* 新的一次拍摄（新 OCR），进入新的整页答案 */
+    await poll(() => document.querySelector("#batch-list .batch-row"));
+    await sleep(120);
+    const rows2 = Array.from(document.querySelectorAll("#batch-list .batch-row"));
+    rows2[0].click();
+    const cand2 = rows2[0].nextElementSibling.querySelectorAll(".batch-cand");
+    cand2[0].click();
+    check("NAV-I2 再次从 batch 打开详情", vis("view-search-detail"));
+    window.handleBack();
+    check("NAV-I3 返回 → 整页答案（source 已更新为 batch-results，无残留）",
+      vis("view-batch-results") && !vis("view-search-detail"));
+  } catch (e) {
+    R.push({ id: "HARNESS", pass: false, info: String((e && e.stack) || e) });
+  }
+
+  window.__NAV_RESULTS = R;
+  const box = document.getElementById("nav-report");
+  box.innerHTML = "";
+  let fails = 0;
+  R.forEach((r) => {
+    if (!r.pass) { fails += 1; }
+    const p = document.createElement("div");
+    p.className = r.pass ? "pass" : "fail";
+    p.textContent = "[" + (r.pass ? "PASS" : "FAIL") + "] " + r.id + (r.info ? "  (" + r.info + ")" : "");
+    box.appendChild(p);
+  });
+  const head = document.createElement("h3");
+  head.textContent = "结果：" + (fails ? fails + " 项失败 ✗" : "全部通过 ✓") + "（" + R.length + " 项）";
+  head.className = fails ? "fail" : "pass";
+  box.insertBefore(head, box.firstChild);
+  console.log("NAV_RESULTS", JSON.stringify(R));
+})();
+</script>
+</body>
+</html>

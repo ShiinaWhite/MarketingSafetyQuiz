@@ -865,7 +865,14 @@
   }
 
   /* 搜题详情：只显示 题型/原始题干/原始选项（原序）/正确答案，不含解析与记忆技巧 */
-  function openSearchDetail(id) {
+  /* 详情来源上下文：详情页被复用于多个父页面（文字搜题 / 整页答案 Top3 候选），
+     返回时据此回到正确的父页面，不再写死 detail → search。
+     batchScrollTop/batchWindowY：进入详情前整页答案的滚动位置。实际滚动通道随
+     CSS 而定（.view 为 min-height:100vh 时 window 滚动；若容器限高则容器滚动），
+     两个通道都保存、都恢复。display:none 往返会丢失 scrollTop，必须显式恢复。 */
+  var detailReturnContext = { source: "search", batchScrollTop: 0, batchWindowY: 0 };
+
+  function openSearchDetail(id, source) {
     var q = null;
     bank.questions.forEach(function (x) { if (x.id === id) { q = x; } });
     if (!q) { return; }
@@ -893,6 +900,12 @@
     ans.className = "feedback ok";
     ans.textContent = "【答案】" + MSQ.answerText(q);
     body.appendChild(ans);
+    detailReturnContext.source = (source === "batch-results") ? "batch-results" : "search";
+    if (detailReturnContext.source === "batch-results") {
+      var batchScroll = $("batch-scroll");
+      detailReturnContext.batchScrollTop = batchScroll ? batchScroll.scrollTop : 0;
+      detailReturnContext.batchWindowY = window.pageYOffset || 0;
+    }
     show("view-search-detail");
   }
 
@@ -949,8 +962,25 @@
         show("view-search");
   }
 
-  /* 搜题详情返回 → 搜题列表（不重建页面，关键词/结果/滚动位置保留） */
+  /* 搜题详情返回：按来源回父页面。整页答案场景下 batch results DOM 从未销毁
+     （show 只切换 hidden class），不重渲染、不重算，只恢复导航与滚动位置。
+     左上角返回按钮与 Android 系统 Back（handleBack）共用本函数。 */
   function handleSearchDetailBack() {
+    if (detailReturnContext.source === "batch-results") {
+      show("view-batch-results");
+      var y = detailReturnContext.batchScrollTop || 0;
+      var wy = detailReturnContext.batchWindowY || 0;
+      var el = $("batch-scroll");
+      if (el) { el.scrollTop = y; }
+      window.scrollTo(0, wy);
+      requestAnimationFrame(function () {
+        /* 下一帧复核一次：防显示切换当帧布局未稳定导致恢复值被截断 */
+        if (el && Math.abs(el.scrollTop - y) > 2) { el.scrollTop = y; }
+        if (Math.abs((window.pageYOffset || 0) - wy) > 2) { window.scrollTo(0, wy); }
+      });
+      return;
+    }
+    detailReturnContext.source = "search";
     show("view-search");
   }
 
@@ -1242,7 +1272,7 @@
         btn.className = "batch-cand";
         btn.textContent = (i + 1) + ". 第" + m.id + "题 ｜ " + m.type_name + " ｜ 得分 " + m.score + "：" +
           m.stem.slice(0, 40);
-        btn.addEventListener("click", function () { openSearchDetail(m.id); });
+        btn.addEventListener("click", function () { openSearchDetail(m.id, "batch-results"); });
         d.appendChild(btn);
       });
     }
