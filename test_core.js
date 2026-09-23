@@ -1056,6 +1056,168 @@ section("payload 组装：JPEG 字节零改写");
   check("joinUrl 拼接 /health", MSQSample.joinUrl("http://10.0.2.2:8787/", "/health") === "http://10.0.2.2:8787/health");
 }
 
+/* ---------- AUTO_PAGE_TYPE_V1：题型自动判定 ---------- */
+section("AUTO 题型：合成 runs 决策矩阵（常数显式、阈值边界）");
+{
+  const mkOut = (confList) => ({
+    blocks: confList.map((c) => ({ confidence: c })),
+    answered: confList.filter((c) => c !== "none").length
+  });
+  const S = (h, m, l) => mkOut([...Array(h).fill("high"), ...Array(m).fill("medium"), ...Array(l).fill("low")]);
+  const resolve = (runs, prev) => MSQ.resolvePageTypeAuto(runs, [], prev);
+
+  const d = resolve({ single: S(3, 0, 0), multi: S(0, 0, 2), judge: S(0, 0, 0) }, null);
+  check("D：single 大量 high、其余弱 → single（strong/match-quality）",
+    d.type === "single" && d.confidence === "strong" && d.method === "match-quality");
+
+  const e = resolve({ single: S(1, 0, 5), multi: S(7, 1, 0), judge: S(0, 0, 2) }, "single");
+  check("E：multi 明显更好但上一页 single → 必须切 multi（strong）",
+    e.type === "multi" && e.confidence === "strong" && e.method === "match-quality" &&
+    e.diagnostics.previousType === "single");
+
+  const f = resolve({ single: S(3, 0, 0), multi: S(2, 10, 0), judge: S(0, 0, 3) }, "single");
+  check("F：结果非常接近 + 上一页 single → 弱倾向 single（medium/previous-page）",
+    f.type === "single" && f.confidence === "medium" && f.method === "previous-page");
+
+  const fNeg = resolve({ single: S(3, 0, 0), multi: S(2, 9, 1), judge: S(0, 0, 3) }, "judge");
+  check("F-：上一页题型远离最佳分时不生效 → 最佳猜测 + ambiguous",
+    fNeg.type === "single" && fNeg.confidence === "ambiguous" && fNeg.method === "match-quality",
+    `margin=${fNeg.diagnostics.margin}`);
+
+  const g = resolve({ single: S(0, 0, 1), multi: S(0, 0, 1), judge: mkOut([]) }, null);
+  check("G：三路都极弱 → ambiguous 但仍给出类型（不抛错、不需重拍）",
+    g.confidence === "ambiguous" && g.type === "single" && g.diagnostics.margin < MSQ.AUTO_MARGIN_CLOSE);
+
+  const strongEdge = resolve({ single: S(3, 0, 0), multi: S(2, 6, 0), judge: mkOut([]) }, null);
+  check("阈值边界：margin=400（=MARGIN_STRONG）判 strong", strongEdge.confidence === "strong");
+  const midEdge = resolve({ single: S(3, 0, 0), multi: S(2, 7, 0), judge: mkOut([]) }, null);
+  check("阈值边界：margin=300 落在 medium 档", midEdge.confidence === "medium");
+
+  check("autoTypeScore 常数导出且可复算",
+    MSQ.AUTO_TYPE_SCORE.high === 1000 && MSQ.AUTO_TYPE_SCORE.medium === 100 &&
+    MSQ.AUTO_TYPE_SCORE.low === 10 &&
+    MSQ.autoTypeScore(S(2, 1, 3)).score === 2 * 1000 + 100 + 3 * 10);
+}
+
+section("AUTO 题型：章节标题优先（真实题库 + pageSectionType 容错）");
+{
+  const idxA = MSQ.buildBatchOcrIndex(qs);
+  const s1 = byType.single[30], m1 = byType.multi[10], j1 = byType.judge[10];
+  const pageOf = (heading, q) => {
+    let y = 100;
+    const line = (t) => ({ text: t, left: 0, right: 900, top: y, bottom: (y += 34) - 6 });
+    const lines = [];
+    if (heading) { lines.push(line(heading)); }
+    lines.push(line("31. " + q.stem));
+    q.options.forEach((o, i) => lines.push(line(MSQ.LETTERS[i] + ". " + o)));
+    return lines;
+  };
+  const rAuto = (lines, prev) => MSQ.recomputePageFromLines(idxA, lines, "auto", { limit: 3, previousType: prev });
+
+  const ra = rAuto(pageOf("单项选择题", s1));
+  check("A：标题'单项选择题' → AUTO=single/strong/section-heading",
+    ra.resolved.type === "single" && ra.resolved.method === "section-heading" && ra.resolved.confidence === "strong");
+  const rb = rAuto(pageOf("多项选择题", m1));
+  check("B：标题'多项选择题' → AUTO=multi", rb.resolved.type === "multi" && rb.resolved.method === "section-heading");
+  const rc = rAuto(pageOf("判断题", j1));
+  check("C：标题'判断题' → AUTO=judge", rc.resolved.type === "judge" && rc.resolved.method === "section-heading");
+
+  const rp = MSQ.resolvePageTypeAuto(
+    { single: mkOut2([{ confidence: "high" }, { confidence: "high" }]), multi: mkOut2([]), judge: mkOut2([{ confidence: "none" }]) },
+    [{ text: "判断题", top: 1 }], null);
+  function mkOut2(blocks) { return { blocks, answered: blocks.filter((b) => b.confidence !== "none").length }; }
+  check("标题优先级最高：匹配质量偏向 single 也被'判断题'标题覆盖",
+    rp.type === "judge" && rp.method === "section-heading" && rp.confidence === "strong");
+
+  const rd = rAuto(pageOf(null, s1), null);
+  check("D-real：无标题单选页 → match-quality 选中 single",
+    rd.resolved.type === "single" && rd.resolved.method === "match-quality",
+    JSON.stringify(rd.resolved.diagnostics.scores));
+}
+
+section("AUTO 题型：结果页切题型复用 lines（零 OCR）");
+{
+  const idxA = MSQ.buildBatchOcrIndex(qs);
+  const s1 = byType.single[30];
+  let y = 100;
+  const line = (t) => ({ text: t, left: 0, right: 900, top: y, bottom: (y += 34) - 6 });
+  const linesS = [line("31. " + s1.stem), ...s1.options.map((o, i) => line(MSQ.LETTERS[i] + ". " + o))];
+  const snap = JSON.stringify(linesS);
+
+  const rH = MSQ.recomputePageFromLines(idxA, linesS, "multi", { limit: 3 });
+  const freshM = MSQ.searchPageQuestionsByOcr(idxA, linesS, "multi", { limit: 3 });
+  check("H：single→multi 切换与旧逻辑逐字节一致（同一份 lines）",
+    JSON.stringify(rH.out) === JSON.stringify(freshM) && rH.resolved.method === "manual");
+  check("H：切换不改写输入 lines", JSON.stringify(linesS) === snap);
+
+  const rI = MSQ.recomputePageFromLines(idxA, linesS, "judge", { limit: 3 });
+  const freshJ = MSQ.searchPageQuestionsByOcr(idxA, linesS, "judge", { limit: 3 });
+  check("I：multi→judge 同样仅本地重算且一致",
+    JSON.stringify(rI.out) === JSON.stringify(freshJ) && rI.resolved.method === "manual");
+
+  const rK = MSQ.recomputePageFromLines(idxA, linesS, "auto", { limit: 3, previousType: null });
+  check("K：auto 输出 = 直接以判定题型调用旧逻辑（matcher 零改动）",
+    JSON.stringify(rK.out) ===
+    JSON.stringify(MSQ.searchPageQuestionsByOcr(idxA, linesS, rK.resolved.type, { limit: 3 })));
+  check("K：auto 不改写三路试跑结果",
+    JSON.stringify(rK.runs.single) ===
+    JSON.stringify(MSQ.searchPageQuestionsByOcr(idxA, linesS, "single", { limit: 3 })));
+  const rK2 = MSQ.recomputePageFromLines(idxA, linesS, "auto", { limit: 3, previousType: null });
+  check("K：resolvePageTypeAuto 纯函数（两次调用一致）",
+    JSON.stringify(rK.resolved) === JSON.stringify(rK2.resolved));
+
+  const runsForSug = {
+    single: MSQ.searchPageQuestionsByOcr(idxA, linesS, "single", { limit: 3 }),
+    multi: mkOut2([{ confidence: "high" }, { confidence: "high" }, { confidence: "high" }]),
+    judge: mkOut2([])
+  };
+  function mkOut2(blocks) { return { blocks, answered: blocks.filter((b) => b.confidence !== "none").length }; }
+  const sug = MSQ.suggestBetterPageType("single", runsForSug.single, runsForSug);
+  check("J：手动异常时只产生建议对象，不覆盖用户选择",
+    sug === null || (sug && sug.type && !runsForSug.single.__suggested));
+  const sugSnap = JSON.stringify(runsForSug);
+  MSQ.suggestBetterPageType("single", runsForSug.single, runsForSug);
+  check("J：建议函数不改写 runs", JSON.stringify(runsForSug) === sugSnap);
+
+  /* 静态守卫：结果页切题型函数绝不触碰相机/OCR；整页流程 OCR 只发生一次 */
+  const appSrc2 = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+  const fnStart = appSrc2.indexOf("function switchBatchPageType");
+  const fnEnd = fnStart >= 0 ? appSrc2.indexOf("\n  function ", fnStart + 10) : -1;
+  const fnBody = (fnStart >= 0 && fnEnd > fnStart) ? appSrc2.slice(fnStart, fnEnd) : "";
+  check("TYPE_SWITCH_OCR_CALLS = 0（切题型函数无 recognizeText/getPlugin 引用）",
+    fnBody.length > 200 && !fnBody.includes("recognizeText") && !fnBody.includes("getPlugin"),
+    `bodyLen=${fnBody.length}`);
+  const bsStart = appSrc2.indexOf("async function startBatchPageSearch");
+  const bsEnd = bsStart >= 0 ? appSrc2.indexOf("\n  /* ", bsStart + 10) : -1;
+  const bsBody = (bsStart >= 0 && bsEnd > bsStart) ? appSrc2.slice(bsStart, bsEnd) : "";
+  check("整页流程 OCR once（startBatchPageSearch 内 recognizeText 恰好 1 次）",
+    (bsBody.match(/recognizeText/g) || []).length === 1);
+}
+
+section("样本采集：AUTO 诊断字段（schemaVersion=1 增量）");
+{
+  const base = {
+    photoDataUrl: "data:image/jpeg;base64,QUJD", sampleId: "20260923_200000_aa12cd",
+    text: "x", lines: [], out: { blocks: [] }, pageType: "multi",
+    pageTypeMode: "auto", resolvedPageType: "multi",
+    pageTypeResolutionMethod: "match-quality", autoTypeConfidence: "strong",
+    timing: {}, bankById: null
+  };
+  const p1 = MSQSample.buildUploadPayload(base);
+  const j1 = JSON.stringify(p1.manifest);
+  check("AUTO 诊断字段进 manifest",
+    j1.includes('"pageTypeMode":"auto"') && j1.includes('"resolvedPageType":"multi"') &&
+    j1.includes('"pageTypeResolutionMethod":"match-quality"') && j1.includes('"autoTypeConfidence":"strong"'));
+  check("schemaVersion 仍为 1（旧 collector 兼容）", p1.manifest.schemaVersion === 1);
+  const p2 = MSQSample.buildUploadPayload({
+    photoDataUrl: base.photoDataUrl, sampleId: base.sampleId,
+    text: "x", lines: [], out: { blocks: [] }, pageType: "single", timing: {}, bankById: null
+  });
+  check("不传诊断字段时不产生该键（旧行为不变）",
+    !JSON.stringify(p2.manifest).includes("pageTypeMode") &&
+    !JSON.stringify(p2.manifest).includes("autoTypeConfidence"));
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");

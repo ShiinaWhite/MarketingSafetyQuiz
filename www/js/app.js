@@ -1146,8 +1146,9 @@
      searchPageQuestionsByOcr（先分题，再只在所选题型的子集里匹配）。 */
   var batchIndex = null;
   var batchIndexById = null;      /* 采集诊断用：id -> batchIndex 项（只读） */
-  var batchPageType = "single";   /* 会话内保持，不写 localStorage；冷启动回到单选 */
+  var batchPageType = "auto";     /* 默认 AUTO；冷启动回到 auto，手动选择只是会话内有意识的 override */
   var lastBatch = null;
+  var lastResolvedPageType = null; /* 会话内弱先验：上一页最终采用的题型（不跨重启） */
   var lastSampleUpload = null;    /* 采集旁路：结果页打开期间保留当次 dataUrl 供重试 */
 
   function setBatchStatus(text) {
@@ -1182,7 +1183,7 @@
   function openBatchPhoto() {
     show("view-batch-photo");
     renderBatchTypes();
-    setBatchStatus("选好当前大题题型后拍整页：一页可以只拍一次，页内换大块会自动切换题型");
+    setBatchStatus("默认自动识别题型，直接拍整页即可；也可手动锁定单选/多选/判断，结果页可一键换题型重算");
   }
 
   /* OCR 返回：优先用带坐标的 lines；旧版本插件只返回 text 时按行退化，仍可分题。 */
@@ -1206,7 +1207,7 @@
     return MSQ.pageAnswerDisplay(b ? b.confidence : "none", b ? b.answer : "?");
   }
 
-  var BATCH_TYPE_NAMES = { single: "单选题", multi: "多选题", judge: "判断题" };
+  var BATCH_TYPE_NAMES = { auto: "自动", single: "单选题", multi: "多选题", judge: "判断题" };
 
   function batchDetail(b) {
     var d = document.createElement("div");
@@ -1346,6 +1347,83 @@
     });
   }
 
+  /* 结果页切题型：只用已保存的 OCR lines 重跑 split + match，绝不重新拍照、
+     绝不调用 Ocr.recognizeText（TYPE_SWITCH_OCR_CALLS = 0，test_core 有静态守卫）。
+     mode 可为 "auto"（重新三题型试跑）或具体题型；这是用户的有意识选择，
+     会话内更新 batchPageType 与弱先验。 */
+  function switchBatchPageType(mode) {
+    if (!lastBatch || !lastBatch.lines) { return; }
+    batchPageType = mode;
+    var lines = lastBatch.lines;
+    var tSplit = performance.now();
+    MSQ.splitPageOcrLines(lines, mode === "auto" ? "single" : mode);
+    var splitMs = Math.round(performance.now() - tSplit);
+    var tMatch = performance.now();
+    var r = MSQ.recomputePageFromLines(batchIndex, lines, mode,
+      { limit: 3, previousType: lastResolvedPageType });
+    var matchMs = Math.round(performance.now() - tMatch);
+    lastResolvedPageType = r.resolved.type;
+    renderBatchResults({
+      lines: lines, text: lastBatch.text, ocrMs: lastBatch.ocrMs,
+      splitMs: splitMs, matchMs: matchMs, totalMs: lastBatch.ocrMs + splitMs + matchMs,
+      out: r.out, pageType: r.resolved.type, pageTypeMode: mode, resolved: r.resolved,
+      suggestion: null, dataUrl: lastBatch.dataUrl,
+      ocrWidth: lastBatch.ocrWidth, ocrHeight: lastBatch.ocrHeight
+    });
+  }
+
+  /* 结果页顶部题型行：自动识别：X题 [修改] / 题型：X（手动）[切换]。
+     AUTO 不确定时轻量提示并展开按钮行；手动异常时显示"更像X题"建议。 */
+  function buildBatchTypeLine(state) {
+    var wrap = document.createElement("div");
+    wrap.className = "batch-type-line";
+    var resolved = state.resolved || { type: state.pageType, method: "manual", confidence: null };
+    var isAuto = state.pageTypeMode === "auto";
+    var name = BATCH_TYPE_NAMES[resolved.type] || resolved.type;
+    var label = document.createElement("span");
+    label.textContent = isAuto
+      ? ("自动识别：" + name + (resolved.confidence === "ambiguous" ? "（不确定）" : ""))
+      : ("题型：" + name + "（手动）");
+    wrap.appendChild(label);
+    var row = document.createElement("div");
+    row.className = "batch-type-switch hidden";
+    ["auto", "single", "multi", "judge"].forEach(function (mode) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "batch-type-btn" + (state.pageTypeMode === mode ? " active" : "");
+      b.textContent = BATCH_TYPE_NAMES[mode];
+      b.addEventListener("click", function () { switchBatchPageType(mode); });
+      row.appendChild(b);
+    });
+    var editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "linkbtn";
+    editBtn.textContent = isAuto ? "修改" : "切换";
+    editBtn.addEventListener("click", function () { row.classList.toggle("hidden"); });
+    wrap.appendChild(editBtn);
+    wrap.appendChild(row);
+    if (isAuto && resolved.confidence === "ambiguous") {
+      var hint = document.createElement("p");
+      hint.className = "batch-hint";
+      hint.textContent = "题型判断不确定，可在下方切换题型立即重算（不会重新拍照）";
+      wrap.appendChild(hint);
+      row.classList.remove("hidden");   /* 不确定时直接展开，一键重算 */
+    }
+    if (state.suggestion && state.suggestion.type) {
+      var sug = document.createElement("p");
+      sug.className = "batch-hint";
+      sug.textContent = "本页更像" + BATCH_TYPE_NAMES[state.suggestion.type] + "，";
+      var apply = document.createElement("button");
+      apply.type = "button";
+      apply.className = "linkbtn";
+      apply.textContent = "按" + BATCH_TYPE_NAMES[state.suggestion.type] + "重新计算";
+      apply.addEventListener("click", function () { switchBatchPageType(state.suggestion.type); });
+      sug.appendChild(apply);
+      wrap.appendChild(sug);
+    }
+    return wrap;
+  }
+
   function renderBatchResults(state) {
     show("view-batch-results");
     lastBatch = state;
@@ -1359,7 +1437,8 @@
     /* 识别出一大堆文字却几乎没有可靠题号：不硬塞成一道题，也不给答案 */
     if (!blocks.length || (blocks.length === 1 && textLen >= 80)) {
       summary.className = "batch-summary warn";
-      summary.textContent = "未能可靠识别本页题目边界，请重新拍摄";
+      summary.textContent = "未能可靠识别本页题目边界，可尝试切换题型重算";
+      summary.appendChild(buildBatchTypeLine(state));
       var tip = document.createElement("div");
       tip.className = "dim";
       tip.textContent = "（识别到 " + state.lines.length + " 行文字，" + blocks.length +
@@ -1381,6 +1460,7 @@
     sub.textContent = "（置信度：" + parts.join(" · ") + " ｜ 识别 " + state.ocrMs + "ms · 分题 " +
       state.splitMs + "ms · 匹配 " + state.matchMs + "ms · 合计 " + state.totalMs + "ms）";
     summary.appendChild(sub);
+    summary.appendChild(buildBatchTypeLine(state));
     blocks.forEach(function (b) { list.appendChild(batchRow(b)); });
     appendBatchTools(state);
   }
@@ -1433,20 +1513,41 @@
       return;
     }
     var tSplit = performance.now();
-    MSQ.splitPageOcrLines(lines, batchPageType);
+    /* 独立 split 只用于计时展示；AUTO 时以 single 作为计时占位默认值，正式分题在 recompute 内按判定题型进行 */
+    MSQ.splitPageOcrLines(lines, batchPageType === "auto" ? "single" : batchPageType);
     var splitMs = Math.round(performance.now() - tSplit);
     var tMatch = performance.now();
-    var out = MSQ.searchPageQuestionsByOcr(batchIndex, lines, batchPageType, { limit: 3 });
+    /* AUTO_PAGE_TYPE 统一入口：auto 在内存中三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
+    var r = MSQ.recomputePageFromLines(batchIndex, lines, batchPageType,
+      { limit: 3, previousType: lastResolvedPageType });
     var matchMs = Math.round(performance.now() - tMatch);
+    var out = r.out;
+    var resolved = r.resolved;
+    lastResolvedPageType = resolved.type;   /* 会话内弱先验；AUTO 结论与手动选择都算当前章节信号 */
+    /* 手动锁定但结果明显异常（无高/中置信）时才多花一步试跑，给"更像X题"建议 */
+    var suggestion = null;
+    if (resolved.method === "manual") {
+      var curQ = MSQ.autoTypeScore(out);
+      if (curQ.counts.high + curQ.counts.medium === 0) {
+        var runsX = {};
+        ["single", "multi", "judge"].forEach(function (t) {
+          runsX[t] = (t === batchPageType) ? out
+            : MSQ.searchPageQuestionsByOcr(batchIndex, lines, t, { limit: 3 });
+        });
+        suggestion = MSQ.suggestBetterPageType(batchPageType, out, runsX);
+      }
+    }
     var collecting = typeof MSQSample !== "undefined" && MSQSample &&
       MSQSample.shouldCollect(sampleSettings());
     setBatchStatus(collecting ? "识别完成" : "识别完成（全程本地，图片不保存不上传）");
     var state = {
       lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
-      totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
+      totalMs: Math.round(performance.now() - totalStart), out: out,
+      pageType: resolved.type, pageTypeMode: batchPageType, resolved: resolved,
+      suggestion: suggestion, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight
     };
     renderBatchResults(state);
-    collectAndUploadSample(state, dataUrl, ocrWidth, ocrHeight);
+    collectAndUploadSample(state);
   }
 
   /* 整页结果 → 整页拍照 → 搜题 → 首页 */
@@ -1506,6 +1607,7 @@
         setSampleUploadStatus("样本上传中…", false);
         MSQSample.postJSON(MSQSample.joinUrl(target.serverUrl, "/api/sample"), target.payload, 20000)
           .then(function () {
+            target.uploaded = true;
             setSampleUploadStatus("样本已保存：" + target.payload.sampleId, false);
           })
           .catch(function () {
@@ -1546,7 +1648,7 @@
     if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
   }
 
-  function collectAndUploadSample(state, photoDataUrl, ocrWidth, ocrHeight) {
+  function collectAndUploadSample(state) {
     updateSampleToolsVisibility();
     if (typeof MSQSample === "undefined" || !MSQSample) { return; }
     var s = sampleSettings();
@@ -1554,15 +1656,21 @@
     var payload;
     try {
       payload = MSQSample.buildUploadPayload({
-        photoDataUrl: photoDataUrl,
+        photoDataUrl: state.dataUrl,
         sampleId: MSQSample.makeSampleId(new Date()),
         capturedAt: new Date().toISOString(),
+        /* pageType = 最终实际用于展示答案的题型（AUTO 判定结果或手动选择） */
         pageType: state.pageType,
+        pageTypeMode: state.pageTypeMode,
+        resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
+        pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
+        autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
+          ? state.resolved.confidence : undefined,
         text: state.text,
         lines: state.lines,
         out: state.out,
-        ocrWidth: ocrWidth,
-        ocrHeight: ocrHeight,
+        ocrWidth: state.ocrWidth,
+        ocrHeight: state.ocrHeight,
         timing: {
           ocrMs: state.ocrMs, splitMs: state.splitMs,
           matchMs: state.matchMs, totalMs: state.totalMs
@@ -1573,11 +1681,12 @@
       setSampleUploadStatus("样本上传失败", true);
       return;
     }
-    lastSampleUpload = { serverUrl: s.serverUrl, payload: payload };
+    lastSampleUpload = { serverUrl: s.serverUrl, payload: payload, uploaded: false };
     setSampleUploadStatus("样本上传中…", false);
     updateSampleToolsVisibility();
     MSQSample.postJSON(MSQSample.joinUrl(s.serverUrl, "/api/sample"), payload, 20000)
       .then(function () {
+        if (lastSampleUpload) { lastSampleUpload.uploaded = true; }
         setSampleUploadStatus("样本已保存：" + payload.sampleId, false);
       })
       .catch(function () {

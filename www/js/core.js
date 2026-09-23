@@ -857,6 +857,130 @@
        不改写 bankId/matches/confidence/answer（匹配结果与题号无关） */
     var ordered = normalizePageQuestionSequence(blocks);
     return { blocks: ordered, answered: answered };
+  };
+
+  /* ---------------- AUTO 题型判定（AUTO_PAGE_TYPE_V1，纯调度层） ----------------
+     匹配/分题算法零改动：只对 searchPageQuestionsByOcr 的现成输出做"选哪个题型"的
+     调度决策。所有常数显式导出、全部可单测；判据只用已有信息
+     （high/medium/low/none 计数、分数差距、章节标题、上一页题型弱先验）。 */
+
+  /* 每道题按置信度计分（none=0）。1000/100/10 拉开档次：1 道 high 比"其余全变
+     medium"更值钱，避免大量 low 伪装成好结果。 */
+  var AUTO_TYPE_SCORE = { high: 1000, medium: 100, low: 10, none: 0 };
+  /* 最佳与次选分数差距 >= MARGIN_STRONG 才算"明显更好"（约多 1 道 high 且不牺牲 medium） */
+  var AUTO_MARGIN_STRONG = 400;
+  /* 差距 < MARGIN_CLOSE 视为"非常接近"，此时上一页题型才允许作为弱先验介入 */
+  var AUTO_MARGIN_CLOSE = 100;
+
+  function autoTypeScore(out) {
+    var blocks = (out && out.blocks) || [];
+    var score = 0;
+    var counts = { high: 0, medium: 0, low: 0, none: 0 };
+    blocks.forEach(function (b) {
+      var c = (b && b.confidence) || "none";
+      counts[c] = (counts[c] || 0) + 1;
+      score += AUTO_TYPE_SCORE[c] || 0;
+    });
+    return { score: score, counts: counts, answered: out ? (out.answered || 0) : 0 };
+  }
+
+  /* OCR 行中出现的章节标题（有序去重），复用现有 pageSectionType 及其形近容错。
+     不实现第二套标题识别器。 */
+  function pageSectionHeadings(lines) {
+    var seen = {};
+    var out = [];
+    (lines || []).forEach(function (l) {
+      var t = (l && l.text != null) ? String(l.text).trim() : "";
+      if (!t) { return; }
+      var sec = pageSectionType(t);
+      if (sec && !seen[sec]) { seen[sec] = true; out.push(sec); }
+    });
+    return out;
+  }
+
+  /* 三题型试跑结果 → AUTO 决策。纯函数：不改写 runs/lines，多次调用结果一致。
+     runs = { single, multi, judge }（同一份 lines 各跑一次 searchPageQuestionsByOcr）。
+     返回 { type, confidence: strong|medium|ambiguous, method, diagnostics }。 */
+  function resolvePageTypeAuto(runs, lines, previousType) {
+    var TYPES = ["single", "multi", "judge"];
+    var diag = {
+      headings: pageSectionHeadings(lines),
+      previousType: previousType || null,
+      scores: {}, counts: {}
+    };
+
+    /* 1) 章节标题优先。首个标题定起始题型；页中后续大块仍由 splitPageOcrLines
+          在标题处自行切换题型（既有行为），这里不重复判断。 */
+    if (diag.headings.length) {
+      return { type: diag.headings[0], confidence: "strong", method: "section-heading", diagnostics: diag };
+    }
+
+    /* 2) 三种匹配结果质量 */
+    TYPES.forEach(function (t) {
+      var q = autoTypeScore(runs && runs[t]);
+      diag.scores[t] = q.score;
+      diag.counts[t] = q.counts;
+    });
+    var ordered = TYPES.slice().sort(function (a, b) {
+      return diag.scores[b] - diag.scores[a] || TYPES.indexOf(a) - TYPES.indexOf(b);
+    });
+    var best = ordered[0], second = ordered[1];
+    var margin = diag.scores[best] - diag.scores[second];
+    diag.ordered = ordered;
+    diag.margin = margin;
+
+    if (margin >= AUTO_MARGIN_STRONG) {
+      return { type: best, confidence: "strong", method: "match-quality", diagnostics: diag };
+    }
+    if (margin >= AUTO_MARGIN_CLOSE) {
+      return { type: best, confidence: "medium", method: "match-quality", diagnostics: diag };
+    }
+
+    /* 3) 非常接近：上一页题型只在这里作为弱先验（它必须紧贴最佳分，绝不逆转明显差距） */
+    if (previousType && runs && runs[previousType] &&
+        diag.scores[best] - diag.scores[previousType] < AUTO_MARGIN_CLOSE) {
+      return { type: previousType, confidence: "medium", method: "previous-page", diagnostics: diag };
+    }
+
+    /* 4) 无法确定：仍返回最佳猜测（UX 只加提示，不阻塞、不要求重新拍照） */
+    return { type: best, confidence: "ambiguous", method: "match-quality", diagnostics: diag };
+  }
+
+  /* 结果页"切题型/重算"与 AUTO 的统一入口：同一份 OCR lines 直接重跑
+     split + match，绝不触碰相机或 Ocr.recognizeText。pageType 传 "auto" 时
+     在内存中三题型试跑并自动决策；传具体题型时等价于旧逻辑单次调用。 */
+  function recomputePageFromLines(ocrIndex, lines, pageType, options) {
+    var opts = options || {};
+    if (pageType === "auto") {
+      var runs = {};
+      ["single", "multi", "judge"].forEach(function (t) {
+        runs[t] = searchPageQuestionsByOcr(ocrIndex, lines, t, opts);
+      });
+      var resolved = resolvePageTypeAuto(runs, lines, opts.previousType);
+      return { out: runs[resolved.type], resolved: resolved, runs: runs };
+    }
+    return {
+      out: searchPageQuestionsByOcr(ocrIndex, lines, pageType, opts),
+      resolved: { type: pageType, confidence: "manual", method: "manual", diagnostics: null },
+      runs: null
+    };
+  }
+
+  /* 手动锁定题型但结果明显异常时给建议（app 侧只在无高/中置信时才调）。纯函数：
+     只返回建议对象，绝不覆盖用户选择。 */
+  function suggestBetterPageType(currentType, currentOut, runs) {
+    if (!runs || !runs[currentType]) { return null; }
+    var cur = autoTypeScore(currentOut).score;
+    var bestType = null, bestScore = cur;
+    ["single", "multi", "judge"].forEach(function (t) {
+      if (t === currentType || !runs[t]) { return; }
+      var s = autoTypeScore(runs[t]).score;
+      if (s > bestScore) { bestScore = s; bestType = t; }
+    });
+    if (bestType && bestScore - cur >= AUTO_MARGIN_STRONG) {
+      return { type: bestType, margin: bestScore - cur };
+    }
+    return null;
   }
 
   return {
@@ -876,6 +1000,10 @@
     pageSectionType: pageSectionType, pageQuestionNumber: pageQuestionNumber,
     matchPageQuestionBlock: matchPageQuestionBlock, pageBlockConfidence: pageBlockConfidence,
     pageAnswerText: pageAnswerText, pageAnswerDisplay: pageAnswerDisplay, searchPageQuestionsByOcr: searchPageQuestionsByOcr,
+    AUTO_TYPE_SCORE: AUTO_TYPE_SCORE, AUTO_MARGIN_STRONG: AUTO_MARGIN_STRONG, AUTO_MARGIN_CLOSE: AUTO_MARGIN_CLOSE,
+    autoTypeScore: autoTypeScore, pageSectionHeadings: pageSectionHeadings,
+    resolvePageTypeAuto: resolvePageTypeAuto, recomputePageFromLines: recomputePageFromLines,
+    suggestBetterPageType: suggestBetterPageType,
     generateExam: generateExam, scoreExam: scoreExam
   };
 });

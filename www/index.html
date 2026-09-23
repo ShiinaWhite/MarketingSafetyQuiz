@@ -109,11 +109,12 @@
     </header>
     <main class="pad">
       <div id="batch-type-row" class="batch-type-row" role="group" aria-label="本页题型">
-        <button type="button" class="batch-type-btn active" data-type="single" aria-pressed="true">单选</button>
+        <button type="button" class="batch-type-btn active" data-type="auto" aria-pressed="true">自动</button>
+        <button type="button" class="batch-type-btn" data-type="single" aria-pressed="false">单选</button>
         <button type="button" class="batch-type-btn" data-type="multi" aria-pressed="false">多选</button>
         <button type="button" class="batch-type-btn" data-type="judge" aria-pressed="false">判断</button>
       </div>
-      <p class="batch-tip">先点一次当前大题题型，再拍整页。页面中间出现“多选题 / 判断题”大标题时会自动切换题型，一页可以跨大块。</p>
+      <p class="batch-tip">默认自动识别题型：章节标题优先，识别不到时三种题型在本地各试跑一遍取最优。整页答案页可一键切换题型立即重算（不重拍）。手动锁定只在当前会话有效。</p>
       <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
       <p id="batch-status" class="search-count hidden"></p>
       <details id="sample-panel" class="sample-panel">
