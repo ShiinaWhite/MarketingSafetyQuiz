@@ -27,6 +27,7 @@
     </header>
     <div id="menu-buttons" class="grid"></div>
     <div class="menu-foot">
+      <button id="btn-update" class="linkbtn">检查更新</button>
       <button id="btn-settings" class="linkbtn">模拟考试设置</button>
       <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
     </div>
@@ -168,6 +169,19 @@
     <main id="search-detail-body" class="pad"></main>
   </section>
 
+  <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->
+  <section id="view-update" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-update-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">检查更新</div>
+    </header>
+    <main class="pad">
+      <p id="update-current" class="dim"></p>
+      <div id="update-body"></div>
+      <p id="update-error" class="batch-hint hidden"></p>
+    </main>
+  </section>
+
   <!-- 考试成绩 -->
   <section id="view-result" class="view hidden">
     <header class="quiz-head"><div class="qtitle center">模拟考试成绩</div></header>
@@ -235,6 +249,7 @@
 </script>
 <script src="../www/js/core.js"></script>
 <script src="../www/js/sample-collector.js"></script>
+<script src="../www/js/updater.js"></script>
 <script src="../www/js/app.js"></script>
 <script>
 (async function () {

@@ -1258,6 +1258,60 @@ section("导航：详情来源与返回（静态守卫）");
     (appSrc3.match(/case "view-batch-results": handleBatchResultsBack\(\); return;/g) || []).length === 1);
 }
 
+/* ---------- SELF_UPDATE_V1：应用内自更新纯逻辑 ---------- */
+section("应用自更新：updater.js（UPD-A~L）");
+const MSQUpdater = require("./www/js/updater.js");
+{
+  const goodManifest = {
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: 2, versionName: "1.0.2-dev", apkUrl: "/api/update/dev/apk",
+    sha256: "c5f8965a5c6a3f86bde2ee50d71ebc22b2bade0650e1174bbc3572a11d959abb",
+    size: 52450325, publishedAt: "2026-09-24T00:00:00Z", notes: "SELF_UPDATE_V1"
+  };
+  const v = (m, exp) => MSQUpdater.validateManifest(m, exp || { channel: "dev", packageName: "com.jty.safetyquiz.dev" });
+
+  check("UPD-A 当前1 新2 → available", MSQUpdater.checkUpdateState(1, goodManifest) === "available");
+  check("UPD-B 当前2 新2 → latest", MSQUpdater.checkUpdateState(2, goodManifest) === "latest");
+  check("UPD-C 当前3 新2 → 不允许降级", MSQUpdater.checkUpdateState(3, goodManifest) === "downgrade");
+  check("UPD-D packageName 不匹配 → reject",
+    !v(Object.assign({}, goodManifest, { packageName: "com.jty.safetyquiz" })).ok);
+  check("UPD-E channel 不匹配 → reject",
+    !v(Object.assign({}, goodManifest, { channel: "stable" })).ok);
+  check("UPD-F schemaVersion 不支持 → reject",
+    !v(Object.assign({}, goodManifest, { schemaVersion: 2 })).ok);
+  check("UPD-G sha256 非法 → reject",
+    !v(Object.assign({}, goodManifest, { sha256: "abc" })).ok);
+  check("UPD-H size 异常 → reject",
+    !v(Object.assign({}, goodManifest, { size: 0 })).ok &&
+    !v(Object.assign({}, goodManifest, { size: MSQUpdater.MAX_APK_BYTES + 1 })).ok);
+  check("合法 manifest → ok", v(goodManifest).ok);
+  check("versionCode 非整数 → reject",
+    !v(Object.assign({}, goodManifest, { versionCode: 2.5 })).ok &&
+    !v(Object.assign({}, goodManifest, { versionCode: "2" })).ok);
+
+  check("UPD-I 相对 apkUrl → 按 server 解析",
+    MSQUpdater.resolveApkUrl("http://192.168.3.39:8787", "/api/update/dev/apk")
+      === "http://192.168.3.39:8787/api/update/dev/apk");
+  check("UPD-J 绝对 https apkUrl → 保持原样",
+    MSQUpdater.resolveApkUrl("http://192.168.3.39:8787", "https://update.shiinalab.top/dev/app.apk")
+      === "https://update.shiinalab.top/dev/app.apk");
+  check("UPD-K 未配置更新服务器但采集服务器已配置 → 复用",
+    MSQUpdater.resolveUpdateServer({}, { serverUrl: "http://192.168.3.39:8787/" }, "")
+      === "http://192.168.3.39:8787");
+  check("UPD-L 两者均未配置 → null（UI 给清晰提示）",
+    MSQUpdater.resolveUpdateServer({}, {}, "") === null);
+  check("更新设置优先于采集设置",
+    MSQUpdater.resolveUpdateServer({ serverUrl: "https://update.shiinalab.top" },
+      { serverUrl: "http://192.168.3.39:8787" }, "") === "https://update.shiinalab.top");
+  check("渠道由 applicationId 决定（不写死 dev）",
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz.dev") === "dev" &&
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz") === "stable" &&
+    MSQUpdater.updateChannelFor("com.other.app") === null);
+  check("serverUrl 归一化（坏协议拒绝/去尾斜杠）",
+    MSQUpdater.normalizeSettings({ serverUrl: "ftp://x" }).serverUrl === "" &&
+    MSQUpdater.normalizeSettings({ serverUrl: "http://a:1/" }).serverUrl === "http://a:1");
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");

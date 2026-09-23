@@ -991,6 +991,7 @@
     if (Modal.isOpen()) { Modal.close(); return; }
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
+      case "view-update": renderMenu(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
       case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
@@ -1724,6 +1725,233 @@
       });
   }
 
+  /* ---------------- 应用内自更新（SELF_UPDATE_V1，仅手动"检查更新"） ----------------
+     逻辑在 updater.js（纯函数），下载/校验/安装在原生 UpdatePlugin。
+     级联取更新服务器：更新设置 > Sample Collector 设置 > 内置默认（当前为空）。 */
+  var updateInfo = null;       /* {id, versionName, versionCode}，来自 App.getInfo() */
+  var updateManifest = null;   /* 通过校验的服务器 latest.json */
+  var updatePhase = "idle";    /* idle|checking|available|latest|downgrade|invalid|downloading|downloaded|needPermission|installing */
+  var updateProgressBound = false;
+
+  function updateButton(label, id, handler, primary) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = id;
+    b.className = "barbtn" + (primary ? " primary" : "");
+    b.style.marginBottom = "10px";
+    b.textContent = label;
+    b.addEventListener("click", handler);
+    return b;
+  }
+
+  function updateSetError(msg) {
+    var el = $("update-error");
+    if (!el) { return; }
+    if (msg) { el.textContent = msg; el.classList.remove("hidden"); }
+    else { el.classList.add("hidden"); }
+  }
+
+  function renderUpdateView(statusText) {
+    var body = $("update-body");
+    if (!body) { return; }
+    body.innerHTML = "";
+    var status = document.createElement("p");
+    status.style.whiteSpace = "pre-line";
+    status.className = "dim";
+    status.textContent = statusText || "";
+    body.appendChild(status);
+
+    if (updateInfo && updatePhase !== "checking" && updatePhase !== "downloading" && updatePhase !== "installing") {
+      body.appendChild(updateButton("检查更新", "btn-update-check", function () { checkForUpdate(); }, true));
+    }
+    if (updatePhase === "available" && updateManifest) {
+      var info = document.createElement("p");
+      info.style.whiteSpace = "pre-line";
+      info.textContent = "发现新版本 " + updateManifest.versionName +
+        "（versionCode " + updateManifest.versionCode + "）" +
+        (updateManifest.notes ? "\n更新内容：" + updateManifest.notes : "") +
+        "\n大小：" + (typeof MSQUpdater !== "undefined" ? MSQUpdater.formatBytes(updateManifest.size) : updateManifest.size);
+      body.appendChild(info);
+      body.appendChild(updateButton("下载安装", "btn-update-download", function () { startUpdateDownload(); }, true));
+    }
+    if (updatePhase === "needPermission") {
+      body.appendChild(updateButton("打开安装权限设置", "btn-update-perm", function () { openInstallPermissionSettings(); }, true));
+      body.appendChild(updateButton("继续安装", "btn-update-install", function () { installUpdate(); }));
+    }
+    if (updatePhase === "downloaded") {
+      body.appendChild(updateButton("安装更新", "btn-update-install", function () { installUpdate(); }, true));
+    }
+  }
+
+  function openUpdateView() {
+    show("view-update");
+    updateSetError("");
+    updatePhase = "idle";
+    renderUpdateView("正在读取应用信息…");
+    var App = getPlugin("App");
+    if (!(App && typeof App.getInfo === "function")) {
+      renderUpdateView("当前环境不支持应用内更新（无 Capacitor App 插件，浏览器调试模式）");
+      return;
+    }
+    App.getInfo().then(function (info) {
+      updateInfo = {
+        id: info.id,
+        versionName: info.version,
+        versionCode: parseInt(info.build, 10) || 0
+      };
+      renderUpdateView("当前版本：" + updateInfo.versionName +
+        "（versionCode " + updateInfo.versionCode + "）");
+    }, function () {
+      renderUpdateView("无法读取应用信息");
+    });
+  }
+
+  function updateResolvedServer() {
+    var sampleSettings = (typeof MSQSample !== "undefined" && MSQSample)
+      ? MSQSample.loadSettings() : { serverUrl: "" };
+    return (typeof MSQUpdater !== "undefined" ? MSQUpdater : null)
+      ? MSQUpdater.resolveUpdateServer(MSQUpdater.loadSettings(), sampleSettings, "") : null;
+  }
+
+  function checkForUpdate() {
+    if (!updateInfo || typeof MSQUpdater === "undefined") { return; }
+    updatePhase = "checking";
+    updateSetError("");
+    renderUpdateView("正在检查更新…");
+    var channel = MSQUpdater.updateChannelFor(updateInfo.id);
+    if (!channel) {
+      updatePhase = "invalid";
+      updateSetError("当前应用渠道不支持应用内更新");
+      renderUpdateView("");
+      return;
+    }
+    var server = updateResolvedServer();
+    if (!server) {
+      updatePhase = "invalid";
+      updateSetError("尚未配置更新服务器：请先在「整页拍照搜题 → 测试样本采集」里配置电脑地址");
+      renderUpdateView("");
+      return;
+    }
+    var fetchJson = (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
+      ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
+      : Promise.reject(new Error("无传输层"));
+    fetchJson.then(function (manifest) {
+      var v = MSQUpdater.validateManifest(manifest, {
+        channel: channel,
+        packageName: updateInfo.id
+      });
+      if (!v.ok) {
+        updatePhase = "invalid";
+        updateSetError(v.error);
+        renderUpdateView("");
+        return;
+      }
+      updateManifest = manifest;
+      var state = MSQUpdater.checkUpdateState(updateInfo.versionCode, manifest);
+      if (state === "available") {
+        updatePhase = "available";
+        renderUpdateView("");
+      } else if (state === "latest") {
+        updatePhase = "latest";
+        renderUpdateView("已经是最新版");
+      } else {
+        updatePhase = "downgrade";
+        updateSetError("服务器上的版本不高于当前版本，暂不更新");
+        renderUpdateView("");
+      }
+    }, function () {
+      updatePhase = "invalid";
+      updateSetError("无法连接更新服务器，请确认电脑和手机在同一局域网且接收器已启动");
+      renderUpdateView("");
+    });
+  }
+
+  function updateFriendlyError(e) {
+    var code = e && e.code ? String(e.code) : "";
+    var msg = String((e && e.message) || e || "未知错误");
+    if (code === "SHA_MISMATCH") { return "更新包校验失败（SHA256 不一致），已删除下载文件"; }
+    if (code === "SIGNER_MISMATCH") { return "更新包签名不一致，已拒绝安装"; }
+    if (code === "PACKAGE_MISMATCH") { return "更新包与应用不匹配，已拒绝安装"; }
+    if (code === "VERSION_MISMATCH") { return "更新包版本与发布信息不一致"; }
+    if (code === "TOO_LARGE") { return "更新包超过大小上限"; }
+    if (code === "NO_UPDATE") { return "没有已下载的更新包，请重新下载"; }
+    return "下载失败（" + msg.slice(0, 60) + "）";
+  }
+
+  function startUpdateDownload() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!Update || !updateManifest || !updateInfo) { return; }
+    var url = MSQUpdater.resolveApkUrl(updateResolvedServer(), updateManifest.apkUrl);
+    if (!url) { updateSetError("下载地址无效"); return; }
+    updatePhase = "downloading";
+    updateSetError("");
+    renderUpdateView("正在下载 0%");
+    if (typeof Update.addListener === "function" && !updateProgressBound) {
+      updateProgressBound = true;
+      Update.addListener("updateDownloadProgress", function (p) {
+        if (updatePhase !== "downloading") { return; }
+        var pct = (p && p.percent) ? p.percent : 0;
+        var txt = "正在下载 " + pct + "%";
+        if (p && p.totalBytes) {
+          txt += "（" + MSQUpdater.formatBytes(p.downloadedBytes) + " / " +
+            MSQUpdater.formatBytes(p.totalBytes) + "）";
+        }
+        renderUpdateView(txt);
+      });
+    }
+    Update.downloadUpdate({
+      url: url,
+      sha256: updateManifest.sha256,
+      expectedPackageName: updateInfo.id,
+      expectedVersionCode: updateManifest.versionCode,
+      expectedSize: updateManifest.size
+    }).then(function () {
+      afterDownloadVerified();
+    }, function (e) {
+      updatePhase = "available";
+      updateSetError(updateFriendlyError(e));
+      renderUpdateView("下载未完成，可重新下载安装");
+    });
+  }
+
+  function afterDownloadVerified() {
+    var Update = getPlugin("UpdatePlugin");
+    updatePhase = "downloaded";
+    if (!(Update && typeof Update.canInstallUpdates === "function")) {
+      renderUpdateView("下载校验通过");
+      return;
+    }
+    Update.canInstallUpdates().then(function (r) {
+      if (r && r.canInstall) {
+        renderUpdateView("下载校验通过，可安装");
+      } else {
+        updatePhase = "needPermission";
+        renderUpdateView("需要允许本应用安装更新包（系统安全机制，仅此一次授权）");
+      }
+    }, function () {
+      renderUpdateView("下载校验通过");
+    });
+  }
+
+  function openInstallPermissionSettings() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!(Update && typeof Update.openInstallPermissionSettings === "function")) { return; }
+    Update.openInstallPermissionSettings().then(function () { }, function () { });
+  }
+
+  function installUpdate() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!(Update && typeof Update.installDownloadedUpdate === "function")) { return; }
+    updatePhase = "installing";
+    Update.installDownloadedUpdate().then(function () {
+      renderUpdateView("已调起系统安装器，请在系统界面确认更新；安装完成后重新打开应用");
+    }, function (e) {
+      updatePhase = "downloaded";
+      updateSetError("无法启动安装：" + String((e && e.message) || e).slice(0, 60));
+      renderUpdateView("");
+    });
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -1828,6 +2056,9 @@
     initBatchTypes();
     initSamplePanel();
     initSampleResultTools();
+    $("btn-update").addEventListener("click", openUpdateView);
+    $("btn-update-back").addEventListener("click", renderMenu);
+    /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
