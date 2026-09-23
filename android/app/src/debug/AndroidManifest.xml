@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 构建合并此 overlay：允许明文 HTTP，供局域网真实样本采集通道使用
+     （手机 → http://开发电脑IP:8787，见 tools/sample_collector/）。
+     release 构建不合并此文件，保持系统默认（禁止明文），不扩大 cleartext 权限。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:usesCleartextTraffic="true" />
+</manifest>

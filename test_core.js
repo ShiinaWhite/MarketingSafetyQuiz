@@ -922,6 +922,140 @@ function pick(arr, n, r) {
   return a.slice(0, n);
 }
 
+/* ---------- 真实样本采集旁路（www/js/sample-collector.js） ----------
+   只测「采集不改变识别结果」与「样本数据完整」：matcher 输出是唯一事实来源。 */
+section("真实样本采集：设置默认 OFF");
+const MSQSample = require("./www/js/sample-collector.js");
+const memStore = () => {
+  const m = {};
+  return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); } };
+};
+check("默认设置 = OFF + 空地址（普通用户绝不无意上传）",
+  (() => { const s = MSQSample.normalizeSettings(undefined); return s.enabled === false && s.serverUrl === ""; })());
+check("shouldCollect：默认 OFF", MSQSample.shouldCollect(undefined) === false);
+check("shouldCollect：enabled 但无地址 = OFF", MSQSample.shouldCollect({ enabled: true, serverUrl: "" }) === false);
+check("shouldCollect：enabled + 合法地址 = ON",
+  MSQSample.shouldCollect({ enabled: true, serverUrl: "http://10.0.2.2:8787" }) === true);
+check("serverUrl 归一化：去尾斜杠",
+  MSQSample.normalizeSettings({ enabled: true, serverUrl: "http://192.168.3.20:8787/" }).serverUrl
+    === "http://192.168.3.20:8787");
+check("serverUrl 非法协议被拒", MSQSample.normalizeSettings({ serverUrl: "ftp://x" }).serverUrl === "");
+{
+  const st = memStore();
+  MSQSample.saveSettings(st, { enabled: true, serverUrl: "http://10.0.2.2:8787" });
+  const back = MSQSample.loadSettings(st);
+  check("设置 localStorage 存取往返", back.enabled === true && back.serverUrl === "http://10.0.2.2:8787");
+  st.setItem(MSQSample.SETTINGS_KEY, "{bad json");
+  check("坏 JSON 回退默认 OFF", MSQSample.loadSettings(st).enabled === false);
+}
+
+section("sampleId 生成");
+{
+  const id = MSQSample.makeSampleId(new Date(2026, 8, 23, 17, 15, 30), "ab12cd");
+  check("时间戳 + 随机段格式", id === "20260923_171530_ab12cd", id);
+  check("符合 collector 校验正则", MSQSample.SAMPLE_ID_RE.test(id));
+  check("同秒不同随机段得到不同 id",
+    id !== MSQSample.makeSampleId(new Date(2026, 8, 23, 17, 15, 30), "ff01ab"));
+  const auto = MSQSample.makeSampleId(new Date());
+  check("随机段自动生成且格式合法", MSQSample.SAMPLE_ID_RE.test(auto));
+}
+
+section("manifest 纯度与诊断一致性（matcher 输出零改动）");
+{
+  const s1 = byType.single[30], m1 = byType.multi[10], j1 = byType.judge[10];
+  let top = 100;
+  const line = (text) => ({ text, left: 0, right: 900, top, bottom: (top += 34) - 6 });
+  const pageLines = [
+    line("31. " + s1.stem),
+    ...s1.options.map((o, i) => line(MSQ.LETTERS[i] + ". " + o)),
+    line("多选题"),
+    line("32. " + m1.stem),
+    ...m1.options.map((o, i) => line(MSQ.LETTERS[i] + ". " + o)),
+    line("判断题"),
+    line("33. " + j1.stem),
+    line("A. 正确"),
+    line("B. 错误"),
+  ];
+  const idx = MSQ.buildBatchOcrIndex(qs);
+  const byId = {};
+  idx.forEach((it) => { byId[it.id] = it; });
+  const out = MSQ.searchPageQuestionsByOcr(idx, pageLines, "single", { limit: 3 });
+  check("模拟页分出 3 块", out.blocks.length === 3, String(out.blocks.length));
+  check("3 块全部有匹配（候选检查才有意义）", out.blocks.every((b) => b.bankId !== null));
+
+  const snapshot = JSON.stringify(out.blocks);
+  const buildArgs = {
+    sampleId: "20260923_171530_ab12cd", capturedAt: "2026-09-23T17:15:30.000Z",
+    pageType: "single", text: "31. …\n多选题\n判断题", lines: pageLines, out,
+    ocrWidth: 3000, ocrHeight: 4000,
+    timing: { ocrMs: 900, splitMs: 2, matchMs: 20, totalMs: 1000 },
+    bankById: byId
+  };
+  const manifest = MSQSample.buildRunManifest(buildArgs);
+  check("buildRunManifest 纯观测：不改写 matcher 输出", JSON.stringify(out.blocks) === snapshot);
+  check("重复构建结果逐字节一致（纯函数）",
+    JSON.stringify(manifest) === JSON.stringify(MSQSample.buildRunManifest(buildArgs)));
+  check("schemaVersion / sampleId / pageType / timing 进 manifest",
+    manifest.schemaVersion === 1 && manifest.sampleId === "20260923_171530_ab12cd" &&
+    manifest.pageType === "single" && manifest.timing.totalMs === 1000);
+  check("image 只声明文件名（bytes/sha256/宽高由 collector 保存时补，不伪造）",
+    manifest.image.filename === "capture.jpg" && manifest.image.bytes === undefined);
+  check("ocr 原文与行坐标完整保留",
+    manifest.ocr.lines.length === pageLines.length &&
+    manifest.ocr.lines[0].text === pageLines[0].text &&
+    manifest.ocr.lines[0].top === pageLines[0].top && manifest.ocr.lines[0].bottom === pageLines[0].bottom);
+  check("ocr 位图尺寸保留", manifest.ocr.width === 3000 && manifest.ocr.height === 4000);
+
+  const pairs = manifest.blocks.map((sb, i) => ({ sb, b: out.blocks[i] }));
+  check("每块 finalBankId/finalAnswer/confidence 与 matcher 输出一致",
+    pairs.every((p) => p.sb.finalBankId === p.b.bankId &&
+      p.sb.finalAnswer === p.b.answer && p.sb.confidence === p.b.confidence));
+  check("每块 rawScreenNumber/numberSource 保留（含校正来源）",
+    pairs.every((p) => p.sb.rawScreenNumber === String(p.b.rawScreenNumber) &&
+      p.sb.numberSource === p.b.numberSource));
+  check("stemText/optionsText/rawText 保留",
+    pairs.every((p) => p.sb.stemText === p.b.stemText && p.sb.optionsText === p.b.optionsText &&
+      p.sb.rawText === p.b.rawText));
+  check("Top1 候选 = finalBankId",
+    pairs.every((p) => p.sb.candidates.length && p.sb.candidates[0].rank === 1 &&
+      p.sb.candidates[0].bankId === p.sb.finalBankId));
+  check("Top3 候选分数排序保持（只记录不改写）",
+    pairs.every((p) => p.sb.candidates.every((c, i, a) => i === 0 || a[i - 1].score >= c.score)));
+  check("候选答案来自题库真值（Top1 答案 = 题库答案文本）",
+    pairs.every((p) => p.sb.candidates[0].answer === MSQ.pageAnswerText(byId[p.sb.finalBankId])));
+  const CLS = { high: "high", medium: "mid", low: "low", none: "none" };
+  check("置信分类与 UI 显示分类一致（pageAnswerDisplay 映射）",
+    pairs.every((p) => MSQ.pageAnswerDisplay(p.sb.confidence, p.sb.finalAnswer).cls === CLS[p.sb.confidence]));
+  check("无 bankById 时 candidates.answer = null 不炸",
+  (() => {
+    const m2 = MSQSample.buildRunManifest(Object.assign({}, buildArgs, { bankById: null }));
+    return m2.blocks.every((sb) => sb.candidates.every((c) => c.answer === null));
+  })());
+}
+
+section("payload 组装：JPEG 字节零改写");
+{
+  const DATA_URL = "data:image/jpeg;base64,QUJDREVG"; /* 占位字节，只测透传不测解码 */
+  let payload = null;
+  try {
+    payload = MSQSample.buildUploadPayload({
+      photoDataUrl: DATA_URL, sampleId: "20260923_171530_ab12cd",
+      text: "x", lines: [], out: { blocks: [] }, pageType: "single",
+      timing: {}, bankById: null
+    });
+  } catch (e) { payload = null; }
+  check("payload 构建成功", payload !== null);
+  check("photoDataUrl 原样透传（同一字符串，无二次压缩）", payload && payload.photoDataUrl === DATA_URL);
+  check("payload 含 sampleId 与 manifest", payload && payload.sampleId === "20260923_171530_ab12cd"
+    && payload.manifest && payload.manifest.schemaVersion === 1);
+  let threw = false;
+  try {
+    MSQSample.buildUploadPayload({ photoDataUrl: "data:image/png;base64,AAAA", sampleId: "x" });
+  } catch (e) { threw = true; }
+  check("非 jpeg dataUrl 拒绝（collector 侧同样 400 兜底）", threw);
+  check("joinUrl 拼接 /health", MSQSample.joinUrl("http://10.0.2.2:8787/", "/health") === "http://10.0.2.2:8787/health");
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");

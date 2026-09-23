@@ -1145,8 +1145,10 @@
      与单题拍照完全独立：单题路径 searchQuestionsByOcr 保持原样，这里走
      searchPageQuestionsByOcr（先分题，再只在所选题型的子集里匹配）。 */
   var batchIndex = null;
+  var batchIndexById = null;      /* 采集诊断用：id -> batchIndex 项（只读） */
   var batchPageType = "single";   /* 会话内保持，不写 localStorage；冷启动回到单选 */
   var lastBatch = null;
+  var lastSampleUpload = null;    /* 采集旁路：结果页打开期间保留当次 dataUrl 供重试 */
 
   function setBatchStatus(text) {
     var el = $("batch-status");
@@ -1412,11 +1414,15 @@
     setBatchStatus("正在识别整页文字…");
     var totalStart = performance.now();
     var ocrMs = 0, text = "", lines = [];
+    var ocrWidth = 0, ocrHeight = 0;
+    var dataUrl = String(photo.dataUrl || "");
     try {
-      var b64 = String(photo.dataUrl || "").split(",")[1] || "";
+      var b64 = dataUrl.split(",")[1] || "";
       var res = await Ocr.recognizeText({ base64: b64 });
       text = (res && res.text) || "";
       ocrMs = (res && res.ms) || 0;
+      ocrWidth = (res && res.width) || 0;
+      ocrHeight = (res && res.height) || 0;
       lines = normalizeOcrLines(res);
     } catch (e) {
       setBatchStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
@@ -1432,11 +1438,15 @@
     var tMatch = performance.now();
     var out = MSQ.searchPageQuestionsByOcr(batchIndex, lines, batchPageType, { limit: 3 });
     var matchMs = Math.round(performance.now() - tMatch);
-    setBatchStatus("识别完成（全程本地，图片不保存不上传）");
-    renderBatchResults({
+    var collecting = typeof MSQSample !== "undefined" && MSQSample &&
+      MSQSample.shouldCollect(sampleSettings());
+    setBatchStatus(collecting ? "识别完成" : "识别完成（全程本地，图片不保存不上传）");
+    var state = {
       lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
       totalMs: Math.round(performance.now() - totalStart), out: out, pageType: batchPageType
-    });
+    };
+    renderBatchResults(state);
+    collectAndUploadSample(state, dataUrl, ocrWidth, ocrHeight);
   }
 
   /* 整页结果 → 整页拍照 → 搜题 → 首页 */
@@ -1447,6 +1457,132 @@
 
   function handleBatchBack() {
     show("view-search");
+  }
+
+  /* ---------------- 真实样本采集旁路（仅开发调试，默认 OFF） ----------------
+     整条链路是非阻塞旁路：构造/上传的任何失败都只体现在状态条上，
+     绝不影响 OCR、结果展示、返回、再次拍摄。
+     photo.dataUrl 由 lastSampleUpload 持有（内存，不进 localStorage），
+     结果页打开期间可手动重试；App 重启后不做离线补传（V1 约定）。 */
+  function sampleSettings() {
+    return (typeof MSQSample !== "undefined" && MSQSample)
+      ? MSQSample.loadSettings() : { enabled: false, serverUrl: "" };
+  }
+
+  function initSamplePanel() {
+    var box = $("sample-panel");
+    if (!box || typeof MSQSample === "undefined" || !MSQSample) { return; }
+    var s = sampleSettings();
+    $("sample-enabled").checked = s.enabled;
+    $("sample-server").value = s.serverUrl;
+    var save = function () {
+      MSQSample.saveSettings(null, {
+        enabled: $("sample-enabled").checked,
+        serverUrl: $("sample-server").value
+      });
+      updateSampleToolsVisibility();
+    };
+    $("sample-enabled").addEventListener("change", save);
+    $("sample-server").addEventListener("change", save);
+    $("btn-sample-test").addEventListener("click", function () {
+      var url = $("sample-server").value.trim();
+      MSQSample.saveSettings(null, { enabled: $("sample-enabled").checked, serverUrl: url });
+      var status = $("sample-test-status");
+      status.textContent = "正在连接…";
+      status.classList.remove("hidden");
+      MSQSample.testConnection(url, 5000).then(function (r) {
+        status.textContent = r.message;
+      });
+    });
+  }
+
+  function initSampleResultTools() {
+    var retry = $("btn-sample-retry");
+    var flag = $("btn-sample-flag");
+    if (retry) {
+      retry.addEventListener("click", function () {
+        if (!lastSampleUpload) { return; }
+        var target = lastSampleUpload;
+        setSampleUploadStatus("样本上传中…", false);
+        MSQSample.postJSON(MSQSample.joinUrl(target.serverUrl, "/api/sample"), target.payload, 20000)
+          .then(function () {
+            setSampleUploadStatus("样本已保存：" + target.payload.sampleId, false);
+          })
+          .catch(function () {
+            setSampleUploadStatus("样本上传失败", true);
+          });
+      });
+    }
+    if (flag) {
+      flag.addEventListener("click", function () {
+        if (!lastSampleUpload || flag.disabled) { return; }
+        flag.disabled = true;
+        MSQSample.postJSON(MSQSample.joinUrl(lastSampleUpload.serverUrl, "/api/feedback"),
+          { sampleId: lastSampleUpload.payload.sampleId, userFlag: "has_error" }, 10000)
+          .then(function () {
+            flag.textContent = "⚑ 已反馈 ✓";
+          })
+          .catch(function () {
+            flag.disabled = false;   /* 失败静默恢复，不打扰答题 */
+          });
+      });
+    }
+  }
+
+  function setSampleUploadStatus(text, showRetry) {
+    var el = $("batch-sample-status");
+    var retry = $("btn-sample-retry");
+    if (!el) { return; }
+    el.textContent = text;
+    el.classList.remove("hidden");
+    if (retry) { retry.classList.toggle("hidden", !showRetry); }
+  }
+
+  function updateSampleToolsVisibility() {
+    var box = $("batch-sample-tools");
+    var flag = $("btn-sample-flag");
+    var on = sampleSettings().enabled;
+    if (box) { box.classList.toggle("hidden", !on); }
+    if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
+  }
+
+  function collectAndUploadSample(state, photoDataUrl, ocrWidth, ocrHeight) {
+    updateSampleToolsVisibility();
+    if (typeof MSQSample === "undefined" || !MSQSample) { return; }
+    var s = sampleSettings();
+    if (!MSQSample.shouldCollect(s)) { return; }   /* OFF：与改动前完全一致 */
+    var payload;
+    try {
+      payload = MSQSample.buildUploadPayload({
+        photoDataUrl: photoDataUrl,
+        sampleId: MSQSample.makeSampleId(new Date()),
+        capturedAt: new Date().toISOString(),
+        pageType: state.pageType,
+        text: state.text,
+        lines: state.lines,
+        out: state.out,
+        ocrWidth: ocrWidth,
+        ocrHeight: ocrHeight,
+        timing: {
+          ocrMs: state.ocrMs, splitMs: state.splitMs,
+          matchMs: state.matchMs, totalMs: state.totalMs
+        },
+        bankById: batchIndexById
+      });
+    } catch (e) {
+      setSampleUploadStatus("样本上传失败", true);
+      return;
+    }
+    lastSampleUpload = { serverUrl: s.serverUrl, payload: payload };
+    setSampleUploadStatus("样本上传中…", false);
+    updateSampleToolsVisibility();
+    MSQSample.postJSON(MSQSample.joinUrl(s.serverUrl, "/api/sample"), payload, 20000)
+      .then(function () {
+        setSampleUploadStatus("样本已保存：" + payload.sampleId, false);
+      })
+      .catch(function () {
+        setSampleUploadStatus("样本上传失败", true);   /* 不向用户展示异常细节 */
+      });
   }
 
   /* ---------------- 清除记录 ---------------- */
@@ -1551,6 +1687,8 @@
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
     $("btn-take-page").addEventListener("click", startBatchPageSearch);
     initBatchTypes();
+    initSamplePanel();
+    initSampleResultTools();
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
@@ -1579,6 +1717,8 @@
     searchIndex = MSQ.buildSearchIndex(bank.questions);
     photoIndex = MSQ.buildOcrIndex(bank.questions);
     batchIndex = MSQ.buildBatchOcrIndex(bank.questions);
+    batchIndexById = {};
+    batchIndex.forEach(function (it) { batchIndexById[it.id] = it; });
     bindEvents();
     renderMenu();
     registerSW();

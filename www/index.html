@@ -116,6 +116,21 @@
       <p class="batch-tip">先点一次当前大题题型，再拍整页。页面中间出现“多选题 / 判断题”大标题时会自动切换题型，一页可以跨大块。</p>
       <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
       <p id="batch-status" class="search-count hidden"></p>
+      <details id="sample-panel" class="sample-panel">
+        <summary>测试样本采集</summary>
+        <label class="sample-row">
+          <input type="checkbox" id="sample-enabled">
+          <span>自动上传测试样本（仅开发调试）</span>
+        </label>
+        <div class="sample-row">
+          <input id="sample-server" type="url" placeholder="http://192.168.x.x:8787"
+                 autocomplete="off" spellcheck="false" inputmode="url">
+        </div>
+        <div class="sample-row">
+          <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
+        </div>
+        <p id="sample-test-status" class="sample-note hidden"></p>
+      </details>
     </main>
   </section>
 
@@ -129,6 +144,13 @@
       <div id="batch-summary" class="batch-summary"></div>
       <div id="batch-list"></div>
       <div id="batch-tools"></div>
+      <div id="batch-sample-tools" class="sample-tools hidden">
+        <p class="sample-line">
+          <span id="batch-sample-status" class="sample-note hidden"></span>
+          <button id="btn-sample-retry" class="linkbtn hidden" type="button">重试</button>
+        </p>
+        <button id="btn-sample-flag" class="linkbtn hidden" type="button">⚑ 标记本页有问题</button>
+      </div>
     </main>
   </section>
 
@@ -163,6 +185,7 @@
 <script src="data/questions.js"></script>
 <script src="data/explanations.js"></script>
 <script src="js/core.js"></script>
+<script src="js/sample-collector.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

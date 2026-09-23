@@ -46,3 +46,11 @@ testbench/private_questions.json
 
 # ---- Batch OCR Test Bench：自动基准测试产物（截图/GT/OCR输出/报告，禁止提交） ----
 testbench/.generated/
+
+# ---- 真实样本采集（本机数据与私有照片，禁止提交） ----
+real_samples/
+sample_collector.local.*
+*.local.json
+
+# ---- 本机 BAT 启动器（用户本机工具，仅 ignore 不删除） ----
+启动仿真考试测试台.bat

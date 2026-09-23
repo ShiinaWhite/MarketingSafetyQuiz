@@ -296,3 +296,15 @@ mark { background: #ffe58f; padding: 0 1px; border-radius: 2px; }
   border: 1px solid #c9d2dd; border-radius: 8px;
 }
 .total-line { text-align: center; color: #1565c0; font-weight: 700; margin-top: 10px; font-size: 15.5px; }
+
+/* ---- 测试样本采集（开发调试旁路，默认折叠/隐藏，不影响正式 UI） ---- */
+.sample-panel { margin-top: 20px; font-size: 14px; color: #55606b; }
+.sample-panel summary { cursor: pointer; color: #6b7683; font-size: 13px; }
+.sample-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.sample-row input[type="url"] {
+  flex: 1; min-width: 0; font-size: 14px; padding: 10px 12px;
+  border: 1px solid #d5dbe4; border-radius: 10px; background: #fff; color: #1a1a1a;
+}
+.sample-note { font-size: 13px; color: #6b7683; margin: 6px 0 0; }
+.sample-tools { margin-top: 14px; }
+.sample-tools .sample-line { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
