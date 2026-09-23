@@ -1218,6 +1218,46 @@ section("样本采集：AUTO 诊断字段（schemaVersion=1 增量）");
     !JSON.stringify(p2.manifest).includes("autoTypeConfidence"));
 }
 
+/* ---------- BATCH_DETAIL_NAVIGATION_V1：详情来源与返回（静态守卫） ----------
+   行为级 NAV-A~J 由 testbench/nav_test.html 在真实浏览器中覆盖（fake 插件 + 真实 DOM）；
+   这里用源码结构断言防止回归：统一返回入口、来源上下文、返回零重算零上传。 */
+section("导航：详情来源与返回（静态守卫）");
+{
+  const appSrc3 = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+  const fnOf = (sig, nextSig) => {
+    const s = appSrc3.indexOf(sig);
+    if (s < 0) { return ""; }
+    const e = nextSig ? appSrc3.indexOf(nextSig, s + 10) : appSrc3.indexOf("\n  function ", s + 10);
+    return appSrc3.slice(s, e > s ? e : undefined);
+  };
+  const openDetailFn = fnOf("function openSearchDetail(");
+  const backDetailFn = fnOf("function handleSearchDetailBack(");
+
+  check("NAV-S1 openSearchDetail 带 source 参数并记录 batch 上下文",
+    openDetailFn.includes("function openSearchDetail(id, source)") &&
+    openDetailFn.includes("batch-results") && openDetailFn.includes("batchWindowY"));
+  check("NAV-S2 Top3 候选点击传入 batch-results 来源",
+    appSrc3.includes('openSearchDetail(m.id, "batch-results")'));
+  check("NAV-S3 返回按来源路由：batch → show(view-batch-results)，否则 → search",
+    backDetailFn.includes("detailReturnContext.source === \"batch-results\"") &&
+    backDetailFn.includes('show("view-batch-results")') &&
+    backDetailFn.includes('show("view-search")'));
+  check("NAV-S4 返回恢复双通道滚动位置（容器 + window）",
+    backDetailFn.includes("batchScrollTop") && backDetailFn.includes("batchWindowY") &&
+    backDetailFn.includes("requestAnimationFrame"));
+  const forbidden = ["recognizeText", "searchPageQuestionsByOcr", "recomputePageFromLines",
+    "splitPageOcrLines", "renderBatchResults", "makeSampleId", "postJSON"];
+  check("NAV-F/G/H 静态：详情返回零 OCR/零重算/零上传",
+    forbidden.every((k) => !backDetailFn.includes(k)), forbidden.filter((k) => backDetailFn.includes(k)).join(","));
+  check("NAV-A/B 统一入口：详情返回按钮与系统 back 共用 handleSearchDetailBack",
+    appSrc3.includes('$("btn-detail-back").addEventListener("click", handleSearchDetailBack)') &&
+    (appSrc3.match(/case "view-search-detail": handleSearchDetailBack\(\); return;/g) || []).length === 1);
+  check("NAV-C Android back 唯一监听（registerSystemBack 单次注册）",
+    (appSrc3.match(/addListener\("backButton"/g) || []).length === 1);
+  check("NAV-J 一次 back 一层：batch-results 层只走 handleBatchResultsBack",
+    (appSrc3.match(/case "view-batch-results": handleBatchResultsBack\(\); return;/g) || []).length === 1);
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");
