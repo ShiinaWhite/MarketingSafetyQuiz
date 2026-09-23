@@ -165,6 +165,44 @@ async function main() {
       padded.ocr.text = "x".repeat(5000); /* 确保 body > 1KB 触发上限 */
       r = await request(smallPort, "POST", "/api/sample", { sampleId: "20260923_171535_ba12cd", photoDataUrl: dataUrl, manifest: padded });
       check("超限 body → 413", r.status === 413);
+    /* ---- 更新接口（只读；channel 白名单 + 固定文件名） ---- */
+    section("GET /api/update/*");
+    const updatesRoot = fs.mkdtempSync(path.join(os.tmpdir(), "msq-updates-test-"));
+    const devDir = path.join(updatesRoot, "dev");
+    fs.mkdirSync(devDir, { recursive: true });
+    const updApk = makeFixtureJpeg(320, 240); /* 任意字节即可，服务器只透传 */
+    fs.writeFileSync(path.join(devDir, "营销安规刷题-DEV.apk"), updApk);
+    fs.writeFileSync(path.join(devDir, "latest.json"), JSON.stringify({
+      schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+      versionCode: 3, versionName: "1.0.3-dev", apkUrl: "/api/update/dev/apk",
+      sha256: sha256Hex(updApk), size: updApk.length, publishedAt: "2026-09-24T00:00:00Z", notes: "t"
+    }));
+
+    const collector2 = createCollector({ out: tmp, updatesRoot: updatesRoot });
+    const port2 = await collector2.listen("127.0.0.1", 0);
+    try {
+      r = await request(port2, "GET", "/api/update/dev/latest");
+      check("latest 200 + no-store", r.status === 200 && (r.headers["cache-control"] || "").includes("no-store"));
+      const latest = JSON.parse(r.body.toString("utf8"));
+      check("latest 内容透传（schemaVersion/channel/versionCode）",
+        latest.schemaVersion === 1 && latest.channel === "dev" && latest.versionCode === 3);
+      r = await request(port2, "GET", "/api/update/dev/apk");
+      check("apk 200 + 正确 Content-Type/Length",
+        r.status === 200 &&
+        r.headers["content-type"] === "application/vnd.android.package-archive" &&
+        Number(r.headers["content-length"]) === updApk.length);
+      check("apk 字节完全一致", r.body.equals(updApk));
+      r = await request(port2, "GET", "/api/update/nosuch/latest");
+      check("未知 channel → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/stable/latest");
+      check("stable channel 无文件 → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/..%2F..%2F/latest");
+      check("channel 穿越尝试 → 404（白名单外）", r.status === 404);
+      r = await request(port2, "GET", "/api/update/dev/nothere");
+      check("更新接口其它路径 → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/dev/apk?file=..%2F..%2Fx");
+      check("查询参数被忽略（无任意文件读取）", r.status === 200 && r.body.equals(updApk));
+    } finally { collector2.server.close(); fs.rmSync(updatesRoot, { recursive: true, force: true }); }
     } finally {
       small.server.close();
       fs.rmSync(tmp2, { recursive: true, force: true });
@@ -203,7 +241,8 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  console.log("\n==============================================");
+
+    console.log("\n==============================================");
   if (fails.length) {
     console.log(`结果：${fails.length} 项失败 ✗`);
     fails.forEach((f) => console.log("  FAIL: " + f));

@@ -3,9 +3,14 @@
    零第三方依赖，仅 Node 标准库。启动：
      node tools/sample_collector/server.js [--host 0.0.0.0] [--port 8787] [--out <dir>]
    API：
-     GET  /health         存活探测
-     POST /api/sample     { sampleId, photoDataUrl, manifest } → 落盘 capture.jpg + run.json
-     POST /api/feedback   { sampleId, userFlag, screenNumbers? } → 落盘 feedback.json
+     GET  /health                    存活探测
+     POST /api/sample                { sampleId, photoDataUrl, manifest } → 落盘 capture.jpg + run.json
+     POST /api/feedback              { sampleId, userFlag, screenNumbers? } → 落盘 feedback.json
+     GET  /api/update/<channel>/latest   应用内更新 manifest（只读，channel ∈ {dev, stable}）
+     GET  /api/update/<channel>/apk      应用内更新 APK（只读，固定文件名映射）
+   更新接口安全：
+     channel 白名单 + 固定文件名映射，无任意路径/查询参数，纯只读；
+     每次请求实时读盘，发布新 APK 后 Collector 无需重启。
    安全：
      - sampleId 必须严格匹配 YYYYMMDD_HHMMSS_hex6，目录名由其派生，天然阻断 ../ 穿越；
      - 只接受 image/jpeg data URL；body 有大小上限；不执行任何上传内容；无任意文件读取接口；
@@ -160,6 +165,48 @@ function sendJSON(res, status, obj) {
   res.end(body);
 }
 
+/* ---------------- 应用内更新（只读） ----------------
+   channel 白名单 + 固定文件名映射：不存在任意路径读取/目录穿越面。
+   文件每次请求实时读盘：publish.js 原子替换后 Collector 无需重启。 */
+const UPDATE_CHANNELS = {
+  dev: "营销安规刷题-DEV.apk",
+  stable: "营销安规刷题.apk"
+};
+
+function sendLatest(res, updatesRoot, channel) {
+  const file = path.join(updatesRoot, channel, "latest.json");
+  let raw;
+  try { raw = fs.readFileSync(file); } catch (e) {
+    sendJSON(res, 404, { ok: false, error: "update channel not available" });
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*"
+  });
+  res.end(raw);
+}
+
+function sendApk(res, updatesRoot, channel) {
+  const file = path.join(updatesRoot, channel, UPDATE_CHANNELS[channel]);
+  let stat;
+  try { stat = fs.statSync(file); } catch (e) {
+    sendJSON(res, 404, { ok: false, error: "update apk not available" });
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/vnd.android.package-archive",
+    "Content-Length": stat.size,
+    "Cache-Control": "no-store",
+    "ETag": '"' + stat.size + "-" + Math.floor(stat.mtimeMs) + '"',
+    "Access-Control-Allow-Origin": "*"
+  });
+  const stream = fs.createReadStream(file);
+  stream.on("error", function () { try { res.destroy(); } catch (e2) { /* 已断开 */ } });
+  stream.pipe(res);
+}
+
 function handleCollector(req, res, ctx) {
   const u = new URL(req.url, "http://localhost");
   const p = u.pathname;
@@ -177,6 +224,18 @@ function handleCollector(req, res, ctx) {
 
   if (req.method === "GET" && p === "/health") {
     sendJSON(res, 200, { ok: true, service: SERVICE, version: VERSION });
+    return;
+  }
+
+  const updateMatch = /^\/api\/update\/([^/]+)\/(latest|apk)$/.exec(p);
+  if (req.method === "GET" && updateMatch) {
+    const channel = decodeURIComponent(updateMatch[1]);
+    if (!Object.prototype.hasOwnProperty.call(UPDATE_CHANNELS, channel)) {
+      sendJSON(res, 404, { ok: false, error: "unknown update channel" });
+      return;
+    }
+    if (updateMatch[2] === "latest") { sendLatest(res, ctx.updatesRoot, channel); }
+    else { sendApk(res, ctx.updatesRoot, channel); }
     return;
   }
 
@@ -294,6 +353,7 @@ function createCollector(options) {
   const opts = options || {};
   const ctx = {
     outRoot: path.resolve(opts.out || path.join(__dirname, "..", "..", "real_samples")),
+    updatesRoot: path.resolve(opts.updatesRoot || path.join(__dirname, "..", "..", "release", "updates")),
     maxBodyBytes: opts.maxBodyBytes || DEFAULT_MAX_BODY_BYTES
   };
   const server = http.createServer(function (req, res) {
@@ -331,6 +391,9 @@ function printBanner(host, port, outRoot) {
   console.log("Health:");
   const first = lan.length ? lan[0].address : "127.0.0.1";
   console.log("  http://" + first + ":" + port + "/health");
+  console.log("");
+  console.log("Update (dev):");
+  console.log("  http://" + first + ":" + port + "/api/update/dev/latest");
   console.log("");
   console.log("Output:");
   console.log("  " + outRoot);
