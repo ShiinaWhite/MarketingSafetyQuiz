@@ -3,9 +3,17 @@
    零第三方依赖，仅 Node 标准库。启动：
      node tools/sample_collector/server.js [--host 0.0.0.0] [--port 8787] [--out <dir>]
    API：
-     GET  /health                    存活探测
+     GET  /health                    存活探测（匿名）
      POST /api/sample                { sampleId, photoDataUrl, manifest } → 落盘 capture.jpg + run.json
      POST /api/feedback              { sampleId, userFlag, screenNumbers? } → 落盘 feedback.json
+     GET  /api/update/<channel>/latest   应用内更新 manifest（只读，channel ∈ {dev, stable}）
+     GET  /api/update/<channel>/apk      应用内更新 APK（只读，固定文件名映射）
+
+   写接口认证（PUBLIC_SAMPLE_AUTH_V1）：
+     POST /api/sample、POST /api/feedback 需要 Authorization: Bearer <token>。
+     token 来源：环境变量 MSQ_SAMPLE_WRITE_TOKEN 优先，其次 .secrets/sample-write-token。
+     支持 CURRENT + PREVIOUS 双 token 轮换；secret 缺失时写接口 FAIL CLOSED（503），
+     绝不自动退回匿名写入。鉴权先于读取 body。
      GET  /api/update/<channel>/latest   应用内更新 manifest（只读，channel ∈ {dev, stable}）
      GET  /api/update/<channel>/apk      应用内更新 APK（只读，固定文件名映射）
    更新接口安全：
@@ -148,6 +156,7 @@ function parseArgs(argv) {
     else if (a === "--port") { args.port = Number(argv[++i]) || args.port; }
     else if (a === "--out") { args.out = argv[++i] || args.out; }
     else if (a === "--max-mb") { args.maxBodyBytes = (Number(argv[++i]) || 40) * 1024 * 1024; }
+    else if (a === "--write-tokens") { args.writeTokens = String(argv[++i] || "").split(",").filter(Boolean); }
     else if (a === "--help" || a === "-h") { args.help = true; }
   }
   return args;
@@ -163,6 +172,81 @@ function sendJSON(res, status, obj) {
     "Cache-Control": "no-store"
   });
   res.end(body);
+}
+
+/* ---------------- 写接口认证 + 轻量限流（PUBLIC_SAMPLE_AUTH_V1） ----------------
+   - 鉴权先于读取 body：认证失败立刻 401，不读 JPEG/不建目录/不写临时文件
+   - token 比较先比长度再 crypto.timingSafeEqual（恒定时间）
+   - 支持 CURRENT + PREVIOUS 双 token（轮换过渡）
+   - 限流为固定窗口计数（内存）：认证成功 sample 30/min、feedback 120/min；
+     未认证/失败统一 15/min（超出 429）
+   - 日志/响应绝不输出 token 内容 */
+
+const RATE_LIMIT_UNAUTH_PER_MIN = 15;
+const RATE_LIMIT_SAMPLE_PER_MIN = 30;
+const RATE_LIMIT_FEEDBACK_PER_MIN = 120;
+
+const rateBuckets = new Map();   // key → { windowStart, count }
+
+function rateLimit(key, limit, now) {
+  let bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.windowStart >= 60_000) {
+    bucket = { windowStart: now, count: 0 };
+    rateBuckets.set(key, bucket);
+    if (rateBuckets.size > 10_000) {
+      for (const [k, b] of rateBuckets) {
+        if (now - b.windowStart >= 120_000) { rateBuckets.delete(k); }
+      }
+    }
+  }
+  bucket.count += 1;
+  return bucket.count <= limit;
+}
+
+/* 真实客户端 IP：仅当请求带 CF-Ray（明显经 Cloudflare/Tunnel）才信任
+   CF-Connecting-IP；否则用 socket 地址。不信任客户端自填 X-Forwarded-For。 */
+function clientIp(req) {
+  if (req.headers["cf-ray"] && req.headers["cf-connecting-ip"]) {
+    return String(req.headers["cf-connecting-ip"]).slice(0, 64);
+  }
+  return (req.socket && req.socket.remoteAddress) || "unknown";
+}
+
+function safeTokenEqual(provided, expected) {
+  const a = Buffer.from(String(provided), "utf8");
+  const b = Buffer.from(String(expected), "utf8");
+  if (a.length !== b.length) { return false; }   // 先比长度
+  return crypto.timingSafeEqual(a, b);            // 再恒定时间比较
+}
+
+/* 校验 Authorization: Bearer <token>；对 CURRENT/PREVIOUS 逐一恒定时间比对。
+   返回 { ok } 或 { ok:false, fail: "malformed"|"invalid" }。 */
+function checkWriteAuth(req, ctx) {
+  if (ctx.allowAnonymousWrites) { return { ok: true, anonymous: true }; }
+  if (!ctx.writeTokens.length) {
+    return { ok: false, fail: "unavailable" };   // secret 缺失：FAIL CLOSED
+  }
+  const header = req.headers["authorization"] || "";
+  const m = /^Bearer\s+([A-Za-z0-9._-]{32,128})$/.exec(header);
+  if (!m) { return { ok: false, fail: "malformed" }; }
+  for (const token of ctx.writeTokens) {
+    if (safeTokenEqual(m[1], token)) { return { ok: true }; }
+  }
+  return { ok: false, fail: "invalid" };
+}
+
+function rejectWrite(res, ctx, req, code, error, extraHeaders) {
+  const ip = clientIp(req);
+  if (code === 401 && rateLimit("unauth:" + ip, RATE_LIMIT_UNAUTH_PER_MIN, Date.now()) === false) {
+    code = 429;
+    error = "rate limited";
+  }
+  const headers = Object.assign({
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*"
+  }, extraHeaders || {});
+  res.writeHead(code, headers);
+  res.end(JSON.stringify({ ok: false, error: error }));
 }
 
 /* ---------------- 应用内更新（只读） ----------------
@@ -242,13 +326,30 @@ function handleCollector(req, res, ctx) {
     return;
   }
 
-  if (req.method === "POST" && p === "/api/sample") {
-    handleSample(req, res, ctx);
-    return;
-  }
-
-  if (req.method === "POST" && p === "/api/feedback") {
-    handleFeedback(req, res, ctx);
+  const isSamplePost = req.method === "POST" && p === "/api/sample";
+  const isFeedbackPost = req.method === "POST" && p === "/api/feedback";
+  if (isSamplePost || isFeedbackPost) {
+    /* PUBLIC_SAMPLE_AUTH_V1：鉴权先于读取 body（不读 JPEG/不建目录/不写临时文件） */
+    const auth = checkWriteAuth(req, ctx);
+    if (!auth.ok) {
+      const now = Date.now();
+      const ip = clientIp(req);
+      if (rateLimit("unauth:" + ip, RATE_LIMIT_UNAUTH_PER_MIN, now)) {
+        rejectWrite(res, ctx, req, 401, "unauthorized", { "WWW-Authenticate": "Bearer" });
+      } else {
+        rejectWrite(res, ctx, req, 429, "rate limited");
+      }
+      return;
+    }
+    const now = Date.now();
+    const ip = clientIp(req);
+    const limit = isFeedbackPost ? RATE_LIMIT_FEEDBACK_PER_MIN : RATE_LIMIT_SAMPLE_PER_MIN;
+    if (!rateLimit("authed:" + ip + ":" + (isFeedbackPost ? "fb" : "sample"), limit, now)) {
+      rejectWrite(res, ctx, req, 429, "rate limited");
+      return;
+    }
+    if (isSamplePost) { handleSample(req, res, ctx); }
+    else { handleFeedback(req, res, ctx, ctx.maxFeedbackBodyBytes); }
     return;
   }
 
@@ -413,8 +514,11 @@ function cleanBlockFields(block) {
   };
 }
 
-function handleFeedback(req, res, ctx) {
-  readBody(req, ctx.maxBodyBytes).then(function (raw) {
+function handleFeedback(req, res, ctx, maxBodyBytes) {
+  readBody(req, maxBodyBytes || ctx.maxBodyBytes).then(function (raw) {
+    if (raw.length > (maxBodyBytes || ctx.maxBodyBytes)) {
+      sendJSON(res, 413, { ok: false, error: "payload too large" }); return;
+    }
     let body;
     try { body = JSON.parse(raw.toString("utf8")); }
     catch (e) { sendJSON(res, 400, { ok: false, error: "malformed JSON" }); return; }
@@ -531,7 +635,12 @@ function createCollector(options) {
   const ctx = {
     outRoot: path.resolve(opts.out || path.join(__dirname, "..", "..", "real_samples")),
     updatesRoot: path.resolve(opts.updatesRoot || path.join(__dirname, "..", "..", "release", "updates")),
-    maxBodyBytes: opts.maxBodyBytes || DEFAULT_MAX_BODY_BYTES
+    maxBodyBytes: opts.maxBodyBytes || DEFAULT_MAX_BODY_BYTES,
+    maxFeedbackBodyBytes: opts.maxFeedbackBodyBytes || (1 * 1024 * 1024),
+    /* 写接口 token（CURRENT 在前，PREVIOUS 在后）。空数组 = FAIL CLOSED。
+       allowAnonymousWrites 仅限测试显式开启，生产绝不使用。 */
+    writeTokens: Array.isArray(opts.writeTokens) ? opts.writeTokens.filter(Boolean) : [],
+    allowAnonymousWrites: opts.allowAnonymousWrites === true
   };
   const server = http.createServer(function (req, res) {
     try {
@@ -580,6 +689,7 @@ module.exports = {
   SERVICE: SERVICE,
   VERSION: VERSION,
   createCollector: createCollector,
+  checkWriteAuth: checkWriteAuth,
   validSampleId: validSampleId,
   decodeJpegDataUrl: decodeJpegDataUrl,
   jpegSize: jpegSize,
@@ -588,15 +698,43 @@ module.exports = {
   lanIPv4Addresses: lanIPv4Addresses
 };
 
+/* 写接口 token：环境变量优先，其次 .secrets/sample-write-token。
+   均缺失 → writeTokens 为空 → 写接口 FAIL CLOSED（503），读接口不受影响。 */
+function loadWriteTokens(explicit) {
+  if (Array.isArray(explicit)) { return explicit.filter(Boolean); }
+  const fromEnv = (process.env.MSQ_SAMPLE_WRITE_TOKEN || "").trim();
+  if (fromEnv) { return [fromEnv]; }
+  try {
+    const file = path.resolve(__dirname, "..", "..", ".secrets", "sample-write-token");
+    const fromFile = fs.readFileSync(file, "utf8").trim();
+    if (fromFile) { return [fromFile]; }
+  } catch (e) { /* 文件不存在 */ }
+  return [];
+}
+
 if (require.main === module) {
   const args = parseArgs(process.argv);
   if (args.help) {
     console.log("node tools/sample_collector/server.js [--host 0.0.0.0] [--port 8787] [--out <dir>] [--max-mb 40]");
     process.exit(0);
   }
-  const collector = createCollector({ out: args.out, maxBodyBytes: args.maxBodyBytes });
+  const writeTokens = loadWriteTokens(args.writeTokens);
+  if (!writeTokens.length) {
+    console.warn("[警告] 未找到样本写接口 secret（MSQ_SAMPLE_WRITE_TOKEN / .secrets/sample-write-token）：");
+    console.warn("[警告] 写接口 FAIL CLOSED —— POST /api/sample、/api/feedback 将返回 503。");
+    console.warn("[警告] 运行 node tools/sample_auth/init_secret.js 生成后重启 Collector。");
+  }
+  const collector = createCollector({
+    out: args.out,
+    maxBodyBytes: args.maxBodyBytes,
+    writeTokens: writeTokens
+  });
   collector.listen(args.host, args.port).then(function (port) {
     printBanner(args.host, port, collector.outRoot);
+    if (!writeTokens.length) {
+      console.log("");
+      console.log("[警告] 写接口处于 FAIL CLOSED 状态（见上方警告）。");
+    }
   }, function (e) {
     console.error("failed to start: " + (e && e.message));
     process.exit(1);

@@ -54,3 +54,6 @@ sample_collector.local.*
 
 # ---- 本机 BAT 启动器（用户本机工具，仅 ignore 不删除） ----
 启动仿真考试测试台.bat
+
+# ---- 公网样本写接口认证 Secret（本机文件，绝不入库） ----
+.secrets/

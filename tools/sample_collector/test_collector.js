@@ -71,7 +71,7 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "msq-collector-test-"));
   let server = null;
   try {
-    const collector = createCollector({ out: tmp });
+    const collector = createCollector({ out: tmp, allowAnonymousWrites: true });
     const port = await collector.listen("127.0.0.1", 0);
     server = collector.server;
 
@@ -168,7 +168,7 @@ async function main() {
     /* ---- 超限 body（独立实例 + 独立临时目录，低上限） ---- */
     section("body 大小上限");
     const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "msq-collector-test2-"));
-    const small = createCollector({ out: tmp2, maxBodyBytes: 1024 });
+    const small = createCollector({ out: tmp2, maxBodyBytes: 1024, allowAnonymousWrites: true });
     const smallPort = await small.listen("127.0.0.1", 0);
     try {
       const padded = JSON.parse(JSON.stringify(manifest));
@@ -188,7 +188,7 @@ async function main() {
       sha256: sha256Hex(updApk), size: updApk.length, publishedAt: "2026-09-24T00:00:00Z", notes: "t"
     }));
 
-    const collector2 = createCollector({ out: tmp, updatesRoot: updatesRoot });
+    const collector2 = createCollector({ out: tmp, updatesRoot: updatesRoot, allowAnonymousWrites: true });
     const port2 = await collector2.listen("127.0.0.1", 0);
     try {
       r = await request(port2, "GET", "/api/update/dev/latest");
@@ -296,6 +296,79 @@ async function main() {
     r = await request(port, "POST", "/api/feedback",
       { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: 1, block: "oops" });
     check("block 字段非对象 → 400", r.status === 400);
+
+    /* ---- 写接口认证（PUBLIC_SAMPLE_AUTH_V1：AUTH-1~10 + 限流） ---- */
+    section("POST 写接口认证");
+    const authRoot = fs.mkdtempSync(path.join(os.tmpdir(), "msq-auth-test-"));
+    const CURRENT = "a".repeat(64);
+    const PREVIOUS = "b".repeat(64);
+    const authCollector = createCollector({
+      out: authRoot,
+      updatesRoot: authRoot,
+      writeTokens: [CURRENT, PREVIOUS],
+      allowAnonymousWrites: false
+    });
+    const authPort = await authCollector.listen("127.0.0.1", 0);
+    const authDir = path.join(authRoot, "2026-09-23", "20260923_180000_aa11aa");
+    try {
+      const post = (body, headers) => request(authPort, "POST", "/api/sample", body, headers);
+      const bearerHeaders = (tok) => ({ Authorization: "Bearer " + tok });
+
+      let ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest }, {});
+      check("AUTH-1 无 Authorization → 401", ra.status === 401 &&
+        JSON.parse(ra.body.toString("utf8")).error === "unauthorized");
+      check("AUTH-9 无 token 请求未创建任何文件/目录", !fs.existsSync(authDir));
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders("c".repeat(64)));
+      check("AUTH-2 错误 token → 401", ra.status === 401);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        { Authorization: "Basic " + "a".repeat(64) });
+      check("AUTH-3 错误 scheme → 401", ra.status === 401);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        { Authorization: "Bearer " });
+      check("AUTH-4 空 token → 401", ra.status === 401);
+      check("AUTH-9b 多次失败仍未创建文件/目录", !fs.existsSync(authDir));
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(CURRENT));
+      check("AUTH-5 正确 token（CURRENT）/api/sample → 201", ra.status === 201);
+      check("AUTH-9c 认证成功后目录/文件正常创建", fs.existsSync(path.join(authDir, "capture.jpg")));
+
+      let rf = await request(authPort, "POST", "/api/feedback",
+        { sampleId: "20260923_180000_aa11aa", userFlag: "has_error" }, bearerHeaders(PREVIOUS));
+      check("AUTH-6 正确 token（PREVIOUS）/api/feedback → 200", rf.status === 200);
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(PREVIOUS));
+      check("AUTH-7 正确 token 重复同内容 sample → 200 alreadyExists",
+        ra.status === 200 && JSON.parse(ra.body.toString("utf8")).alreadyExists === true);
+
+      const jpgB = makeFixtureJpeg(320, 240);
+      ra = await post({ sampleId: "20260923_180000_aa11aa",
+        photoDataUrl: "data:image/jpeg;base64," + jpgB.toString("base64"), manifest },
+        bearerHeaders(CURRENT));
+      check("AUTH-8 正确 token 但内容冲突 → 409", ra.status === 409);
+
+      const tokenLeak = JSON.stringify(ra.headers) + ra.body.toString("utf8");
+      check("AUTH-10 响应头/体不包含 token 内容",
+        tokenLeak.indexOf(CURRENT) < 0 && tokenLeak.indexOf(PREVIOUS) < 0);
+
+      /* 未认证限流：AUTH-1~4 + 下面循环会累计 unauth 计数，超过 15/min → 429 */
+      let saw429 = false;
+      for (let i = 0; i < 14; i++) {
+        ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest }, {});
+        if (ra.status === 429) { saw429 = true; break; }
+      }
+      check("RATE 未认证请求超限 → 429", saw429 || ra.status === 429);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(CURRENT));
+      check("RATE 认证成功维度独立计数（不受 unauth 限流影响）",
+        ra.status === 201 || ra.status === 200 || ra.status === 409);
+    } finally {
+      authCollector.server.close();
+      fs.rmSync(authRoot, { recursive: true, force: true });
+    }
 
     /* ---- 目录净度与穿越隔离 ---- */
     section("目录净度");
