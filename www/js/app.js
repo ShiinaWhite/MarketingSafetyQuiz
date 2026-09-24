@@ -1280,7 +1280,75 @@
     return d;
   }
 
-  function batchRow(b) {
+  /* 长按标错（REAL_SAMPLE_FEEDBACK_V2）：短按仍展开/收起详情，长按只反馈。
+     移动超过阈值取消计时器（滚动页面不误触）；长按后阻止合成 click。 */
+  var FEEDBACK_LONG_PRESS_MS = 600;
+  var FEEDBACK_MOVE_CANCEL_PX = 12;
+
+  function bindLongPress(el, onLongPress) {
+    var timer = null;
+    var startX = 0;
+    var startY = 0;
+    /* 长按后短时间内的合成 click 抑制窗（自动过期，不吞用户下一次真实 tap） */
+    var suppressClickUntil = 0;
+    el.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    el.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      timer = setTimeout(function () {
+        timer = null;
+        suppressClickUntil = Date.now() + 600;
+        onLongPress();
+      }, FEEDBACK_LONG_PRESS_MS);
+    }, { passive: true });
+    el.addEventListener("touchmove", function (e) {
+      if (!timer) { return; }
+      var dx = e.touches[0].clientX - startX;
+      var dy = e.touches[0].clientY - startY;
+      if (dx * dx + dy * dy > FEEDBACK_MOVE_CANCEL_PX * FEEDBACK_MOVE_CANCEL_PX) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }, { passive: true });
+    el.addEventListener("touchend", function (e) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (Date.now() < suppressClickUntil) {
+        e.preventDefault();   /* 阻止长按后的合成 click */
+      }
+    }, { passive: false });
+    el.addEventListener("touchcancel", function () {
+      if (timer) { clearTimeout(timer); timer = null; }
+    });
+  }
+
+  function updateRowWrongMark(rowEl, marked) {
+    if (!rowEl) { return; }
+    var mark = rowEl.querySelector(".batch-wrongmark");
+    if (marked && !mark) {
+      mark = document.createElement("span");
+      mark.className = "batch-wrongmark";
+      mark.textContent = "已标错";
+      rowEl.appendChild(mark);
+    } else if (!marked && mark) {
+      mark.parentNode.removeChild(mark);
+    }
+  }
+
+  function showFeedbackToast(msg) {
+    var toast = document.createElement("div");
+    toast.className = "fb-toast";
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(function () {
+      if (toast.parentNode) { toast.parentNode.removeChild(toast); }
+    }, 1600);
+  }
+
+  function batchRow(b, blockIndex) {
     var wrap = document.createElement("div");
     var row = document.createElement("button");
     row.type = "button";
@@ -1296,31 +1364,18 @@
     row.appendChild(no);
     row.appendChild(ans);
     var detail = batchDetail(b);
+    var suppressClickUntil = 0;
     row.addEventListener("click", function () {
+      if (Date.now() < suppressClickUntil) { return; }   /* 长按抑制窗内的合成 click */
       var open = detail.classList.toggle("hidden") === false;
       row.classList.toggle("open", open);
+    });
+    bindLongPress(row, function () {
+      toggleBlockFeedback(blockIndex, b, row);
     });
     wrap.appendChild(row);
     wrap.appendChild(detail);
     return wrap;
-  }
-
-  /* 折叠区：整页 OCR 原文 + 行坐标 / 分题结果（默认折叠，只用于排查） */
-  function batchCollapsible(parent, title, buildBody) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "explain-btn";
-    btn.textContent = title + " ▾";
-    var body = document.createElement("div");
-    body.className = "explain-body hidden";
-    buildBody(body);
-    btn.addEventListener("click", function () {
-      var open = body.classList.toggle("hidden") === false;
-      btn.textContent = title + (open ? " ▴" : " ▾");
-    });
-    parent.appendChild(btn);
-    parent.appendChild(body);
-    return body;
   }
 
   function appendBatchTools(state) {
@@ -1333,49 +1388,8 @@
     again.style.marginBottom = "12px";
     again.addEventListener("click", function () { startBatchPageSearch(); });
     tools.appendChild(again);
-
-    batchCollapsible(tools, "查看整页 OCR 文字", function (body) {
-      var sec = document.createElement("div");
-      sec.className = "explain-sec";
-      var head = document.createElement("p");
-      head.className = "explain-text";
-      head.textContent = "共 " + state.lines.length + " 行（含坐标）";
-      sec.appendChild(head);
-      state.lines.slice(0, 200).forEach(function (l) {
-        var p = document.createElement("p");
-        p.className = "batch-ocr-line";
-        var coord = (l.top === undefined || l.top === null)
-          ? ""
-          : ("  [" + Math.round(l.left) + "," + Math.round(l.top) + "→" + Math.round(l.right) + "," + Math.round(l.bottom) + "]");
-        p.textContent = l.text + coord;
-        sec.appendChild(p);
-      });
-      var full = document.createElement("p");
-      full.className = "explain-text";
-      full.textContent = "—— 全文 ——\n" + (state.text || "（无）");
-      sec.appendChild(full);
-      body.appendChild(sec);
-    });
-
-    batchCollapsible(tools, "查看分题结果", function (body) {
-      var sec = document.createElement("div");
-      sec.className = "explain-sec";
-      var srcName = { ocr: "ocr", repaired: "repaired（序列校正）", inferred: "inferred", unknown: "unknown（无题号）" };
-      state.out.blocks.forEach(function (b, i) {
-        var p = document.createElement("p");
-        p.className = "explain-text";
-        p.textContent = "block#" + (i + 1) +
-          "\nOCR题号：" + (b.rawScreenNumber != null ? b.rawScreenNumber : "（无）") +
-          "\n最终题号：" + (b.screenNumber != null ? b.screenNumber : b.label) +
-          "\n题号来源：" + (srcName[b.numberSource] || b.numberSource || "ocr") +
-          "\n" + (BATCH_TYPE_NAMES[b.type] || b.type) + " ｜ y=" + Math.round(b.top || 0) + "~" + Math.round(b.bottom || 0) +
-          " ｜ " + b.confidence + (b.rawScreenNumber != null && b.screenNumber != null &&
-            String(b.rawScreenNumber) !== String(b.screenNumber) ? "（原识别 " + b.rawScreenNumber + " → 已校正）" : "") +
-          "\n" + (b.rawText || "");
-        sec.appendChild(p);
-      });
-      body.appendChild(sec);
-    });
+    /* OCR 原文 / 分题明细等调试数据不再占正式结果页 UI，
+       但仍完整保存在 run.json（ocr.text/ocr.lines/blocks/Top3/scores）。 */
   }
 
   /* 结果页切题型：只用已保存的 OCR lines 重跑 split + match，绝不重新拍照、
@@ -1394,13 +1408,19 @@
       { limit: 3, previousType: lastResolvedPageType });
     var matchMs = Math.round(performance.now() - tMatch);
     lastResolvedPageType = r.resolved.type;
-    renderBatchResults({
+    /* 切题型产生新的重新计算结果：使用新 sampleId 重新采集（run.json 记录最终
+       展示结果），反馈状态随新 sample 重置；旧 sample 已保存的反馈不受影响，
+       也不把旧 blockIndex 映射到重新分块后的新 block。 */
+    var switchState = {
       lines: lines, text: lastBatch.text, ocrMs: lastBatch.ocrMs,
       splitMs: splitMs, matchMs: matchMs, totalMs: lastBatch.ocrMs + splitMs + matchMs,
       out: r.out, pageType: r.resolved.type, pageTypeMode: mode, resolved: r.resolved,
       suggestion: null, dataUrl: lastBatch.dataUrl,
-      ocrWidth: lastBatch.ocrWidth, ocrHeight: lastBatch.ocrHeight
-    });
+      ocrWidth: lastBatch.ocrWidth, ocrHeight: lastBatch.ocrHeight,
+      sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
+    };
+    renderBatchResults(switchState);
+    collectAndUploadSample(switchState);
   }
 
   /* 结果页顶部题型行：自动识别：X题 [修改] / 题型：X（手动）[切换]。
@@ -1436,7 +1456,7 @@
     if (isAuto && resolved.confidence === "ambiguous") {
       var hint = document.createElement("p");
       hint.className = "batch-hint";
-      hint.textContent = "题型判断不确定，可在下方切换题型立即重算（不会重新拍照）";
+      hint.textContent = "题型判断不确定，可在上方切换题型重新计算";
       wrap.appendChild(hint);
       row.classList.remove("hidden");   /* 不确定时直接展开，一键重算 */
     }
@@ -1492,7 +1512,7 @@
       state.splitMs + "ms · 匹配 " + state.matchMs + "ms · 合计 " + state.totalMs + "ms）";
     summary.appendChild(sub);
     summary.appendChild(buildBatchTypeLine(state));
-    blocks.forEach(function (b) { list.appendChild(batchRow(b)); });
+    blocks.forEach(function (b, i) { list.appendChild(batchRow(b, i)); });
     appendBatchTools(state);
   }
 
@@ -1575,7 +1595,8 @@
       lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
       totalMs: Math.round(performance.now() - totalStart), out: out,
       pageType: resolved.type, pageTypeMode: batchPageType, resolved: resolved,
-      suggestion: suggestion, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight
+      suggestion: suggestion, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight,
+      sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
     };
     renderBatchResults(state);
     collectAndUploadSample(state);
@@ -1640,6 +1661,7 @@
           .then(function () {
             target.uploaded = true;
             setSampleUploadStatus("样本已保存：" + target.payload.sampleId, false);
+            flushFeedbackIfDirty();
           })
           .catch(function () {
             setSampleUploadStatus("样本上传失败", true);
@@ -1647,19 +1669,177 @@
       });
     }
     if (flag) {
-      flag.addEventListener("click", function () {
-        if (!lastSampleUpload || flag.disabled) { return; }
-        flag.disabled = true;
-        MSQSample.postJSON(MSQSample.joinUrl(lastSampleUpload.serverUrl, "/api/feedback"),
-          { sampleId: lastSampleUpload.payload.sampleId, userFlag: "has_error" }, 10000)
-          .then(function () {
-            flag.textContent = "⚑ 已反馈 ✓";
-          })
-          .catch(function () {
-            flag.disabled = false;   /* 失败静默恢复，不打扰答题 */
-          });
-      });
+      flag.addEventListener("click", toggleFeedbackPanel);
     }
+  }
+
+  /* ---------------- 反馈（REAL_SAMPLE_FEEDBACK_V2） ----------------
+     页面级 = 结构性问题（分类多选，可修改/清除）；题目级 = 长按标错/再长按撤销。
+     反馈状态绑定 sampleId（存于 lastSampleUpload.feedback，新 sample 自动重置）。
+     服务器要求 sample 目录存在：sample 未上传成功期间反馈保存在内存并标记
+     feedbackDirty，上传/重试成功后全量补传；Collector 离线绝不影响答案展示。 */
+  function currentFeedback() {
+    return lastSampleUpload ? lastSampleUpload.feedback : null;
+  }
+
+  function postFeedbackRequest(reqObj) {
+    return MSQSample.postJSON(
+      MSQSample.joinUrl(lastSampleUpload.serverUrl, "/api/feedback"), reqObj, 10000
+    ).then(function () { return true; }, function () { return false; });
+  }
+
+  function markFeedbackPending() {
+    if (!lastSampleUpload) { return; }
+    lastSampleUpload.feedbackDirty = true;
+    setSampleUploadStatus("样本已保存，反馈待上传", true);
+  }
+
+  function queueFeedbackDelta(deltaOp, blockKey, blockRef) {
+    if (!lastSampleUpload) { return; }
+    if (blockKey && lastSampleUpload.blockRefs && blockRef) {
+      lastSampleUpload.blockRefs[blockKey] = blockRef;
+    }
+    if (!lastSampleUpload.uploaded) {
+      lastSampleUpload.feedbackDirty = true;
+      setSampleUploadStatus("样本上传失败，反馈待上传", true);
+      return;
+    }
+    postFeedbackRequest(deltaOp).then(function (ok) {
+      if (!ok) { markFeedbackPending(); }
+    });
+  }
+
+  function flushFeedbackIfDirty() {
+    if (!lastSampleUpload || !lastSampleUpload.feedbackDirty || typeof MSQSample === "undefined") { return; }
+    var target = lastSampleUpload;
+    var fb = target.feedback;
+    var sid = target.payload.sampleId;
+    var ops = [];
+    ops.push(fb.pageTypes.length
+      ? MSQSample.buildPageFeedbackRequest(sid, fb.pageTypes)
+      : MSQSample.buildPageClearRequest(sid));
+    Object.keys(fb.blocks).forEach(function (key) {
+      var idx = Number(key.split(":")[0]);
+      var block = (target.blockRefs && target.blockRefs[key]) || {};
+      ops.push(MSQSample.buildBlockFeedbackRequest(sid, "set", idx, block));
+    });
+    if (!ops.length) { target.feedbackDirty = false; return; }
+    var seq = Promise.resolve(true);
+    var allOk = true;
+    ops.forEach(function (op) {
+      seq = seq.then(function (ok) {
+        allOk = allOk && ok;
+        return postFeedbackRequest(op);
+      });
+    });
+    seq.then(function (ok) {
+      allOk = allOk && ok;
+      if (allOk) {
+        target.feedbackDirty = false;
+        setSampleUploadStatus("样本已保存：" + sid + "（反馈已补传）", false);
+      } else {
+        setSampleUploadStatus("样本已保存，反馈待上传", true);
+      }
+    });
+  }
+
+  function renderFeedbackButton() {
+    var flag = $("btn-sample-flag");
+    if (!flag) { return; }
+    var fb = currentFeedback();
+    var done = !!(fb && (fb.pageTypes.length > 0 || Object.keys(fb.blocks).length > 0));
+    flag.textContent = done ? "本页已反馈 ▾" : "反馈本页问题";
+  }
+
+  function toggleFeedbackPanel() {
+    var panel = $("sample-feedback-panel");
+    if (!panel || !lastSampleUpload) { return; }
+    if (panel.classList.toggle("hidden") === false) {
+      buildFeedbackPanel(panel);
+    }
+  }
+
+  function panelHint(panel, msg) {
+    var el = panel.querySelector(".fb-panel-hint");
+    if (el) { el.textContent = msg || ""; }
+  }
+
+  function buildFeedbackPanel(panel) {
+    var fb = currentFeedback() || { pageTypes: [] };
+    panel.innerHTML = "";
+    var title = document.createElement("p");
+    title.className = "sample-note fb-panel-hint";
+    title.textContent = "本页存在哪些问题？（可多选）";
+    panel.appendChild(title);
+    var selected = {};
+    fb.pageTypes.forEach(function (t) { selected[t] = true; });
+    MSQSample.FEEDBACK_PAGE_ISSUES.forEach(function (issue) {
+      var b = document.createElement("button");
+      b.type = "button";
+      var active = !!selected[issue.type];
+      b.className = "feedback-chip" + (active ? " active" : "");
+      b.textContent = (active ? "✓ " : "") + issue.label;
+      b.addEventListener("click", function () {
+        selected[issue.type] = !selected[issue.type];
+        b.className = "feedback-chip" + (selected[issue.type] ? " active" : "");
+        b.textContent = (selected[issue.type] ? "✓ " : "") + issue.label;
+      });
+      panel.appendChild(b);
+    });
+    panel.appendChild(document.createElement("br"));
+
+    var submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "barbtn primary feedback-btn";
+    submit.textContent = "提交反馈";
+    submit.addEventListener("click", function () {
+      var types = Object.keys(selected).filter(function (t) { return selected[t]; });
+      if (!types.length || !lastSampleUpload) { panelHint(panel, "请至少选择一项"); return; }
+      lastSampleUpload.feedback.pageTypes = types;
+      renderFeedbackButton();
+      queueFeedbackDelta(MSQSample.buildPageFeedbackRequest(
+        lastSampleUpload.payload.sampleId, types));
+      showFeedbackToast("已记录本页问题");
+      panel.classList.add("hidden");
+    });
+    panel.appendChild(submit);
+
+    var clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "barbtn feedback-btn";
+    clear.textContent = "清除本页反馈";
+    clear.addEventListener("click", function () {
+      if (!lastSampleUpload) { return; }
+      lastSampleUpload.feedback.pageTypes = [];
+      renderFeedbackButton();
+      queueFeedbackDelta(MSQSample.buildPageClearRequest(lastSampleUpload.payload.sampleId));
+      showFeedbackToast("已清除本页反馈");
+      panel.classList.add("hidden");
+    });
+    panel.appendChild(clear);
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "linkbtn feedback-btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", function () { panel.classList.add("hidden"); });
+    panel.appendChild(cancel);
+  }
+
+  function toggleBlockFeedback(blockIndex, block, rowEl) {
+    if (!lastSampleUpload || !lastSampleUpload.feedback) { return; }
+    var fb = lastSampleUpload.feedback;
+    var key = blockIndex + ":wrong_answer";
+    var nowMarked = !fb.blocks[key];
+    if (nowMarked) { fb.blocks[key] = true; } else { delete fb.blocks[key]; }
+    updateRowWrongMark(rowEl, nowMarked);
+    if (navigator.vibrate) { try { navigator.vibrate(30); } catch (e) { /* 无震动能力 */ } }
+    renderFeedbackButton();
+    queueFeedbackDelta(
+      MSQSample.buildBlockFeedbackRequest(lastSampleUpload.payload.sampleId,
+        nowMarked ? "set" : "remove", blockIndex, block),
+      key, nowMarked ? block : null);
+    showFeedbackToast(nowMarked ? "已标记该答案有误" : "已取消标错");
   }
 
   function setSampleUploadStatus(text, showRetry) {
@@ -1677,6 +1857,7 @@
     var on = sampleSettings().enabled;
     if (box) { box.classList.toggle("hidden", !on); }
     if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
+    renderFeedbackButton();
   }
 
   function collectAndUploadSample(state) {
@@ -1688,7 +1869,7 @@
     try {
       payload = MSQSample.buildUploadPayload({
         photoDataUrl: state.dataUrl,
-        sampleId: MSQSample.makeSampleId(new Date()),
+        sampleId: state.sampleId || MSQSample.makeSampleId(new Date()),
         capturedAt: new Date().toISOString(),
         /* pageType = 最终实际用于展示答案的题型（AUTO 判定结果或手动选择） */
         pageType: state.pageType,
@@ -1712,13 +1893,24 @@
       setSampleUploadStatus("样本上传失败", true);
       return;
     }
-    lastSampleUpload = { serverUrl: s.serverUrl, payload: payload, uploaded: false };
+    lastSampleUpload = {
+      serverUrl: s.serverUrl,
+      payload: payload,
+      sampleId: state.sampleId || payload.sampleId,
+      uploaded: false,
+      feedbackDirty: false,
+      feedback: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.feedbackInitialState() : null,
+      blockRefs: {}
+    };
+    var panel = $("sample-feedback-panel");
+    if (panel) { panel.classList.add("hidden"); }   /* 新 sample：反馈面板收起并重置 */
     setSampleUploadStatus("样本上传中…", false);
     updateSampleToolsVisibility();
     MSQSample.postJSON(MSQSample.joinUrl(s.serverUrl, "/api/sample"), payload, 20000)
       .then(function () {
         if (lastSampleUpload) { lastSampleUpload.uploaded = true; }
         setSampleUploadStatus("样本已保存：" + payload.sampleId, false);
+        flushFeedbackIfDirty();
       })
       .catch(function () {
         setSampleUploadStatus("样本上传失败", true);   /* 不向用户展示异常细节 */

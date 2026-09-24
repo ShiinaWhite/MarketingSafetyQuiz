@@ -1312,6 +1312,65 @@ const MSQUpdater = require("./www/js/updater.js");
     MSQUpdater.normalizeSettings({ serverUrl: "http://a:1/" }).serverUrl === "http://a:1");
 }
 
+/* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
+section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
+{
+  const A = "20260924_100000_aa11aa";
+  const B = "20260924_100001_bb22bb";
+  let stA = MSQSample.feedbackInitialState();
+  check("FB-P1 新 sample 初始未反馈",
+    stA.pageTypes.length === 0 && Object.keys(stA.blocks).length === 0);
+  const opSet = MSQSample.buildPageFeedbackRequest(A, ["missing_question", "other"]);
+  check("FB-P set 请求结构（action/scope/issueTypes）",
+    opSet.action === "set" && opSet.scope === "page" &&
+    opSet.issueTypes.join() === "missing_question,other");
+  stA = MSQSample.applyFeedbackToState(stA, opSet);
+  check("FB-P2 提交后 A 已反馈（2 项，排序去重）",
+    stA.pageTypes.join() === "missing_question,other");
+  const stA2 = MSQSample.applyFeedbackToState(stA,
+    MSQSample.buildPageFeedbackRequest(A, ["missing_question", "other"]));
+  check("FB-P7 重复 set 同 issue 不产生重复",
+    stA2.pageTypes.join() === "missing_question,other");
+  const stB = MSQSample.feedbackInitialState();
+  check("FB-P3/P4 新 sample B 初始未反馈，A 的反馈不污染 B",
+    stB.pageTypes.length === 0 && stA.pageTypes.length === 2);
+  const stA3 = MSQSample.applyFeedbackToState(stA,
+    MSQSample.buildPageFeedbackRequest(A, ["other"]));
+  check("FB-P5 修改反馈 = 全量替换",
+    stA3.pageTypes.join() === "other" && stA.pageTypes.length === 2);
+  const stA4 = MSQSample.applyFeedbackToState(stA3, MSQSample.buildPageClearRequest(A));
+  check("FB-P6 清除反馈 → pageIssues 清空", stA4.pageTypes.length === 0);
+
+  const block = { screenNumber: "27", rawScreenNumber: "27", numberSource: "ocr",
+    type: "single", answer: "A", confidence: "low", bankId: 123,
+    matches: [{ id: 123 }, { id: 5 }, { id: 9 }], matchesAssisted: false };
+  block.matches.assistedByOptions = false;
+  const setOp = MSQSample.buildBlockFeedbackRequest(A, "set", 2, block);
+  check("FB-B4 block payload 字段完整且不猜正确答案",
+    setOp.action === "set" && setOp.scope === "block" && setOp.issue === "wrong_answer" &&
+    setOp.blockIndex === 2 && setOp.block.screenNumber === "27" &&
+    setOp.block.finalAnswer === "A" && setOp.block.confidence === "low" &&
+    setOp.block.finalBankId === 123 && setOp.block.matchedByOptions === false &&
+    setOp.block.rawScreenNumber === "27" && setOp.block.numberSource === "ocr");
+  check("FB-B4 不包含 Top2/candidate 等被猜测的真值字段",
+    setOp.block.expectedAnswer === undefined && setOp.block.expectedBankId === undefined);
+  let stB2 = MSQSample.feedbackInitialState();
+  stB2 = MSQSample.applyFeedbackToState(stB2, setOp);
+  check("FB-B1 block set 后状态已标错", stB2.blocks["2:wrong_answer"] === true);
+  stB2 = MSQSample.applyFeedbackToState(stB2,
+    MSQSample.buildBlockFeedbackRequest(A, "set", 3, block));
+  check("FB-B3 block3 标错不影响 block2",
+    stB2.blocks["2:wrong_answer"] === true && stB2.blocks["3:wrong_answer"] === true);
+  stB2 = MSQSample.applyFeedbackToState(stB2,
+    MSQSample.buildBlockFeedbackRequest(A, "remove", 2, null));
+  check("FB-B2 remove 撤销 block2",
+    stB2.blocks["2:wrong_answer"] === undefined && stB2.blocks["3:wrong_answer"] === true);
+  check("非法 op 被拒绝（不应用）",
+    !MSQSample.isValidFeedbackOp({ action: "set", scope: "page", sampleId: A, issueTypes: ["nope"] }) &&
+    !MSQSample.isValidFeedbackOp({ action: "set", scope: "block", sampleId: A, issue: "wrong_answer", blockIndex: -1, block: {} }) &&
+    !MSQSample.isValidFeedbackOp({ action: "nope", scope: "page", sampleId: A }));
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");
