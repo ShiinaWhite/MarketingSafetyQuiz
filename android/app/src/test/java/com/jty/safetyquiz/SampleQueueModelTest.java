@@ -52,6 +52,18 @@ public class SampleQueueModelTest {
         assertTrue(SampleQueueModel.isRetryDue(rw, 10000));
         assertFalse(SampleQueueModel.isRetryDue(state("uploading", 0), 5000));
         assertFalse(SampleQueueModel.isRetryDue(state("failed", 9), 999999));
+        assertFalse(SampleQueueModel.isRetryDue(state("auth_failed", 0), 999999));   // 认证失败不自动重试
+    }
+
+    @Test
+    public void markAuthFailed_noRetryUntilManualOrNewVersion() throws JSONException {
+        JSONObject st = state("uploading", 0);
+        SampleQueueModel.markAuthFailed(st, "HTTP 401");
+        assertEquals(SampleQueueModel.STATUS_AUTH_FAILED, st.getString("status"));
+        assertEquals("HTTP 401", st.getString("lastError"));
+        // 手动重试（retryFailed）：auth_failed → pending 后恢复可拾取
+        st.put("status", SampleQueueModel.STATUS_PENDING);
+        assertTrue(SampleQueueModel.isRetryDue(st, 9999));
     }
 
     @Test

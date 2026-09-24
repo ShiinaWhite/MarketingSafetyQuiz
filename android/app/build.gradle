@@ -10,27 +10,35 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        /* PUBLIC_SAMPLE_AUTH_V1：所有 variant 都生成该字段（默认空串），
+           dev 变体经 -PMSQ_SAMPLE_WRITE_TOKEN 注入真实值 */
+        buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '""'
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    buildFeatures {
+        buildConfig true
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
-        /* DEV 独立身份：与稳定版 com.jty.safetyquiz 并存安装，互不覆盖。
-           只改 applicationId/label/versionName 后缀，namespace 与 Java 包名不动；
-           manifest 里的 ${applicationId} 占位符（FileProvider authorities 等）按变体自动解析。
-           产物：app/build/outputs/apk/dev/app-dev.apk；assembleDebug 路径与产物保持原样。 */
+        /* DEV 版本号注入（SELF_UPDATE_V1）：-PDEV_VERSION_CODE / -PDEV_VERSION_NAME */
         dev {
             initWith debug
             matchingFallbacks = ['debug']
             applicationIdSuffix '.dev'
             versionNameSuffix '-dev'
             signingConfig signingConfigs.debug
+            /* PUBLIC_SAMPLE_AUTH_V1：样本写接口 Bearer token（发布流程经
+               -PMSQ_SAMPLE_WRITE_TOKEN 注入，来源 .secrets/ 或环境变量，
+               绝不入库；为空时 App 上传将收到 401 并保留本地队列） */
+            def sampleToken = project.findProperty("MSQ_SAMPLE_WRITE_TOKEN") ?: ""
+            buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '"' + sampleToken.toString() + '"'
         }
     }
 }

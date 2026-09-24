@@ -327,7 +327,9 @@ public class SampleQueuePlugin extends Plugin {
                 synchronized (stateLock) {
                     try {
                         JSONObject st = readState(dir, dir.getName());
-                        if (SampleQueueModel.STATUS_FAILED.equals(st.optString("status", ""))) {
+                        String status = st.optString("status", "");
+                        if (SampleQueueModel.STATUS_FAILED.equals(status)
+                                || SampleQueueModel.STATUS_AUTH_FAILED.equals(status)) {
                             st.put("status", SampleQueueModel.STATUS_PENDING);
                             writeState(dir, st);
                             count++;
@@ -344,7 +346,7 @@ public class SampleQueuePlugin extends Plugin {
     }
 
     private JSObject queueStats() {
-        int pending = 0, uploading = 0, retryWait = 0, failed = 0, uploaded = 0;
+        int pending = 0, uploading = 0, retryWait = 0, failed = 0, authFailed = 0, uploaded = 0;
         long pendingBytes = 0;
         File[] dirs = queueDir().listFiles();
         if (dirs != null) {
@@ -362,6 +364,7 @@ public class SampleQueuePlugin extends Plugin {
                 if (SampleQueueModel.STATUS_UPLOADING.equals(status)) { uploading++; }
                 else if (SampleQueueModel.STATUS_RETRY_WAIT.equals(status)) { retryWait++; }
                 else if (SampleQueueModel.STATUS_FAILED.equals(status)) { failed++; }
+                else if (SampleQueueModel.STATUS_AUTH_FAILED.equals(status)) { authFailed++; }
                 else { pending++; }
                 File[] files = dir.listFiles();
                 if (files != null) {
@@ -374,6 +377,7 @@ public class SampleQueuePlugin extends Plugin {
         ret.put("uploading", uploading);
         ret.put("retryWait", retryWait);
         ret.put("failed", failed);
+        ret.put("authFailed", authFailed);
         ret.put("uploaded", uploaded);
         ret.put("pendingBytes", pendingBytes);
         return ret;
@@ -459,6 +463,15 @@ public class SampleQueuePlugin extends Plugin {
             String manifestJson = new String(readFile(new File(dir, RUN_NAME)), StandardCharsets.UTF_8);
             int status = httpPostJson(serverUrl + "/api/sample",
                     SampleUploadBody.build(sampleId, jpg, manifestJson));
+            if (status == 401 || status == 403) {
+                synchronized (stateLock) {
+                    JSONObject cur = readState(dir, dir.getName());
+                    SampleQueueModel.markAuthFailed(cur, "HTTP " + status);
+                    writeState(dir, cur);
+                }
+                notifyChanged();
+                return;   // 认证失败：保留全部数据，不自动重试、不删除、不堵队列
+            }
             if (status < 200 || status >= 300) {
                 recordFailure(dir, "HTTP " + status, status >= 500 || status == 408);
                 return;   // 失败不堵队列：回到循环继续下一条件/退出
@@ -484,6 +497,14 @@ public class SampleQueuePlugin extends Plugin {
                     }
                     writeState(dir, cur);
                 }
+            } else if (status == 401 || status == 403) {
+                synchronized (stateLock) {
+                    JSONObject cur = readState(dir, sampleId);
+                    SampleQueueModel.markAuthFailed(cur, "feedback HTTP " + status);
+                    writeState(dir, cur);
+                }
+                notifyChanged();
+                return;
             } else {
                 recordFailure(dir, "feedback HTTP " + status, status >= 500 || status == 408);
                 return;
@@ -528,6 +549,15 @@ public class SampleQueuePlugin extends Plugin {
         notifyChanged();
     }
 
+    /* 写接口认证 token：来自编译期 BuildConfig（发布流程注入），JS/localStorage 永远拿不到 */
+    private String writeToken() {
+        try {
+            return BuildConfig.MSQ_SAMPLE_WRITE_TOKEN;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     private int httpPostJson(String url, byte[] body) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
@@ -536,6 +566,10 @@ public class SampleQueuePlugin extends Plugin {
         conn.setDoOutput(true);
         conn.setFixedLengthStreamingMode(body.length);
         conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        final String token = writeToken();
+        if (token != null && !token.isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + token);
+        }
         OutputStream out = conn.getOutputStream();
         try {
             out.write(body);

@@ -1669,13 +1669,16 @@
   /* 队列状态轻量展示（结果页状态行 + 设置面板同步状态） */
   function renderQueueStatus(stats) {
     if (!stats || typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var todo = (stats.pending || 0) + (stats.uploading || 0) + (stats.retryWait || 0) + (stats.failed || 0);
+    var todo = (stats.pending || 0) + (stats.uploading || 0) + (stats.retryWait || 0) +
+      (stats.failed || 0) + (stats.authFailed || 0);
     var sizeText = "";
     if (stats.pendingBytes > 0 && typeof MSQUpdater !== "undefined" && MSQUpdater.formatBytes) {
       sizeText = " · " + MSQUpdater.formatBytes(stats.pendingBytes);
     }
     var text;
-    if ((stats.failed || 0) > 0) {
+    if ((stats.authFailed || 0) > 0) {
+      text = "样本同步认证失败 · 待处理 " + todo + " 个（更新版本后自动恢复）";
+    } else if ((stats.failed || 0) > 0) {
       text = "同步失败 " + stats.failed + " 个 · 待处理 " + todo + " 个" + sizeText;
     } else if ((stats.uploading || 0) > 0) {
       text = "正在上传 · 待处理 " + todo + " 个" + sizeText;

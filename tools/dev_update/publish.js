@@ -30,6 +30,15 @@ const DEV_APK = path.join(ROOT, "release", "营销安规刷题-DEV.apk");
 
 const EXPECTED_PACKAGE = "com.jty.safetyquiz.dev";
 const EXPECTED_LABEL = "营销安规刷题 DEV";
+const SECRET_FILE = path.join(ROOT, ".secrets", "sample-write-token");
+
+/* PUBLIC_SAMPLE_AUTH_V1：读取样本写接口 secret（环境变量优先，其次 .secrets/）。
+   缺失/过短 → 拒绝发布（避免产出无法认证上传的 APK）。 */
+function loadSampleWriteToken() {
+  const fromEnv = (process.env.MSQ_SAMPLE_WRITE_TOKEN || "").trim();
+  if (fromEnv) { return fromEnv; }
+  try { return fs.readFileSync(SECRET_FILE, "utf8").trim(); } catch (e) { return ""; }
+}
 
 function fail(msg) {
   console.error("\n[发布失败] " + msg);
@@ -141,10 +150,16 @@ function main() {
     const s = run("npx.cmd", ["cap", "sync", "android"], ROOT);
     if (s.status !== 0) { fail("cap sync 失败：" + (s.stderr || s.stdout).slice(0, 300)); }
   }
-  console.log("→ gradlew :app:assembleDev");
+  const writeToken = loadSampleWriteToken();
+  if (writeToken.length < 64) {
+    fail("sample write secret missing —— 拒绝发布无法认证上传的 APK" +
+      "（运行 node tools/sample_auth/init_secret.js 生成）");
+  }
+  console.log("→ gradlew :app:assembleDev（样本写接口 token 已注入构建，值不打印）");
   const g = run(GRADLEW, [":app:assembleDev",
     "-PDEV_VERSION_CODE=" + versionCode,
-    "-PDEV_VERSION_NAME=" + versionNameBase], ANDROID);
+    "-PDEV_VERSION_NAME=" + versionNameBase,
+    "-PMSQ_SAMPLE_WRITE_TOKEN=" + writeToken], ANDROID);
   if (g.status !== 0) { fail("构建失败：" + (g.stderr || g.stdout).slice(-600)); }
   if (!fs.existsSync(OUT_APK)) { fail("构建产物缺失：" + OUT_APK); }
 

@@ -15,6 +15,8 @@ public final class SampleQueueModel {
     public static final String STATUS_UPLOADING = "uploading";
     public static final String STATUS_RETRY_WAIT = "retry_wait";
     public static final String STATUS_FAILED = "failed";
+    /** 认证失败（401/403）：非瞬时错误，不自动重试；OTA 新版本或手动重试后恢复。 */
+    public static final String STATUS_AUTH_FAILED = "auth_failed";
 
     /** 自动重试退避：5s / 15s / 60s（之后保持 60s 间隔直到上限）。 */
     public static final long[] RETRY_BACKOFF_MS = {5000L, 15000L, 60000L};
@@ -34,12 +36,20 @@ public final class SampleQueueModel {
         return RETRY_BACKOFF_MS[idx];
     }
 
-    /** 该样本现在是否应该被 worker 拾起（failed 只等手动重试）。 */
+    /** 该样本现在是否应该被 worker 拾起（failed/auth_failed 只等手动重试或新版本）。 */
     public static boolean isRetryDue(JSONObject state, long now) {
         String st = state.optString("status", STATUS_PENDING);
         if (STATUS_PENDING.equals(st)) { return true; }
         if (STATUS_RETRY_WAIT.equals(st)) { return state.optLong("nextRetryAt", 0L) <= now; }
-        return false;
+        return false;   // uploading / failed / auth_failed 均不自动拾取
+    }
+
+    /** 认证失败（401/403）：数据绝不删除，等待 App 更新（新 token）或手动重试。 */
+    public static JSONObject markAuthFailed(JSONObject state, String error) throws JSONException {
+        state.put("status", STATUS_AUTH_FAILED);
+        state.put("lastError", error == null ? "" : error);
+        state.put("nextRetryAt", JSONObject.NULL);
+        return state;
     }
 
     /** 是否已到达可清理条件：已 sealed 且 sample/feedback 均同步完成。 */
