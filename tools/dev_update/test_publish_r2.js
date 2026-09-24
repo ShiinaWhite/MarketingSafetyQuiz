@@ -378,11 +378,20 @@ async function main() {
         check("R2-A3e 旧相对路径仍可解析（向后兼容）",
           MSQUpdater.resolveApkUrl("https://update.shiinalab.top", "/api/update/dev/apk") ===
             "https://update.shiinalab.top/api/update/dev/apk");
-        /* 该 APK 的 SHA256 必须与线上 latest.json 一致 → 证明验证的就是已安装版本 */
+        /* 该 APK 的 SHA256 必须与线上 latest.json 一致 → 证明验证的就是已安装版本。
+           （APK_SIZE_OPTIMIZATION_V1：原为硬编码 vc9 哈希，每次发布都会过期——
+           vc10 发布后即失败。改为与 latest.json 动态比对，恢复其本意） */
         const apkSha = r2publish.sha256Hex(fs.readFileSync(realApk));
-        check("R2-A3f 本地 DEV APK 即线上 latest 版本（vc9 基线）",
-          apkSha === "af0b4b46baf42e400f8a299471058e6ab76f75d933dba65fce093f806f364954",
-          apkSha.slice(0, 16) + "…");
+        let latestSha = null;
+        let latestVc = null;
+        try {
+          const latest = JSON.parse(fs.readFileSync(publish.LATEST_JSON, "utf8"));
+          latestSha = latest.sha256 || null;
+          latestVc = latest.versionCode || null;
+        } catch (e) { /* latest.json 缺失时按失败处理 */ }
+        check("R2-A3f 本地 DEV APK 即线上 latest 版本（vc" + latestVc + "）",
+          !!latestSha && apkSha === latestSha,
+          "apk=" + apkSha.slice(0, 16) + "… latest=" + String(latestSha || "missing").slice(0, 16) + "…");
       }
     }
 

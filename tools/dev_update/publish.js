@@ -3,6 +3,8 @@
    零第三方依赖。工作流：
      node tools/dev_update/publish.js [--notes "..."] [--version-code N]
         [--version-name X.Y.Z] [--skip-sync] [--allow-new-signer]
+        [--arm64-only]  (APK_SIZE_OPTIMIZATION_V1: 透传 -PDEV_ARM64_ONLY，
+        发布构建仅保留 arm64-v8a；发布前用 aapt native-code 实测核验)
    步骤：确定下一 versionCode → cap sync → assembleDev（-P 注入版本）→
    aapt/apksigner 实测校验（包名/版本/label/签名证书）→ SHA256 →
    上传 APK 到 R2 downloads bucket（key 按 vc 唯一）→ R2 HeadObject 验证 →
@@ -63,7 +65,8 @@ function fail(msg) {
 }
 
 function parseArgs(argv) {
-  const a = { notes: "", skipSync: false, allowNewSigner: false, r2: false };
+  const a = { notes: "", skipSync: false, allowNewSigner: false, r2: false,
+    arm64Only: false };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
     if (k === "--notes") { a.notes = argv[++i] || ""; }
@@ -72,6 +75,7 @@ function parseArgs(argv) {
     else if (k === "--skip-sync") { a.skipSync = true; }
     else if (k === "--allow-new-signer") { a.allowNewSigner = true; }
     else if (k === "--r2") { a.r2 = true; }
+    else if (k === "--arm64-only") { a.arm64Only = true; }
     else fail("未知参数：" + k);
   }
   return a;
@@ -213,11 +217,16 @@ async function main() {
     fail("sample write secret missing —— 拒绝发布无法认证上传的 APK" +
       "（运行 node tools/sample_auth/init_secret.js 生成）");
   }
-  console.log("→ gradlew :app:assembleDev（样本写接口 token 已注入构建，值不打印）");
-  const g = run(GRADLEW, [":app:assembleDev",
+  const gradleArgs = [":app:assembleDev",
     "-PDEV_VERSION_CODE=" + versionCode,
     "-PDEV_VERSION_NAME=" + versionNameBase,
-    "-PMSQ_SAMPLE_WRITE_TOKEN=" + writeToken], ANDROID);
+    "-PMSQ_SAMPLE_WRITE_TOKEN=" + writeToken];
+  if (args.arm64Only) {
+    gradleArgs.push("-PDEV_ARM64_ONLY=1");
+    console.log("→ DEV_ARM64_ONLY：本发布仅保留 arm64-v8a");
+  }
+  console.log("→ gradlew :app:assembleDev（样本写接口 token 已注入构建，值不打印）");
+  const g = run(GRADLEW, gradleArgs, ANDROID);
   if (g.status !== 0) { fail("构建失败：" + (g.stderr || g.stdout).slice(-600)); }
   if (!fs.existsSync(OUT_APK)) { fail("构建产物缺失：" + OUT_APK); }
 
@@ -228,6 +237,16 @@ async function main() {
   if (info.versionCode !== versionCode) { fail("versionCode 不符：" + info.versionCode); }
   if (info.versionName !== versionName) { fail("versionName 不符：" + info.versionName); }
   if (info.label !== EXPECTED_LABEL) { fail("app label 不符：" + info.label); }
+  /* APK_SIZE_OPTIMIZATION_V1：ABI 布局实测核验（aapt native-code，不信构建参数）。
+     --arm64-only 时必须恰好 arm64-v8a，否则 30~50MB 级体积回退没人发现 */
+  const nativeBadging = withAsciiCopy(OUT_APK, (p) => run(AAPT, ["dump", "badging", p]));
+  const nativeCodes = /^native-code: *(.*)$/m.exec(nativeBadging.stdout || "");
+  const nativeCodeStr = nativeCodes ? nativeCodes[1] : null;
+  if (args.arm64Only && nativeCodeStr !== "'arm64-v8a'") {
+    fail("DEV_ARM64_ONLY 核验失败：native-code=" + nativeCodeStr +
+      "（期望只有 'arm64-v8a'）。拒绝发布。");
+  }
+  console.log("native-code：" + nativeCodeStr);
 
   /* 5) 签名证书与现有 DEV APK 一致性 */
   const newSigner = signerSha256(OUT_APK);
