@@ -195,12 +195,12 @@ async function main() {
         "  不加 --r2 则按现状经 Collector/Tunnel 提供 APK（本轮默认）。");
     }
     r2config = loaded.config;
-    console.log("APK 数据面：R2 Custom Domain（显式 --r2）");
+    console.log("APK 数据面：R2 Custom Domain（显式 --r2），bucket=" +
+      r2config.downloadBucket + " domain=" + DOWNLOAD_DOMAIN);
   } else {
     console.log("APK 数据面：现有 SELF_UPDATE 链路（Collector/Tunnel，apkUrl 相对路径）");
     console.log("  （样本 capture.jpg 的 COS 直传与 APK 下载是两条独立链路，本轮只动前者）");
   }
-  console.log("R2 目标：bucket=" + r2config.downloadBucket + " domain=" + DOWNLOAD_DOMAIN);
 
   /* 3) cap sync + 构建 */
   if (!args.skipSync) {
