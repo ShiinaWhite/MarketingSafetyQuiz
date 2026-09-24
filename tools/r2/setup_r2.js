@@ -25,11 +25,13 @@
 
 const { spawnSync } = require("child_process");
 const path = require("path");
+const cf = require("./cf_api.js");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const DOWNLOAD_BUCKET = "marketing-safety-quiz-downloads";
 const SAMPLE_BUCKET = "marketing-safety-quiz-samples";
 const DOWNLOAD_DOMAIN = "download.shiinalab.top";
+const ZONE_NAME = "shiinalab.top";
 const SAMPLE_RETENTION_DAYS = 90;
 const TMP_RETENTION_DAYS = 7;
 
@@ -62,6 +64,36 @@ function parseArgs(argv) {
   return a;
 }
 
+/* 自动发现 shiinalab.top 的 Zone ID（wrangler 无 zone 子命令，走 Cloudflare API）。
+   只读取 OAuth token，绝不打印 token。返回 { ok, zoneId, zoneName, error } */
+async function discoverZoneId(explicit) {
+  if (explicit) { return { ok: true, zoneId: explicit, zoneName: "(from --zone-id)", source: "arg" }; }
+  const t = cf.loadOAuthToken();
+  if (!t.ok) { return { ok: false, error: t.error }; }
+  const z = await cf.findZoneByName(t.token, ZONE_NAME);
+  if (!z.ok) { return { ok: false, error: z.error }; }
+  return {
+    ok: true, zoneId: z.zone.id, zoneName: z.zone.name,
+    zoneStatus: z.zone.status, source: "cloudflare api (zone:read)"
+  };
+}
+
+/* R2 是否已在账号上启用。未启用时 Cloudflare 返回 code 10042。 */
+async function r2Enabled() {
+  const t = cf.loadOAuthToken();
+  if (!t.ok) { return { ok: false, error: t.error }; }
+  const me = await cf.cfRequest(t.token, "GET", "/accounts/" + (process.env.R2_ACCOUNT_ID ||
+    "b8790dc9fd8f5ab8442c4d2036c44729") + "/r2/buckets");
+  if (me.status === 403 && me.body && me.body.errors &&
+      me.body.errors.some(function (e) { return e.code === 10042; })) {
+    return { ok: false, enabled: false, code: 10042,
+      error: "R2 未在该账号启用（Cloudflare code 10042）" };
+  }
+  if (me.status === 200) { return { ok: true, enabled: true }; }
+  return { ok: false, enabled: false, status: me.status,
+    error: "无法判定 R2 启用状态（HTTP " + me.status + "）" };
+}
+
 function whoami() {
   const r = wrangler(["whoami"]);
   const authed = !/not authenticated/i.test(r.out);
@@ -77,7 +109,7 @@ function listBuckets() {
   return { ok: r.status === 0, names: names, out: r.out };
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv);
   console.log("== R2 基础设施配置（R2_FAST_TRANSFER_V1）==");
   console.log(args.apply ? "模式：APPLY（会创建/修改 Cloudflare 资源）" : "模式：CHECK（只读）");
@@ -92,11 +124,45 @@ function main() {
     console.log("=".repeat(60));
     console.log("Cloudflare 授权必须由你本人在浏览器完成：");
     console.log("  1) npx wrangler login        （会打开浏览器，点 Allow）");
-    console.log("  2) node tools/r2/setup_r2.js --apply --zone-id <ZONE_ID>");
+    console.log("  2) node tools/r2/setup_r2.js --apply   （Zone ID 会自动发现）");
     console.log("  3) 在 Dashboard 生成 R2 S3 credential 并写入");
     console.log("     tools/sample_collector/.env.r2.local（见 tools/r2/setup_r2.md）");
     console.log("=".repeat(60));
     process.exit(2);
+  }
+
+  section("0b) R2 订阅是否已在账号启用");
+  const r2on = await r2Enabled();
+  if (!r2on.ok && r2on.code === 10042) {
+    console.log("\n" + "=".repeat(64));
+    console.log("R2_ENABLE_USER_ACTION_REQUIRED");
+    console.log("=".repeat(64));
+    console.log("Cloudflare 报告：R2 尚未在该账号启用（code 10042）。");
+    console.log("R2 的启用/订阅确认只能在 Dashboard 完成，无法用 wrangler 或 API 绕过。");
+    console.log("");
+    console.log("请在浏览器完成（一次性）：");
+    console.log("  1) https://dash.cloudflare.com/  → 左侧 R2 Object Storage");
+    console.log("  2) 首次进入会要求启用 R2 并确认订阅（R2 有免费额度，");
+    console.log("     按提示确认即可；如要求绑定付款方式，请按 Dashboard 提示完成）");
+    console.log("  3) 启用成功后回到这里重跑：node tools/r2/setup_r2.js --apply");
+    console.log("");
+    console.log("启用后本脚本会自动完成：建两个 bucket、绑定 download.shiinalab.top、");
+    console.log("关闭 r2.dev、开启 Local Uploads、部署 lifecycle。");
+    console.log("=".repeat(64));
+    process.exit(2);
+  }
+  check("R2 已启用", r2on.ok, r2on.ok ? "已启用" : r2on.error);
+
+  section("0c) 自动发现 shiinalab.top 的 Zone ID");
+  const zone = await discoverZoneId(args.zoneId);
+  if (zone.ok) {
+    console.log("  ZONE_NAME = " + zone.zoneName);
+    console.log("  ZONE_ID   = " + zone.zoneId + "   (来源：" + zone.source + ")");
+    if (zone.zoneStatus) { console.log("  ZONE_STATUS = " + zone.zoneStatus); }
+    check("Zone ID 已发现且为 " + ZONE_NAME, true, zone.zoneId);
+  } else {
+    check("自动发现 Zone ID", false, zone.error +
+      "（可退化为 --zone-id 手工指定）");
   }
 
   section("1) 现有 R2 bucket");
@@ -109,8 +175,8 @@ function main() {
   }
   const hasDownload = lb.names.indexOf(DOWNLOAD_BUCKET) >= 0;
   const hasSample = lb.names.indexOf(SAMPLE_BUCKET) >= 0;
-  check("downloads bucket 存在", hasDownload, hasDownload ? "已存在" : "需创建");
-  check("samples bucket 存在", hasSample, hasSample ? "已存在" : "需创建");
+  check("downloads bucket 存在", hasDownload, hasDownload ? "已存在（将复用）" : "需创建");
+  check("samples bucket 存在", hasSample, hasSample ? "已存在（将复用）" : "需创建");
 
   if (!args.apply) {
     console.log("\n（CHECK 模式结束。加 --apply 实际创建/配置。）");
@@ -121,15 +187,15 @@ function main() {
 
   /* ---------- APPLY ---------- */
 
-  section("2) 创建 bucket");
+  section("2) 创建 bucket（已存在则复用，不重复创建）");
   if (!hasDownload) {
     const r = wrangler(["r2", "bucket", "create", DOWNLOAD_BUCKET]);
     check("创建 " + DOWNLOAD_BUCKET, r.status === 0, r.out.split("\n")[0]);
-  } else { console.log("  跳过（已存在）"); }
+  } else { console.log("  复用已存在的 " + DOWNLOAD_BUCKET); }
   if (!hasSample) {
     const r = wrangler(["r2", "bucket", "create", SAMPLE_BUCKET]);
     check("创建 " + SAMPLE_BUCKET, r.status === 0, r.out.split("\n")[0]);
-  } else { console.log("  跳过（已存在）"); }
+  } else { console.log("  复用已存在的 " + SAMPLE_BUCKET); }
 
   section("3) 关闭两个 bucket 的 r2.dev 公开开发 URL");
   /* 任务要求：downloads 不依赖 r2.dev；samples 绝不能有公开 URL */
@@ -139,14 +205,14 @@ function main() {
   }
 
   section("4) downloads bucket 绑定 Custom Domain");
-  if (!args.zoneId) {
-    check("提供 --zone-id（或 R2_ZONE_ID）", false,
-      "zone ID 在 Cloudflare Dashboard → 域名 shiinalab.top → Overview 右下角");
-    console.log("  也可改用 Dashboard 手动绑定（会自动建 DNS 记录）：");
+  if (!zone.ok) {
+    check("绑定 " + DOWNLOAD_DOMAIN, false,
+      "Zone ID 未取得：" + zone.error);
+    console.log("  可改用 Dashboard 手动绑定（会自动建 DNS 记录）：");
     console.log("  R2 → " + DOWNLOAD_BUCKET + " → Settings → Custom Domains → Connect Domain");
   } else {
     const r = wrangler(["r2", "bucket", "domain", "add", DOWNLOAD_BUCKET,
-      "--domain", DOWNLOAD_DOMAIN, "--zone-id", args.zoneId, "-y"]);
+      "--domain", DOWNLOAD_DOMAIN, "--zone-id", zone.zoneId, "-y"]);
     check("绑定 " + DOWNLOAD_DOMAIN + " → " + DOWNLOAD_BUCKET, r.status === 0,
       r.out.split("\n").slice(0, 2).join(" | "));
   }
@@ -194,4 +260,7 @@ function main() {
   console.log("结果：基础设施配置全部完成 ✓");
 }
 
-main();
+main().catch(function (e) {
+  console.error("setup 异常：" + (e && e.stack || e));
+  process.exit(1);
+});
