@@ -924,29 +924,47 @@ function pick(arr, n, r) {
 
 /* ---------- 真实样本采集旁路（www/js/sample-collector.js） ----------
    只测「采集不改变识别结果」与「样本数据完整」：matcher 输出是唯一事实来源。 */
-section("真实样本采集：设置默认 OFF");
+section("真实样本采集：设置（v2 公网固定 endpoint，自动上传默认 ON）");
 const MSQSample = require("./www/js/sample-collector.js");
 const memStore = () => {
   const m = {};
   return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); } };
 };
-check("默认设置 = OFF + 空地址（普通用户绝不无意上传）",
-  (() => { const s = MSQSample.normalizeSettings(undefined); return s.enabled === false && s.serverUrl === ""; })());
-check("shouldCollect：默认 OFF", MSQSample.shouldCollect(undefined) === false);
-check("shouldCollect：enabled 但无地址 = OFF", MSQSample.shouldCollect({ enabled: true, serverUrl: "" }) === false);
-check("shouldCollect：enabled + 合法地址 = ON",
-  MSQSample.shouldCollect({ enabled: true, serverUrl: "http://10.0.2.2:8787" }) === true);
-check("serverUrl 归一化：去尾斜杠",
-  MSQSample.normalizeSettings({ enabled: true, serverUrl: "http://192.168.3.20:8787/" }).serverUrl
-    === "http://192.168.3.20:8787");
-check("serverUrl 非法协议被拒", MSQSample.normalizeSettings({ serverUrl: "ftp://x" }).serverUrl === "");
+check("默认设置 = 自动上传 ON（fresh config，loadSettings 迁移层生效）",
+  (() => {
+    const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    return fresh.migrationVersion === 2 && fresh.autoUpload === true;
+  })());
+check("shouldCollect：fresh 默认 ON", (() => {
+  const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  return MSQSample.shouldCollect(fresh) === true;
+})());
+check("用户主动关闭 → OFF", (() => {
+  const st = memStore();
+  MSQSample.saveSettings(st, { autoUpload: false });
+  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === false;
+})());
+check("用户关闭后重新 load 仍 OFF（opt-out 持久）", (() => {
+  const st = memStore();
+  MSQSample.saveSettings(st, { autoUpload: false });
+  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === false;
+})());
+check("v1 配置迁移：无法区分主动关闭与默认 OFF → 统一 ON", (() => {
+  const st = memStore();
+  st.setItem(MSQSample.LEGACY_SETTINGS_KEY,
+    JSON.stringify({ enabled: false, serverUrl: "http://192.168.3.39:8787" }));
+  const s = MSQSample.loadSettings(st);
+  return s.autoUpload === true && st.getItem(MSQSample.SETTINGS_KEY) !== null;
+})());
+check("PUBLIC_BASE_URL 固定公网域名（无 IP/端口）",
+  MSQSample.PUBLIC_BASE_URL === "https://update.shiinalab.top");
 {
   const st = memStore();
-  MSQSample.saveSettings(st, { enabled: true, serverUrl: "http://10.0.2.2:8787" });
+  MSQSample.saveSettings(st, { autoUpload: true });
   const back = MSQSample.loadSettings(st);
-  check("设置 localStorage 存取往返", back.enabled === true && back.serverUrl === "http://10.0.2.2:8787");
+  check("设置 v2 存取往返", back.autoUpload === true && back.migrationVersion === 2);
   st.setItem(MSQSample.SETTINGS_KEY, "{bad json");
-  check("坏 JSON 回退默认 OFF", MSQSample.loadSettings(st).enabled === false);
+  check("坏 JSON 回退默认 ON", MSQSample.loadSettings(st).autoUpload === true);
 }
 
 section("sampleId 生成");
@@ -1295,11 +1313,12 @@ const MSQUpdater = require("./www/js/updater.js");
   check("UPD-J 绝对 https apkUrl → 保持原样",
     MSQUpdater.resolveApkUrl("http://192.168.3.39:8787", "https://update.shiinalab.top/dev/app.apk")
       === "https://update.shiinalab.top/dev/app.apk");
-  check("UPD-K 未配置更新服务器但采集服务器已配置 → 复用",
-    MSQUpdater.resolveUpdateServer({}, { serverUrl: "http://192.168.3.39:8787/" }, "")
-      === "http://192.168.3.39:8787");
-  check("UPD-L 两者均未配置 → null（UI 给清晰提示）",
-    MSQUpdater.resolveUpdateServer({}, {}, "") === null);
+  check("UPD-K 未配置更新服务器 → 使用内置公网默认",
+    MSQUpdater.resolveUpdateServer({}, null, "") === "https://update.shiinalab.top");
+  check("UPD-K2 显式 bundled default 可覆盖内置公网",
+    MSQUpdater.resolveUpdateServer({}, "https://example.test") === "https://example.test");
+  check("UPD-L 内置默认恒可用（不存在无服务器状态）",
+    MSQUpdater.resolveUpdateServer({}, null, undefined) === "https://update.shiinalab.top");
   check("更新设置优先于采集设置",
     MSQUpdater.resolveUpdateServer({ serverUrl: "https://update.shiinalab.top" },
       { serverUrl: "http://192.168.3.39:8787" }, "") === "https://update.shiinalab.top");
@@ -1369,6 +1388,19 @@ section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
     !MSQSample.isValidFeedbackOp({ action: "set", scope: "page", sampleId: A, issueTypes: ["nope"] }) &&
     !MSQSample.isValidFeedbackOp({ action: "set", scope: "block", sampleId: A, issue: "wrong_answer", blockIndex: -1, block: {} }) &&
     !MSQSample.isValidFeedbackOp({ action: "nope", scope: "page", sampleId: A }));
+}
+
+section("持久化队列：公网固定 endpoint（源码守卫）");
+{
+  const joined = ["www/js/sample-collector.js", "www/js/updater.js", "www/js/app.js"]
+    .map((f) => fs.readFileSync(path.join(__dirname, f), "utf8")).join("\n");
+  check("业务 JS 无内网地址/端口残留",
+    !joined.includes("192.168.") && !joined.includes(":8787"));
+  check("业务 JS 无 LAN fallback / 自动发现逻辑",
+    !joined.includes("lanFallback") && !joined.includes("discoverLan"));
+  check("默认 sample/update endpoint 均为 update.shiinalab.top",
+    MSQSample.PUBLIC_BASE_URL === "https://update.shiinalab.top" &&
+    MSQUpdater.PUBLIC_BASE_URL === "https://update.shiinalab.top");
 }
 
 console.log("\n" + "=".repeat(46));

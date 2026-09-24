@@ -15,18 +15,24 @@
   "use strict";
 
   var SCHEMA_VERSION = 1;
-  var SETTINGS_KEY = "msq.sampleCollection.v1";
+  var SETTINGS_KEY = "msq.sampleCollection.v2";   /* v2：migrationVersion + autoUpload（无服务器地址配置） */
+  var LEGACY_SETTINGS_KEY = "msq.sampleCollection.v1";
   var SAMPLE_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
   var JPEG_DATAURL_PREFIX = "data:image/jpeg;base64,";
 
-  /* ---------------- 设置（store 可注入，便于 Node 自检） ---------------- */
+  /* 统一公网更新/采集服务器（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：
+     不做 LAN/Public 自动择路；公网不可用时样本留在本地队列。 */
+  var PUBLIC_BASE_URL = "https://update.shiinalab.top";
+
+  /* ---------------- 设置（store 可注入，便于 Node 自检） ----------------
+     v2 配置只有 autoUpload 一项；服务器固定 PUBLIC_BASE_URL，用户不可编辑。
+     迁移策略（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1 任务七）：v1 {enabled} 无法
+     区分「用户主动关闭」与「历史默认 OFF」，统一迁移为 ON——禁止升级后
+     自动上传莫名保持 OFF。 */
 
   function normalizeSettings(raw) {
     var s = (raw && typeof raw === "object") ? raw : {};
-    var url = typeof s.serverUrl === "string" ? s.serverUrl.trim() : "";
-    if (!/^https?:\/\//i.test(url)) { url = ""; }
-    while (url.length > 0 && url.charAt(url.length - 1) === "/") { url = url.slice(0, -1); }
-    return { enabled: s.enabled === true, serverUrl: url };
+    return { migrationVersion: 2, autoUpload: s.autoUpload === true };
   }
 
   function loadSettings(store) {
@@ -34,22 +40,30 @@
     if (!st || typeof st.getItem !== "function") { return normalizeSettings(null); }
     var raw = null;
     try { raw = JSON.parse(st.getItem(SETTINGS_KEY) || "null"); } catch (e) { raw = null; }
-    return normalizeSettings(raw);
+    if (raw && typeof raw === "object" && raw.migrationVersion === 2) {
+      return normalizeSettings(raw);
+    }
+    /* v1（或空）迁移：统一默认 ON 并写回 v2 */
+    var migrated = normalizeSettings({ autoUpload: true });
+    saveSettings(st, migrated);
+    return migrated;
   }
 
   function saveSettings(store, settings) {
     var st = store || (typeof localStorage !== "undefined" ? localStorage : null);
     if (!st || typeof st.setItem !== "function") { return false; }
     try {
-      st.setItem(SETTINGS_KEY, JSON.stringify(normalizeSettings(settings)));
+      var s = normalizeSettings(settings);
+      s.migrationVersion = 2;
+      st.setItem(SETTINGS_KEY, JSON.stringify(s));
+      try { st.removeItem(LEGACY_SETTINGS_KEY); } catch (e2) { /* 旧 key 清理尽力而为 */ }
       return true;
     } catch (e) { return false; }
   }
 
-  /* 自动上传总开关：必须显式开启且已配置服务器地址（默认永远 OFF） */
+  /* 自动上传总开关：默认 ON，用户可主动关闭（持久保留） */
   function shouldCollect(settings) {
-    var s = normalizeSettings(settings);
-    return s.enabled === true && !!s.serverUrl;
+    return normalizeSettings(settings).autoUpload === true;
   }
 
   /* ---------------- sampleId：YYYYMMDD_HHMMSS_xxxxxx（6 位小写 hex） ---------------- */
@@ -371,10 +385,47 @@
     return next;
   }
 
+  /* 客户端 v2 feedback.json 构建（写本地队列 + 上传共用同一结构）。
+     blockRefs 提供 blockIndex → block 定位字段映射（来自当前结果页已有 block）。 */
+  function buildFeedbackJson(sampleId, feedback, blockRefs) {
+    var fb = feedback || {};
+    var pageIssues = (fb.pageTypes || []).map(function (t) { return { type: t }; });
+    var blockIssues = [];
+    Object.keys(fb.blocks || {}).forEach(function (key) {
+      if (!fb.blocks[key]) { return; }
+      var idx = Number(key.split(":")[0]);
+      var b = (blockRefs && blockRefs[key]) || {};
+      blockIssues.push({
+        blockIndex: idx,
+        issue: "wrong_answer",
+        screenNumber: (b.screenNumber != null) ? String(b.screenNumber) : null,
+        rawScreenNumber: (b.rawScreenNumber != null) ? String(b.rawScreenNumber) : null,
+        numberSource: b.numberSource || "ocr",
+        type: b.type || null,
+        finalAnswer: (b.answer !== undefined) ? b.answer : null,
+        confidence: b.confidence || "none",
+        finalBankId: (b.bankId !== undefined) ? b.bankId : null,
+        matchedByOptions: !!(b.matches && b.matches.assistedByOptions)
+      });
+    });
+    blockIssues.sort(function (a, b2) { return a.blockIndex - b2.blockIndex; });
+    return {
+      schemaVersion: 2,
+      sampleId: sampleId,
+      updatedAt: new Date().toISOString(),
+      pageIssues: pageIssues,
+      blockIssues: blockIssues
+    };
+  }
+
   return {
     SCHEMA_VERSION: SCHEMA_VERSION,
     SETTINGS_KEY: SETTINGS_KEY,
+    LEGACY_SETTINGS_KEY: LEGACY_SETTINGS_KEY,
+    PUBLIC_BASE_URL: PUBLIC_BASE_URL,
     SAMPLE_ID_RE: SAMPLE_ID_RE,
+    FEEDBACK_PAGE_ISSUES: FEEDBACK_PAGE_ISSUES,
+    FEEDBACK_BLOCK_ISSUES: FEEDBACK_BLOCK_ISSUES,
     FEEDBACK_PAGE_ISSUES: FEEDBACK_PAGE_ISSUES,
     FEEDBACK_BLOCK_ISSUES: FEEDBACK_BLOCK_ISSUES,
     normalizeSettings: normalizeSettings,
@@ -386,6 +437,7 @@
     buildRunManifest: buildRunManifest,
     buildUploadPayload: buildUploadPayload,
     feedbackInitialState: feedbackInitialState,
+    buildFeedbackJson: buildFeedbackJson,
     isValidFeedbackOp: isValidFeedbackOp,
     buildPageFeedbackRequest: buildPageFeedbackRequest,
     buildPageClearRequest: buildPageClearRequest,

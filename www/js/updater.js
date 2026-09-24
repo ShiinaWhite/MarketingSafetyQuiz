@@ -11,6 +11,9 @@
   var SCHEMA_VERSION = 1;
   var SETTINGS_KEY = "msq.update.v1";
   var MAX_APK_BYTES = 150 * 1024 * 1024;
+  /* 统一公网更新/采集服务器（与 sample-collector.js 的 PUBLIC_BASE_URL 一致）。
+     更新不再依赖 Sample Collector 地址 fallback。 */
+  var PUBLIC_BASE_URL = "https://update.shiinalab.top";
 
   var CHANNEL_PACKAGE = {
     dev: "com.jty.safetyquiz.dev",
@@ -45,14 +48,13 @@
   }
 
   /* 更新服务器解析级联：
-     1) 更新模块显式配置 2) Sample Collector 已配置地址 3) 内置默认 4) 无 */
-  function resolveUpdateServer(updateSettings, sampleSettings, bundledDefault) {
+     1) 更新模块显式配置 2) 内置公网默认（不再依赖采集服务器地址） */
+  function resolveUpdateServer(updateSettings, bundledDefault) {
     var u = normalizeSettings(updateSettings).serverUrl;
     if (u) { return u; }
-    var s = normalizeSettings(sampleSettings).serverUrl;
-    if (s) { return s; }
     var b = normalizeSettings({ serverUrl: bundledDefault }).serverUrl;
-    return b || null;
+    if (!b) { b = PUBLIC_BASE_URL; }
+    return b || PUBLIC_BASE_URL;
   }
 
   /* 渠道由当前真实 applicationId 决定，不写死 dev（cherry-pick 回 main 后自然支持 stable） */
@@ -132,6 +134,7 @@
     SCHEMA_VERSION: SCHEMA_VERSION,
     SETTINGS_KEY: SETTINGS_KEY,
     MAX_APK_BYTES: MAX_APK_BYTES,
+    PUBLIC_BASE_URL: PUBLIC_BASE_URL,
     CHANNEL_PACKAGE: CHANNEL_PACKAGE,
     normalizeSettings: normalizeSettings,
     loadSettings: loadSettings,
