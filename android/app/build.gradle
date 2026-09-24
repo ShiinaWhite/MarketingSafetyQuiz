@@ -13,6 +13,10 @@ android {
         /* PUBLIC_SAMPLE_AUTH_V1：所有 variant 都生成该字段（默认空串），
            dev 变体经 -PMSQ_SAMPLE_WRITE_TOKEN 注入真实值 */
         buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '""'
+        /* QUEUE_RECOVERY_AND_CLEANUP_V1：认证 generation（非敏感整数）。
+           token 轮换发布新版时递增（1→2→3），用于旧 auth_failed 自动恢复判定；
+           与 token 本身无关，非秘密 */
+        buildConfigField "int", "MSQ_SAMPLE_AUTH_GENERATION", (project.findProperty("MSQ_SAMPLE_AUTH_GENERATION") ?: "1")
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61

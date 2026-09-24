@@ -1403,6 +1403,28 @@ section("持久化队列：公网固定 endpoint（源码守卫）");
     MSQUpdater.PUBLIC_BASE_URL === "https://update.shiinalab.top");
 }
 
+/* ---------- QUEUE_RECOVERY_AND_CLEANUP_V1：恢复与清理（源码/结构守卫） ---------- */
+section("队列恢复与清理：generation 与 cleanup 守卫");
+{
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  check("REC-S1 启动恢复调用 shouldAutoRecoverAuthFailed（generation 判定）",
+    pluginSrc.includes("shouldAutoRecoverAuthFailed(st, authGeneration())"));
+  check("CLEAN-S1 cleanupFailed 只允许 failed/auth_failed（源码白名单）",
+    pluginSrc.includes("STATUS_FAILED.equals(status)") &&
+    pluginSrc.includes("STATUS_AUTH_FAILED.equals(status)") &&
+    pluginSrc.indexOf("cleanupFailed") > 0);
+  const cleanupFn = pluginSrc.slice(pluginSrc.indexOf("public void cleanupFailed"));
+  check("CLEAN-S2 非失败状态不被清理路径触碰（cleanupEligible 白名单语义）",
+    cleanupFn.includes("cleanupEligible") &&
+    !cleanupFn.includes("STATUS_PENDING.equals(cleanupStatus)") &&
+    !cleanupFn.includes("STATUS_UPLOADING.equals(cleanupStatus)") &&
+    !cleanupFn.includes("STATUS_RETRY_WAIT.equals(cleanupStatus)"));
+  check("AUTH-GEN BuildConfig 字段已声明（非秘密整数）",
+    fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8")
+      .includes("MSQ_SAMPLE_AUTH_GENERATION"));
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");

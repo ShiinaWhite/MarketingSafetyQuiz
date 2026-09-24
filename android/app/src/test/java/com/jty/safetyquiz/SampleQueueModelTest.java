@@ -58,12 +58,63 @@ public class SampleQueueModelTest {
     @Test
     public void markAuthFailed_noRetryUntilManualOrNewVersion() throws JSONException {
         JSONObject st = state("uploading", 0);
-        SampleQueueModel.markAuthFailed(st, "HTTP 401");
+        SampleQueueModel.markAuthFailed(st, "HTTP 401", 1);
         assertEquals(SampleQueueModel.STATUS_AUTH_FAILED, st.getString("status"));
         assertEquals("HTTP 401", st.getString("lastError"));
+        assertEquals(1, st.getInt("authFailedGeneration"));   // 记录 generation（非 token/hash）
         // 手动重试（retryFailed）：auth_failed → pending 后恢复可拾取
         st.put("status", SampleQueueModel.STATUS_PENDING);
         assertTrue(SampleQueueModel.isRetryDue(st, 9999));
+    }
+
+    /* ---- QUEUE_RECOVERY_AND_CLEANUP_V1：auth generation 恢复（REC-1~5） ---- */
+    private JSONObject authFailedState(int generation) throws JSONException {
+        JSONObject st = state(SampleQueueModel.STATUS_AUTH_FAILED, 9);
+        if (generation >= 0) { st.put("authFailedGeneration", generation); }
+        return st;
+    }
+
+    @Test
+    public void rec1_olderGeneration_authFailed_recoversToPending() throws JSONException {
+        JSONObject st = authFailedState(1);
+        assertTrue(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 2));
+        SampleQueueModel.recoverToPending(st);
+        assertEquals(SampleQueueModel.STATUS_PENDING, st.getString("status"));
+        assertEquals(0, st.getInt("retryCount"));
+        assertTrue(SampleQueueModel.isRetryDue(st, 9999));   // worker 可拾取
+    }
+
+    @Test
+    public void rec2_sameGeneration_staysAuthFailed() throws JSONException {
+        JSONObject st = authFailedState(2);
+        assertFalse(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 2));
+        assertFalse(SampleQueueModel.isRetryDue(st, 999999));   // 不循环打 401
+    }
+
+    @Test
+    public void rec3_legacy_missingGeneration_treatedAsZeroAndRecovers() throws JSONException {
+        JSONObject st = authFailedState(-1);   // -1 = 不写入字段（legacy）
+        assertFalse(st.has("authFailedGeneration"));
+        assertTrue(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 1));   // legacy 0 < CURRENT 1
+    }
+
+    @Test
+    public void rec4_recoveredButStill401_stableAtAuthFailed() throws JSONException {
+        JSONObject st = authFailedState(-1);   // legacy
+        assertTrue(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 1));
+        // 恢复上传后服务器仍 401 → 写入 CURRENT generation
+        SampleQueueModel.markAuthFailed(st, "HTTP 401", 1);
+        assertEquals(SampleQueueModel.STATUS_AUTH_FAILED, st.getString("status"));
+        assertEquals(1, st.getInt("authFailedGeneration"));
+        assertFalse(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 1));   // 同 generation 不再自动
+        assertFalse(SampleQueueModel.isRetryDue(st, 999999));
+    }
+
+    @Test
+    public void rec5_normalFailed_notAffectedByGenerationChange() throws JSONException {
+        JSONObject st = state(SampleQueueModel.STATUS_FAILED, 5);
+        assertFalse(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 2));
+        assertFalse(SampleQueueModel.isRetryDue(st, 999999));   // 普通 failed 不因升级乱重试
     }
 
     @Test

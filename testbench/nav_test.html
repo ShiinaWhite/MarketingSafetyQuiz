@@ -126,13 +126,13 @@
         <summary>测试样本采集</summary>
         <label class="sample-row">
           <input type="checkbox" id="sample-enabled">
-          <span>自动上传测试样本（仅开发调试）</span>
+          <span>自动上传测试样本</span>
         </label>
+        <p class="sample-note">服务器：update.shiinalab.top</p>
+        <p class="sample-note">同步状态：<span id="sample-queue-status">未知</span></p>
         <div class="sample-row">
-          <input id="sample-server" type="url" placeholder="http://192.168.x.x:8787"
-                 autocomplete="off" spellcheck="false" inputmode="url">
-        </div>
-        <div class="sample-row">
+          <button id="btn-sample-retry" class="barbtn" type="button">立即重试</button>
+          <button id="btn-sample-cleanup" class="barbtn hidden" type="button">清理失败样本</button>
           <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
         </div>
         <p id="sample-test-status" class="sample-note hidden"></p>
@@ -153,7 +153,6 @@
       <div id="batch-sample-tools" class="sample-tools hidden">
         <p class="sample-line">
           <span id="batch-sample-status" class="sample-note hidden"></span>
-          <button id="btn-sample-retry" class="linkbtn hidden" type="button">重试</button>
         </p>
         <button id="btn-sample-flag" class="linkbtn hidden" type="button">反馈本页问题</button>
         <div id="sample-feedback-panel" class="sample-feedback-panel hidden"></div>
@@ -247,6 +246,52 @@
     return { text: lines.map((l) => l.text).join("\n"), ms: 8, width: 1000, height: y + 100, lines };
   };
 })();
+
+  /* fake Capacitor 插件必须在 app.js boot 前就位：initSampleQueue 在启动期
+     注册 sampleQueueChanged 监听；Camera/Ocr 点击时才解析，无碍。 */
+  window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
+  window.__feedbackCalls = [];
+  window.__httpFail = 0;
+  window.__queuePersisted = [];
+  window.__queueFeedbacks = [];
+  window.__queueCleanupRequests = [];
+  window.__queueListener = null;
+  window.Capacitor = { Plugins: {
+    Camera: { getPhoto: async () => ({ dataUrl: "data:image/jpeg;base64,QUJD" }) },
+    Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
+    CapacitorHttp: { request: async (opts) => {
+        window.__c.http += 1;
+        if (opts && opts.url && opts.url.indexOf("/api/feedback") >= 0) {
+          window.__feedbackCalls.push(JSON.parse(JSON.stringify(opts.data || {})));
+        }
+        if (window.__httpFail > 0) { window.__httpFail -= 1; return { status: 500, data: { ok: false } }; }
+        return { status: 200, data: { ok: true } };
+      } },
+    SampleQueue: {
+      setServer: async () => ({ ok: true }),
+      init: async () => ({ ok: true, recovered: 0, removed: 0 }),
+      addListener: (ev, cb) => { window.__queueListener = cb; return { remove: () => {} }; },
+      persistSample: async (o) => {
+        window.__queuePersisted.push({
+          sampleId: o.sampleId,
+          dataUrlLen: (o.photoDataUrl || "").length,
+          runJson: JSON.parse(o.runJson)
+        });
+        return { ok: true, sampleId: o.sampleId };
+      },
+      persistFeedback: async (o) => {
+        window.__queueFeedbacks.push(JSON.parse(o.feedbackJson));
+        return { ok: true, sampleId: o.sampleId };
+      },
+      stats: async () => ({ ok: true, pending: 0, uploading: 0, retryWait: 0, failed: 0, pendingBytes: 0 }),
+      retryFailed: async () => ({ ok: true, retried: 0 }),
+      cleanupFailed: async () => {
+        const deleted = window.__queueCleanupRequests.length + 1;
+        window.__queueCleanupRequests.push({ deleted: deleted });
+        return { ok: true, deleted: deleted, failedToDelete: 0, bytesFreed: 12345 };
+      }
+    }
+  } };
 </script>
 <script src="../www/js/core.js"></script>
 <script src="../www/js/sample-collector.js"></script>
@@ -274,43 +319,14 @@
     await poll(() => document.querySelector("#menu-buttons button"));
     await sleep(120);
 
-    /* 注入 fake 插件与调用计数器（OCR once / 返回零重算 / 零上传的行为证据） */
+    /* fake 插件已在 fixture（app.js 之前）注入；此处仅重置计数 */
     window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
-    window.__feedbackCalls = [];
+    window.__feedbackCalls.length = 0;
     window.__httpFail = 0;
-    window.__queuePersisted = [];
-    window.__queueFeedbacks = [];
-    window.Capacitor = { Plugins: {
-      Camera: { getPhoto: async () => ({ dataUrl: "data:image/jpeg;base64,QUJD" }) },
-      Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
-      CapacitorHttp: { request: async (opts) => {
-          window.__c.http += 1;
-          if (opts && opts.url && opts.url.indexOf("/api/feedback") >= 0) {
-            window.__feedbackCalls.push(JSON.parse(JSON.stringify(opts.data || {})));
-          }
-          if (window.__httpFail > 0) { window.__httpFail -= 1; return { status: 500, data: { ok: false } }; }
-          return { status: 200, data: { ok: true } };
-        } },
-      SampleQueue: {
-        setServer: async () => ({ ok: true }),
-        init: async () => ({ ok: true, recovered: 0, removed: 0 }),
-        addListener: (ev, cb) => { window.__queueListener = cb; return { remove: () => {} }; },
-        persistSample: async (o) => {
-          window.__queuePersisted.push({
-            sampleId: o.sampleId,
-            dataUrlLen: (o.photoDataUrl || "").length,
-            runJson: JSON.parse(o.runJson)
-          });
-          return { ok: true, sampleId: o.sampleId };
-        },
-        persistFeedback: async (o) => {
-          window.__queueFeedbacks.push(JSON.parse(o.feedbackJson));
-          return { ok: true, sampleId: o.sampleId };
-        },
-        stats: async () => ({ ok: true, pending: 0, uploading: 0, retryWait: 0, failed: 0, pendingBytes: 0 }),
-        retryFailed: async () => ({ ok: true, retried: 0 })
-      }
-    }};
+    window.__queuePersisted.length = 0;
+    window.__queueFeedbacks.length = 0;
+    window.__queueCleanupRequests.length = 0;
+
     const wrap = (name, key) => {
       const orig = window.MSQ[name];
       window.MSQ[name] = function () { window.__c[key] += 1; return orig.apply(this, arguments); };
@@ -539,6 +555,34 @@
       window.__queuePersisted.length >= 2, String(window.__queuePersisted.length));
     check("FB-Q 新旧 sample 数据互不覆盖（sampleId 不同）",
       window.__queuePersisted[0].sampleId !== window.__queuePersisted[window.__queuePersisted.length - 1].sampleId);
+
+    /* ====== CLEAN：失败样本清理入口（QUEUE_RECOVERY_AND_CLEANUP_V1） ====== */
+    if (window.__queueListener) {
+      window.__queueListener({ pending: 1, uploading: 0, retryWait: 0, failed: 2, authFailed: 1, pendingBytes: 5 * 1024 * 1024 });
+    }
+    await fbSleep(80);
+    const cleanupBtn = document.getElementById("btn-sample-cleanup");
+    check("CLEAN-UI1 failed/authFailed 计数 > 0 时清理按钮可见",
+      !!cleanupBtn && !cleanupBtn.classList.contains("hidden"));
+    check("CLEAN-UI2 同步状态行包含失败计数",
+      document.getElementById("sample-queue-status").textContent.indexOf("失败") >= 0);
+    cleanupBtn.click();   /* 打开确认（Modal.confirm） */
+    await fbSleep(60);
+    const modalOk = document.querySelector("#modal-root .modal .btns .ok");
+    check("CLEAN-UI3 出现二次确认且确认按钮存在", !!modalOk);
+    check("CLEAN-UI4 确认文案含数量/不可恢复警示",
+      document.getElementById("modal-root").innerText.indexOf("尚未成功同步") >= 0 &&
+      document.getElementById("modal-root").innerText.indexOf("无法恢复") >= 0);
+    if (modalOk) { modalOk.click(); }
+    await fbSleep(80);
+    check("CLEAN-UI5 cleanupFailed 已被调用（fake 记录）",
+      window.__queueCleanupRequests.length >= 1, JSON.stringify(window.__queueCleanupRequests));
+    check("CLEAN-UI6 清理后出现完成提示", document.body.innerText.indexOf("已清理失败样本") >= 0);
+    if (window.__queueListener) {
+      window.__queueListener({ pending: 1, uploading: 0, retryWait: 0, failed: 0, authFailed: 0, pendingBytes: 0 });
+    }
+    await fbSleep(80);
+    check("CLEAN-UI7 无失败后清理按钮隐藏", cleanupBtn.classList.contains("hidden"));
   } catch (e) {
     R.push({ id: "HARNESS", pass: false, info: String((e && e.stack) || e) });
   }

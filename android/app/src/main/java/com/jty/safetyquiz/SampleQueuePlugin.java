@@ -174,6 +174,14 @@ public class SampleQueuePlugin extends Plugin {
                                     writeState(dir, st);
                                     recovered++;
                                 }
+                                /* QUEUE_RECOVERY_AND_CLEANUP_V1：旧 generation 的
+                                   auth_failed 随新版本 App 自动恢复一次（无需用户操作）；
+                                   同 generation 保持 auth_failed 防循环 401 */
+                                if (SampleQueueModel.shouldAutoRecoverAuthFailed(st, authGeneration())) {
+                                    SampleQueueModel.recoverToPending(st);
+                                    writeState(dir, st);
+                                    recovered++;
+                                }
                             } catch (Exception e) { /* 单个状态恢复失败不影响其它 */ }
                         }
                     }
@@ -315,6 +323,57 @@ public class SampleQueuePlugin extends Plugin {
         JSObject ret = queueStats();
         ret.put("ok", true);
         call.resolve(ret);
+    }
+
+    /** 清理失败样本（QUEUE_RECOVERY_AND_CLEANUP_V1）：仅删除 failed / auth_failed
+     *  目录；pending / uploading / retry_wait 与已同步数据绝不触碰。
+     *  逐目录独立 try：单个删除失败如实计入 failedToDelete，不虚报成功。 */
+    @PluginMethod
+    public void cleanupFailed(final PluginCall call) {
+        workerExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                int deleted = 0;
+                int failedToDelete = 0;
+                long bytesFreed = 0;
+                File[] dirs = queueDir().listFiles();
+                if (dirs != null) {
+                    for (File dir : dirs) {
+                        if (!dir.isDirectory()) { continue; }
+                        JSONObject st = readState(dir, dir.getName());
+                        String cleanupStatus = st.optString("status", "");
+                        boolean cleanupEligible =
+                            SampleQueueModel.STATUS_FAILED.equals(cleanupStatus)
+                            || SampleQueueModel.STATUS_AUTH_FAILED.equals(cleanupStatus);
+                        if (!cleanupEligible) {
+                            continue;   // pending/uploading/retry_wait/已完成 绝不清理
+                        }
+                        long bytes = 0;
+                        File[] files = dir.listFiles();
+                        boolean allDeleted = true;
+                        if (files != null) {
+                            for (File f : files) {
+                                bytes += f.length();
+                                if (!f.delete()) { allDeleted = false; }
+                            }
+                        }
+                        if (allDeleted && dir.delete()) {
+                            deleted++;
+                            bytesFreed += bytes;
+                        } else {
+                            failedToDelete++;
+                        }
+                    }
+                }
+                JSObject ret = new JSObject();
+                ret.put("ok", failedToDelete == 0);
+                ret.put("deleted", deleted);
+                ret.put("failedToDelete", failedToDelete);
+                ret.put("bytesFreed", bytesFreed);
+                call.resolve(ret);
+                notifyChanged();
+            }
+        });
     }
 
     @PluginMethod
@@ -466,7 +525,7 @@ public class SampleQueuePlugin extends Plugin {
             if (status == 401 || status == 403) {
                 synchronized (stateLock) {
                     JSONObject cur = readState(dir, dir.getName());
-                    SampleQueueModel.markAuthFailed(cur, "HTTP " + status);
+                    SampleQueueModel.markAuthFailed(cur, "HTTP " + status, authGeneration());
                     writeState(dir, cur);
                 }
                 notifyChanged();
@@ -500,7 +559,7 @@ public class SampleQueuePlugin extends Plugin {
             } else if (status == 401 || status == 403) {
                 synchronized (stateLock) {
                     JSONObject cur = readState(dir, sampleId);
-                    SampleQueueModel.markAuthFailed(cur, "feedback HTTP " + status);
+                    SampleQueueModel.markAuthFailed(cur, "feedback HTTP " + status, authGeneration());
                     writeState(dir, cur);
                 }
                 notifyChanged();
@@ -555,6 +614,16 @@ public class SampleQueuePlugin extends Plugin {
             return BuildConfig.MSQ_SAMPLE_WRITE_TOKEN;
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    /* 认证 generation（编译期非敏感整数，非 token/hash）：token 轮换发布新版时递增，
+       用于旧 auth_failed 样本的启动自动恢复判定 */
+    private int authGeneration() {
+        try {
+            return BuildConfig.MSQ_SAMPLE_AUTH_GENERATION;
+        } catch (Exception e) {
+            return 1;
         }
     }
 

@@ -44,10 +44,39 @@ public final class SampleQueueModel {
         return false;   // uploading / failed / auth_failed 均不自动拾取
     }
 
-    /** 认证失败（401/403）：数据绝不删除，等待 App 更新（新 token）或手动重试。 */
-    public static JSONObject markAuthFailed(JSONObject state, String error) throws JSONException {
+    /**
+     * 认证失败（401/403）：数据绝不删除，等待 App 更新（新 token）或手动重试。
+     * 记录失败发生时的 AUTH_GENERATION（非敏感整数，非 token/hash）：
+     * 未来 App generation 更大时，启动恢复逻辑会自动重试一次。
+     */
+    public static JSONObject markAuthFailed(JSONObject state, String error, int authGeneration)
+            throws JSONException {
         state.put("status", STATUS_AUTH_FAILED);
         state.put("lastError", error == null ? "" : error);
+        state.put("authFailedGeneration", authGeneration);
+        state.put("nextRetryAt", JSONObject.NULL);
+        return state;
+    }
+
+    /**
+     * auth_failed 自动恢复判定（QUEUE_RECOVERY_AND_CLEANUP_V1）：
+     * 仅 auth_failed 且记录的失败 generation 严格小于当前 App generation 时恢复
+     * （legacy 无 authFailedGeneration 视为 0，升级后自动恢复一次）；
+     * 同 generation 说明当前版本的 token 本身仍被拒，保持 auth_failed 防循环 401。
+     * 普通 failed 不受 generation 影响，永不因升级自动重试。
+     */
+    public static boolean shouldAutoRecoverAuthFailed(JSONObject state, int currentGeneration) {
+        if (!STATUS_AUTH_FAILED.equals(state.optString("status", ""))) { return false; }
+        int failedGeneration = state.optInt("authFailedGeneration", 0);
+        return failedGeneration < currentGeneration;
+    }
+
+    /** 恢复为 pending：清零重试计数、清除下次重试时间；旧错误移入 previousError 保留历史。 */
+    public static JSONObject recoverToPending(JSONObject state) throws JSONException {
+        String lastError = state.optString("lastError", "");
+        if (!lastError.isEmpty()) { state.put("previousError", lastError); }
+        state.put("status", STATUS_PENDING);
+        state.put("retryCount", 0);
         state.put("nextRetryAt", JSONObject.NULL);
         return state;
     }

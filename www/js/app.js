@@ -1694,6 +1694,34 @@
       line.textContent = text;
       line.classList.remove("hidden");
     }
+    var cleanupBtn = $("btn-sample-cleanup");
+    if (cleanupBtn) {
+      cleanupBtn.classList.toggle("hidden", !((stats.failed || 0) + (stats.authFailed || 0)));
+    }
+  }
+
+  /* 清理失败样本：仅删除 failed / auth_failed 目录（原生侧二次过滤），
+     二次确认后执行；成功后状态行由 sampleQueueChanged 自动刷新。 */
+  function cleanupFailedSamples() {
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.cleanupFailed === "function")) { return; }
+    Queue.cleanupFailed().then(function (r) {
+      if (r && r.ok) {
+        showFeedbackToast("已清理失败样本 " + (r.deleted || 0) + " 个");
+      } else {
+        showFeedbackToast("部分失败样本未能删除（" + ((r && r.failedToDelete) || 0) + " 个）");
+      }
+    }, function () {
+      showFeedbackToast("清理失败，请稍后再试");
+    });
+  }
+
+  function confirmCleanupFailedSamples(failedCount, bytesText) {
+    Modal.confirm("清理失败样本",
+      "将删除 " + failedCount + " 个尚未成功同步的测试样本" +
+      (bytesText ? "（约 " + bytesText + "）" : "") +
+      "。删除后无法恢复，不影响题库、答题记录和已同步样本。",
+      function () { cleanupFailedSamples(); });
   }
 
   function initSampleQueue() {
@@ -1706,7 +1734,23 @@
       Queue.init({ serverUrl: MSQSample.PUBLIC_BASE_URL });
     }
     if (typeof Queue.addListener === "function") {
-      Queue.addListener("sampleQueueChanged", function (stats) { renderQueueStatus(stats); });
+      Queue.addListener("sampleQueueChanged", function (stats) {
+        window.__lastQueueStats = stats;
+        renderQueueStatus(stats);
+      });
+    }
+    var cleanupBtn = $("btn-sample-cleanup");
+    if (cleanupBtn) {
+      cleanupBtn.addEventListener("click", function () {
+        var st = window.__lastQueueStats || {};
+        var count = (st.failed || 0) + (st.authFailed || 0);
+        if (!count) { return; }
+        Modal.confirm("清理失败样本",
+          "将删除 " + count + " 个尚未成功同步的测试样本" +
+          (st.pendingBytes ? "（约 " + MSQUpdater.formatBytes(st.pendingBytes) + "）" : "") +
+          "。删除后无法恢复，不影响题库、答题记录和已同步样本。",
+          function () { cleanupFailedSamples(); });
+      });
     }
   }
 
@@ -1827,13 +1871,11 @@
     showFeedbackToast(nowMarked ? "已标记该答案有误" : "已取消标错");
   }
 
-  function setSampleUploadStatus(text, showRetry) {
+  function setSampleUploadStatus(text) {
     var el = $("batch-sample-status");
-    var retry = $("btn-sample-retry");
     if (!el) { return; }
     el.textContent = text;
     el.classList.remove("hidden");
-    if (retry) { retry.classList.toggle("hidden", !showRetry); }
   }
 
   function updateSampleToolsVisibility() {
@@ -1855,7 +1897,7 @@
     if (!MSQSample.shouldCollect(s)) { return; }   /* 用户 opt-out */
     var Queue = sampleQueuePlugin();
     if (!(Queue && typeof Queue.persistSample === "function")) {
-      setSampleUploadStatus("样本队列不可用（需升级安装包）", false);
+      setSampleUploadStatus("样本队列不可用（需升级安装包）");
       return;
     }
     var runJson;
@@ -1881,7 +1923,7 @@
         bankById: batchIndexById
       }));
     } catch (e) {
-      setSampleUploadStatus("本页样本未能保存（构造失败）", false);
+      setSampleUploadStatus("本页样本未能保存（构造失败）");
       return;
     }
     /* 结果页 UI context：反馈面板仍绑定当前 sampleId */
@@ -1900,7 +1942,8 @@
     }).then(function () {
       /* 数据已 SAFE；上传由 worker 自动进行，状态行由 sampleQueueChanged 驱动 */
     }, function (e) {
-      setSampleUploadStatus("本页样本未能保存（" + String((e && e.message) || e).slice(0, 40) + "）", false);
+      setSampleUploadStatus("本页样本未能保存（" + String((e && e.message) || e).slice(0, 40) + "）");
+      showFeedbackToast("本页样本未能保存");
     });
   }
 
