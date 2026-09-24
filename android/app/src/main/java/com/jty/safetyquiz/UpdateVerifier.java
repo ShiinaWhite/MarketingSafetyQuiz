@@ -79,4 +79,12 @@ public final class UpdateVerifier {
         }
         return false;
     }
+
+    /**
+     * 版本化下载文件名（REAL_SAMPLE_FEEDBACK 排查引入）：每个 versionCode 独立文件，
+     * 杜绝固定 update.apk 的旧包残留被安装路径复用。
+     */
+    public static String updateFileName(long versionCode) {
+        return "update-vc" + versionCode + ".apk";
+    }
 }

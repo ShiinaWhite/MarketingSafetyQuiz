@@ -92,4 +92,12 @@ public class UpdateVerifierTest {
         assertEquals("ab", UpdateVerifier.sha256Hex(new byte[]{(byte) 0xab}));
         assertEquals("00ff10", UpdateVerifier.sha256Hex(new byte[]{0, (byte) 0xff, 0x10}));
     }
+
+    @Test
+    public void updateFileName_versionedPerVersionCode() {
+        assertEquals("update-vc4.apk", UpdateVerifier.updateFileName(4));
+        assertEquals("update-vc5.apk", UpdateVerifier.updateFileName(5));
+        // 不同 versionCode → 不同文件名：旧包残留不可能被新版本的安装路径复用
+        assertFalse(UpdateVerifier.updateFileName(4).equals(UpdateVerifier.updateFileName(5)));
+    }
 }

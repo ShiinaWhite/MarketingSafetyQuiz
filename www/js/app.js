@@ -2134,12 +2134,19 @@
   function installUpdate() {
     var Update = getPlugin("UpdatePlugin");
     if (!(Update && typeof Update.installDownloadedUpdate === "function")) { return; }
+    if (!updateManifest || !updateInfo) { return; }
     updatePhase = "installing";
-    Update.installDownloadedUpdate().then(function () {
-      renderUpdateView("已调起系统安装器，请在系统界面确认更新；安装完成后重新打开应用");
+    /* 安装前原生侧会对最终文件做第二次全量校验（SHA256/包名/versionCode/签名） */
+    Update.installDownloadedUpdate({
+      sha256: updateManifest.sha256,
+      expectedPackageName: updateInfo.id,
+      expectedVersionCode: updateManifest.versionCode
+    }).then(function (r) {
+      renderUpdateView("已调起系统安装器（" + (r && r.versionName || updateManifest.versionName) +
+        "），请在系统界面确认更新；安装完成后重新打开应用");
     }, function (e) {
       updatePhase = "downloaded";
-      updateSetError("无法启动安装：" + String((e && e.message) || e).slice(0, 60));
+      updateSetError(updateFriendlyError(e));
       renderUpdateView("");
     });
   }
