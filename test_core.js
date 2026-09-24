@@ -1425,6 +1425,139 @@ section("队列恢复与清理：generation 与 cleanup 守卫");
       .includes("MSQ_SAMPLE_AUTH_GENERATION"));
 }
 
+/* ---------- R2_FAST_TRANSFER_V1：大文件数据面迁移（源码/结构守卫） ---------- */
+section("R2 直传：客户端只用 init→PUT→commit，且不落盘 presigned URL");
+{
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  check("R2-Q1 新客户端不再调用 legacy POST /api/sample（只走 init/commit）",
+    !pluginSrc.includes('"/api/sample"') &&
+    pluginSrc.includes("/api/sample/init") &&
+    pluginSrc.includes("/api/sample/commit"));
+
+  const psStart = pluginSrc.indexOf("private void processSample");
+  const processSample = pluginSrc.slice(psStart, pluginSrc.indexOf("private String readRevision"));
+  check("R2-Q2 capture 以原生文件流直传（不整图进内存、不 base64）",
+    processSample.includes("httpPutFile(putUrl, capture") &&
+    !/readFile\(new File\(dir, CAPTURE_NAME\)\)/.test(processSample) &&
+    !processSample.includes("Base64"));
+  check("R2-Q3 presigned URL 只在内存使用，绝不写入 state.json",
+    !/put\("presigned/.test(pluginSrc));
+  check("R2-Q4 直传目标必须是 https（拒绝明文上传）",
+    pluginSrc.includes('startsWith("https://")'));
+  check("R2-Q5 直传 PUT 不附加 Authorization（会破坏 presigned 签名）",
+    !/httpPutFile[\s\S]{0,1600}Authorization/.test(pluginSrc));
+  check("R2-Q6 上传失败只改状态，绝不删除本地样本",
+    !/\.delete\(\)/.test(pluginSrc.slice(pluginSrc.indexOf("private void recordFailure"),
+      pluginSrc.indexOf("private void recordFailure") + 1200)));
+  check("R2-Q7 队列状态机含 R2 中间态与直传进度字段",
+    modelSrc.includes("STATUS_UPLOADING_CAPTURE") &&
+    modelSrc.includes("STATUS_CAPTURE_UPLOADED") &&
+    modelSrc.includes("captureObjectKey") &&
+    modelSrc.includes("captureUploaded") &&
+    modelSrc.includes("sampleCommitted"));
+  check("R2-Q8 启动恢复把 R2 中间态回落 pending（不假设 PUT 已完成）",
+    modelSrc.includes("STATUS_UPLOADING_CAPTURE.equals(status)") &&
+    modelSrc.includes("STATUS_CAPTURE_UPLOADED.equals(status)"));
+}
+
+section("R2 直传：Collector 侧 objectKey 由服务器派生 + 短时效 presign");
+{
+  const storeSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/r2_store.js"), "utf8");
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+  const r2Src = fs.readFileSync(path.join(__dirname, "tools/r2/r2.js"), "utf8");
+
+  check("R2-Q9 objectKey 由 sampleId 服务器派生（samples/<date>/<id>/capture.jpg）",
+    storeSrc.includes('"samples/" + date + "/" + sampleId + "/" + CAPTURE_NAME'));
+  check("R2-Q10 commit 校验 objectKey 必须等于服务器派生值",
+    storeSrc.includes("objectKey !== expectedKey"));
+  check("R2-Q11 commit 只做 HeadObject，不同步下载 JPEG 校验",
+    storeSrc.includes("headObject") &&
+    !/commitSample[\s\S]{0,4000}getObjectToFile/.test(storeSrc));
+  check("R2-Q12 presigned TTL 默认 300 秒（短时效）",
+    storeSrc.includes("DEFAULT_PRESIGN_TTL_SECONDS = 300"));
+  check("R2-Q13 presign 是 PUT-only 的 SigV4 query 签名",
+    r2Src.includes('"PUT", canonicalUri, canonicalQuery') &&
+    r2Src.includes("UNSIGNED-PAYLOAD"));
+  check("R2-Q14 R2 未配置时 init/commit FAIL CLOSED（503，不降级为隧道大文件）",
+    serverSrc.includes("sample upload backend unavailable"));
+  check("R2-Q15 legacy /api/sample 仍在（旧客户端平滑 OTA 兼容一代）",
+    serverSrc.includes('p === "/api/sample"'));
+  check("R2-Q16 镜像 worker 在 commit 响应路径之外（后台，不阻塞手机）",
+    storeSrc.includes("function kickMirror") &&
+    storeSrc.includes("setImmediate") &&
+    storeSrc.includes("function whenMirrorIdle"));
+}
+
+section("R2 直传：APK 发布路径与缓存策略守卫");
+{
+  const publishSrc = fs.readFileSync(path.join(__dirname,
+    "tools/dev_update/publish.js"), "utf8");
+  const r2PubSrc = fs.readFileSync(path.join(__dirname,
+    "tools/dev_update/r2_publish.js"), "utf8");
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+
+  check("R2-Q17 APK 对象 key 按 versionCode 唯一（无覆盖式固定名）",
+    r2PubSrc.includes('APK_PREFIX + "/vc" + vc + "/MarketingSafetyQuiz-dev-vc" + vc + ".apk"'));
+  check("R2-Q18 APK 使用 immutable 长缓存",
+    r2PubSrc.includes("public, max-age=31536000, immutable"));
+  check("R2-Q19 发布验证不整包下载（Range 冒烟上限 1MB）",
+    r2PubSrc.includes("SMOKE_RANGE_BYTES = 1024 * 1024") &&
+    r2PubSrc.includes("abortAfterBytes"));
+  check("R2-Q20 latest.json 在 R2 上传+验证之后才写（APK 先可用）",
+    publishSrc.indexOf("await r2publish.publishApk") > 0 &&
+    publishSrc.indexOf("writeAtomic(paths.latestJson") >
+      publishSrc.indexOf("await r2publish.publishApk"));
+  check("R2-Q21 prune 保留最新 3 个且保护 current latest",
+    publishSrc.includes("DEV_APK_KEEP_COUNT = 3") &&
+    r2PubSrc.includes("v.versionCode === Number(currentVersionCode)"));
+  check("R2-Q22 latest.json 仍由 Collector 提供且 no-store（不经 R2 缓存）",
+    serverSrc.includes('"Cache-Control": "no-store"'));
+}
+
+section("R2 secret 静态扫描：仓库内不得出现真实 credential");
+{
+  /* 只扫「形态」：AWS/R2 风格 access key id 与「被赋了真实值的 env 变量」。
+     命中时只报告文件名，绝不打印匹配到的值本身。 */
+  const roots = ["www", "tools", "android/app/src", "test_core.js", "README.md", ".gitignore"];
+  const files = [];
+  const walk = (p) => {
+    let st;
+    try { st = fs.statSync(p); } catch (e) { return; }
+    if (st.isDirectory()) {
+      if (/node_modules|[\\/]build[\\/]|[\\/]\.git|[\\/]_build|[\\/]release|[\\/]real_samples|[\\/]_local/.test(p)) { return; }
+      fs.readdirSync(p).forEach((n) => walk(path.join(p, n)));
+      return;
+    }
+    if (/\.(js|json|java|html|css|md|bat|txt|example)$/.test(p)) { files.push(p); }
+  };
+  roots.forEach((r) => walk(path.join(__dirname, r)));
+
+  const awsKeyHits = [];
+  const assignedSecretHits = [];
+  for (const f of files) {
+    let text;
+    try { text = fs.readFileSync(f, "utf8"); } catch (e) { continue; }
+    if (/\bAKIA[0-9A-Z]{16}\b/.test(text)) { awsKeyHits.push(path.relative(__dirname, f)); }
+    const m = /R2_SECRET_ACCESS_KEY\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{16,})/.exec(text);
+    if (m && !/^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1])) {
+      assignedSecretHits.push(path.relative(__dirname, f));
+    }
+  }
+  check("R2-P3b 无 AWS/R2 风格 access key id 硬编码", awsKeyHits.length === 0,
+    awsKeyHits.join(","));
+  check("R2-P3c 无被赋真实值的 R2_SECRET_ACCESS_KEY", assignedSecretHits.length === 0,
+    assignedSecretHits.join(","));
+  check("R2-P3d .env.r2.local 已被 .gitignore 排除",
+    fs.readFileSync(path.join(__dirname, ".gitignore"), "utf8").includes(".env.r2.local"));
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");

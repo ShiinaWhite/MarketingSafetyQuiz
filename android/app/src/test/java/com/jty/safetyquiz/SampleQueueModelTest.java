@@ -163,4 +163,119 @@ public class SampleQueueModelTest {
         assertEquals(true, back.getBoolean("sealed"));
         assertEquals(SampleQueueModel.STATUS_PENDING, back.getString("status"));
     }
+
+    /* ================= R2_FAST_TRANSFER_V1：capture 直传 R2 的状态机 ================= */
+
+    private static final String R2_KEY = "samples/2026-09-24/20260924_120000_aa11aa/capture.jpg";
+    private static final String R2_SHA =
+            "af0b4b46baf42e400f8a299471058e6ab76f75d933dba65fce093f806f364954";
+
+    @Test
+    public void r2_initialState_hasDirectUploadFields() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        assertEquals(false, st.getBoolean("captureUploaded"));
+        assertEquals(false, st.getBoolean("sampleCommitted"));
+        assertTrue(st.isNull("captureObjectKey"));
+        assertTrue(st.isNull("captureSha256"));
+        assertFalse(SampleQueueModel.isCaptureReady(st));
+    }
+
+    /** R2-S12：App 被杀在任一进行中状态，重启后必须回到 pending 并可被 worker 拾取。
+     *  「回到 pending」不代表假装 PUT 成功——真实进度由 captureUploaded 承载。 */
+    @Test
+    public void r2s12_bootRecovery_coversBothR2IntermediateStates() throws JSONException {
+        assertEquals(SampleQueueModel.STATUS_PENDING,
+                SampleQueueModel.normalizeStatusOnBoot(SampleQueueModel.STATUS_UPLOADING_CAPTURE));
+        assertEquals(SampleQueueModel.STATUS_PENDING,
+                SampleQueueModel.normalizeStatusOnBoot(SampleQueueModel.STATUS_CAPTURE_UPLOADED));
+        JSONObject st = state(SampleQueueModel.STATUS_PENDING, 0);
+        assertTrue(SampleQueueModel.isRetryDue(st, 1L));   // 重启后立刻可被拾取
+    }
+
+    /** 重启后：captureUploaded 已为 true → 不必重传，直接进入 commit。 */
+    @Test
+    public void r2_bootRecovery_keepsCompletedCaptureUpload() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        st.put("status", SampleQueueModel.normalizeStatusOnBoot(st.getString("status")));
+        assertEquals(SampleQueueModel.STATUS_PENDING, st.getString("status"));
+        assertTrue(SampleQueueModel.isCaptureReady(st));   // 不重传 capture
+        assertEquals(R2_KEY, st.getString("captureObjectKey"));
+        assertEquals(R2_SHA, st.getString("captureSha256"));
+    }
+
+    @Test
+    public void r2_isCaptureReady_requiresKeyNotJustFlag() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        st.put("captureUploaded", true);            // 只有 flag，没有 key
+        assertFalse(SampleQueueModel.isCaptureReady(st));
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        assertTrue(SampleQueueModel.isCaptureReady(st));
+    }
+
+    @Test
+    public void r2_commit_marksBothSampleCommittedAndSampleUploaded() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        SampleQueueModel.markCommitted(st);
+        assertEquals(true, st.getBoolean("sampleCommitted"));
+        assertEquals(true, st.getBoolean("sampleUploaded"));   // 既有字段同步，避免两个真相
+        assertEquals(SampleQueueModel.STATUS_CAPTURE_UPLOADED, st.getString("status"));
+    }
+
+    /** commit 404（R2 上对象不在）：清直传进度，下次重新 init + PUT，绝不留错误完成态。 */
+    @Test
+    public void r2_commit404_resetsCaptureProgressForRetry() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        SampleQueueModel.resetCaptureUpload(st);
+        assertFalse(st.getBoolean("captureUploaded"));
+        assertFalse(st.getBoolean("sampleUploaded"));
+        assertFalse(st.getBoolean("sampleCommitted"));
+        assertFalse(SampleQueueModel.isCaptureReady(st));
+        // sha256 保留：重传时不必重算，且内容校验基准不变
+        assertEquals(R2_SHA, st.getString("captureSha256"));
+    }
+
+    /** 认证失败：数据（含直传进度）绝不丢失，等待新版本或手动重试。 */
+    @Test
+    public void r2_authFailed_preservesCaptureProgress() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        SampleQueueModel.markAuthFailed(st, "init HTTP 401", 1);
+        assertEquals(SampleQueueModel.STATUS_AUTH_FAILED, st.getString("status"));
+        assertEquals(R2_KEY, st.getString("captureObjectKey"));   // 进度保留
+        assertTrue(SampleQueueModel.isCaptureReady(st));
+        assertFalse(SampleQueueModel.isRetryDue(st, 999999L));    // 不循环打 401
+        // 新版本 generation 更大 → 自动恢复一次
+        assertTrue(SampleQueueModel.shouldAutoRecoverAuthFailed(st, 2));
+        SampleQueueModel.recoverToPending(st);
+        assertTrue(SampleQueueModel.isRetryDue(st, 1L));
+        assertTrue(SampleQueueModel.isCaptureReady(st));          // 恢复后仍不必重传
+    }
+
+    /** R2-S11：上传失败（5xx/超时）后进入退避重试，本地数据与直传进度都保留。 */
+    @Test
+    public void r2s11_uploadFailure_preservesLocalDataAndProgress() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        SampleQueueModel.markError(st, "commit HTTP 502", 1000L);
+        assertEquals(SampleQueueModel.STATUS_RETRY_WAIT, st.getString("status"));
+        assertTrue(SampleQueueModel.isCaptureReady(st));   // capture 已在 R2，只需重试 commit
+        assertFalse(st.getBoolean("sampleUploaded"));
+        assertEquals(1, st.getInt("retryCount"));
+    }
+
+    /** 完整的 R2 成功链路：capture 上传 → commit → feedback → 可清理。 */
+    @Test
+    public void r2_fullChain_reachesCleanup() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        assertFalse(SampleQueueModel.canCleanup(st, true));        // 还没传
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        assertFalse(SampleQueueModel.canCleanup(st, true));        // capture 到位但未 commit
+        SampleQueueModel.markCommitted(st);
+        assertFalse(SampleQueueModel.canCleanup(st, true));        // feedback 未同步
+        st.put("feedbackUploaded", true);
+        assertTrue(SampleQueueModel.canCleanup(st, true));         // 全同步 → 可清理
+    }
 }

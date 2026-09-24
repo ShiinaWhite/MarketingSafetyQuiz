@@ -20,8 +20,10 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,6 +44,15 @@ import android.util.Base64;
  * - 服务端幂等（同内容重传 200 alreadyExists），重传安全
  * - feedback.json 落盘后由 worker 在 sample 成功后补传，revision 保护
  * - sealed（用户拍下一页）且全部同步完成后自动清理本地大文件
+ *
+ * R2_FAST_TRANSFER_V1（大文件数据面迁移）：
+ *   capture.jpg 不再走 Tunnel。上传改为三步小请求 + 一次直传：
+ *     1) POST /api/sample/init    （走 Tunnel，带 device credential，body 只有标量）
+ *        → 服务器派生 objectKey + 返回短时 presigned PUT URL + requiredHeaders
+ *     2) PUT <presignedPutUrl>    （手机 → R2，**原生文件流**，不经 Tunnel/Collector）
+ *     3) POST /api/sample/commit  （走 Tunnel，body 只有 run.json 与校验字段）
+ *   绝不把 JPEG 转 base64、绝不整图进内存、绝不把 JPEG 塞 JSON。
+ *   presigned URL 是临时 bearer credential：只在内存中存在，不落盘、不打日志。
  */
 @CapacitorPlugin(name = "SampleQueue")
 public class SampleQueuePlugin extends Plugin {
@@ -52,8 +63,11 @@ public class SampleQueuePlugin extends Plugin {
     private static final String RUN_NAME = "run.json";
     private static final String FEEDBACK_NAME = "feedback.json";
     private static final String STATE_NAME = "state.json";
+    private static final String CAPTURE_CONTENT_TYPE = "image/jpeg";
     private static final long HTTP_TIMEOUT_MS = 60_000;
     private static final int HTTP_READ_TIMEOUT_MS = 60_000;
+    /** 控制面响应体上限（init/commit 只回小 JSON）；防止异常响应把内存吃满 */
+    private static final int MAX_CONTROL_RESPONSE_BYTES = 256 * 1024;
 
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
@@ -420,7 +434,9 @@ public class SampleQueuePlugin extends Plugin {
                     uploaded++;
                     continue;
                 }
-                if (SampleQueueModel.STATUS_UPLOADING.equals(status)) { uploading++; }
+                if (SampleQueueModel.STATUS_UPLOADING.equals(status)
+                        || SampleQueueModel.STATUS_UPLOADING_CAPTURE.equals(status)
+                        || SampleQueueModel.STATUS_CAPTURE_UPLOADED.equals(status)) { uploading++; }
                 else if (SampleQueueModel.STATUS_RETRY_WAIT.equals(status)) { retryWait++; }
                 else if (SampleQueueModel.STATUS_FAILED.equals(status)) { failed++; }
                 else if (SampleQueueModel.STATUS_AUTH_FAILED.equals(status)) { authFailed++; }
@@ -509,7 +525,10 @@ public class SampleQueuePlugin extends Plugin {
     private void processSample(final File dir) throws Exception {
         final String sampleId = dir.getName();
         JSONObject st = readState(dir, sampleId);
-        st.put("status", SampleQueueModel.STATUS_UPLOADING);
+        final boolean captureReady = SampleQueueModel.isCaptureReady(st);
+        st.put("status", captureReady
+                ? SampleQueueModel.STATUS_CAPTURE_UPLOADED
+                : SampleQueueModel.STATUS_UPLOADING_CAPTURE);
         st.put("lastError", JSONObject.NULL);
         writeState(dir, st);
         notifyChanged();
@@ -518,28 +537,111 @@ public class SampleQueuePlugin extends Plugin {
                 && !st.optBoolean("feedbackUploaded", true);
 
         if (!st.optBoolean("sampleUploaded", false)) {
-            byte[] jpg = readFile(new File(dir, CAPTURE_NAME));
-            String manifestJson = new String(readFile(new File(dir, RUN_NAME)), StandardCharsets.UTF_8);
-            int status = httpPostJson(serverUrl + "/api/sample",
-                    SampleUploadBody.build(sampleId, jpg, manifestJson));
-            if (status == 401 || status == 403) {
+            /* R2_FAST_TRANSFER_V1：init → presigned PUT → commit。
+               任一步失败都保留全部本地数据（recordFailure 只改状态）。 */
+            File capture = new File(dir, CAPTURE_NAME);
+            if (!capture.exists() || capture.length() == 0) {
+                recordFailure(dir, "capture.jpg missing", false);
+                return;
+            }
+            /* sha256 本地算一次并持久化：重试时不必重算（大图也只是一次线性读） */
+            String sha = st.optString("captureSha256", "");
+            if (sha == null || sha.length() != 64) {
+                sha = sha256OfFile(capture);
+            }
+            final long captureSize = capture.length();
+
+            if (!SampleQueueModel.isCaptureReady(readState(dir, sampleId))) {
+                /* ---- Step 1: /api/sample/init（小请求，走 Tunnel，带 device credential） ---- */
+                JSONObject initBody = new JSONObject();
+                initBody.put("sampleId", sampleId);
+                initBody.put("captureSha256", sha);
+                initBody.put("captureSize", captureSize);
+                initBody.put("contentType", CAPTURE_CONTENT_TYPE);
+
+                HttpResult initRes = httpPostJsonResult(serverUrl + "/api/sample/init",
+                        initBody.toString().getBytes(StandardCharsets.UTF_8));
+                if (initRes.status == 401 || initRes.status == 403) {
+                    markAuthFailed(dir, "init HTTP " + initRes.status);
+                    return;
+                }
+                if (initRes.status < 200 || initRes.status >= 300) {
+                    recordFailure(dir, "init HTTP " + initRes.status, isRetryableStatus(initRes.status));
+                    return;
+                }
+                JSONObject init = tryParseObject(initRes.body);
+                final String putUrl = init == null ? null : init.optString("presignedPutUrl", "");
+                final String objectKey = init == null ? null : init.optString("objectKey", "");
+                if (putUrl == null || putUrl.isEmpty() || objectKey == null || objectKey.isEmpty()) {
+                    recordFailure(dir, "init response missing upload target", true);
+                    return;
+                }
+                if (!putUrl.startsWith("https://")) {
+                    /* presigned URL 必须是 https：明文上传不可接受 */
+                    recordFailure(dir, "init returned non-https upload url", false);
+                    return;
+                }
+
+                /* ---- Step 2: 直传 R2（原生文件流；不经 Tunnel/Collector，不 base64） ---- */
+                int putStatus = httpPutFile(putUrl, capture, init.optJSONObject("requiredHeaders"));
+                if (putStatus == 403 || putStatus == 400) {
+                    /* presigned 过期或签名不符：本次放弃，下次重新 init 拿新 URL（幂等） */
+                    recordFailure(dir, "R2 PUT HTTP " + putStatus, true);
+                    return;
+                }
+                if (putStatus < 200 || putStatus >= 300) {
+                    recordFailure(dir, "R2 PUT HTTP " + putStatus, isRetryableStatus(putStatus));
+                    return;
+                }
                 synchronized (stateLock) {
-                    JSONObject cur = readState(dir, dir.getName());
-                    SampleQueueModel.markAuthFailed(cur, "HTTP " + status, authGeneration());
+                    JSONObject cur = readState(dir, sampleId);
+                    SampleQueueModel.markCaptureUploaded(cur, objectKey, sha);
                     writeState(dir, cur);
                 }
                 notifyChanged();
-                return;   // 认证失败：保留全部数据，不自动重试、不删除、不堵队列
+                st = readState(dir, sampleId);
             }
-            if (status < 200 || status >= 300) {
-                recordFailure(dir, "HTTP " + status, status >= 500 || status == 408);
-                return;   // 失败不堵队列：回到循环继续下一条件/退出
+
+            /* ---- Step 3: /api/sample/commit（小请求：只带 run.json 与校验字段） ---- */
+            String manifestJson = new String(readFile(new File(dir, RUN_NAME)), StandardCharsets.UTF_8);
+            JSONObject manifest = tryParseObject(manifestJson.getBytes(StandardCharsets.UTF_8));
+            if (manifest == null) {
+                recordFailure(dir, "run.json unreadable", false);
+                return;
+            }
+            JSONObject commitBody = new JSONObject();
+            commitBody.put("sampleId", sampleId);
+            commitBody.put("objectKey", st.optString("captureObjectKey", ""));
+            commitBody.put("captureSha256", sha);
+            commitBody.put("captureSize", captureSize);
+            commitBody.put("manifest", manifest);
+
+            HttpResult commitRes = httpPostJsonResult(serverUrl + "/api/sample/commit",
+                    commitBody.toString().getBytes(StandardCharsets.UTF_8));
+            if (commitRes.status == 401 || commitRes.status == 403) {
+                markAuthFailed(dir, "commit HTTP " + commitRes.status);
+                return;
+            }
+            if (commitRes.status == 404) {
+                /* R2 上对象不在（例如上次 PUT 其实没完成就重启）：清直传进度，下次重传 */
+                synchronized (stateLock) {
+                    JSONObject cur = readState(dir, sampleId);
+                    SampleQueueModel.resetCaptureUpload(cur);
+                    writeState(dir, cur);
+                }
+                recordFailure(dir, "commit object missing", true);
+                return;
+            }
+            if (commitRes.status < 200 || commitRes.status >= 300) {
+                recordFailure(dir, "commit HTTP " + commitRes.status, isRetryableStatus(commitRes.status));
+                return;
             }
             synchronized (stateLock) {
-                st = readState(dir, sampleId);
-                st.put("sampleUploaded", true);
-                writeState(dir, st);
+                JSONObject cur = readState(dir, sampleId);
+                SampleQueueModel.markCommitted(cur);
+                writeState(dir, cur);
             }
+            notifyChanged();
         }
 
         if (needFeedback && !readState(dir, sampleId).optBoolean("feedbackUploaded", true)) {
@@ -557,15 +659,10 @@ public class SampleQueuePlugin extends Plugin {
                     writeState(dir, cur);
                 }
             } else if (status == 401 || status == 403) {
-                synchronized (stateLock) {
-                    JSONObject cur = readState(dir, sampleId);
-                    SampleQueueModel.markAuthFailed(cur, "feedback HTTP " + status, authGeneration());
-                    writeState(dir, cur);
-                }
-                notifyChanged();
+                markAuthFailed(dir, "feedback HTTP " + status);
                 return;
             } else {
-                recordFailure(dir, "feedback HTTP " + status, status >= 500 || status == 408);
+                recordFailure(dir, "feedback HTTP " + status, isRetryableStatus(status));
                 return;
             }
         }
@@ -579,6 +676,147 @@ public class SampleQueuePlugin extends Plugin {
                 //noinspection ResultOfMethodCallIgnored
                 dir.delete();
             }
+        }
+    }
+
+    /** 401/403：认证失败，保留数据不自动重试（等待新版本或手动重试）。 */
+    private void markAuthFailed(File dir, String error) throws Exception {
+        synchronized (stateLock) {
+            JSONObject cur = readState(dir, dir.getName());
+            SampleQueueModel.markAuthFailed(cur, error, authGeneration());
+            writeState(dir, cur);
+        }
+        notifyChanged();
+    }
+
+    /** 5xx / 408 / 429 / 网络类错误可退避重试；其余 4xx 视为确定性失败。 */
+    private static boolean isRetryableStatus(int status) {
+        return status >= 500 || status == 408 || status == 429;
+    }
+
+    private static JSONObject tryParseObject(byte[] body) {
+        if (body == null || body.length == 0) { return null; }
+        try { return new JSONObject(new String(body, StandardCharsets.UTF_8)); }
+        catch (Exception e) { return null; }
+    }
+
+    /** 文件 SHA-256（流式，不整文件进内存）。 */
+    private static String sha256OfFile(File f) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        FileInputStream in = new FileInputStream(f);
+        byte[] buf = new byte[64 * 1024];
+        int n;
+        try {
+            while ((n = in.read(buf)) > 0) { md.update(buf, 0, n); }
+        } finally {
+            try { in.close(); } catch (Exception e) { /* 尽力关闭 */ }
+        }
+        byte[] digest = md.digest();
+        StringBuilder sb = new StringBuilder(digest.length * 2);
+        for (byte b : digest) { sb.append(Character.forDigit((b >> 4) & 0xF, 16))
+                .append(Character.forDigit(b & 0xF, 16)); }
+        return sb.toString();
+    }
+
+    private static final class HttpResult {
+        final int status;
+        final byte[] body;
+        HttpResult(int status, byte[] body) { this.status = status; this.body = body; }
+    }
+
+    /** 读响应体（上限保护），失败时返回空体而不是抛错。 */
+    private static byte[] readResponseBody(HttpURLConnection conn, int maxBytes) {
+        InputStream in = null;
+        try {
+            in = conn.getInputStream();
+        } catch (Exception e) {
+            try { in = conn.getErrorStream(); } catch (Exception e2) { return new byte[0]; }
+        }
+        if (in == null) { return new byte[0]; }
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[16 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (bos.size() + n > maxBytes) { break; }
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        } catch (Exception e) {
+            return new byte[0];
+        } finally {
+            try { in.close(); } catch (Exception e) { /* 尽力关闭 */ }
+        }
+    }
+
+    /** POST JSON 并读回响应体（init/commit 需要看 body）。 */
+    private HttpResult httpPostJsonResult(String url, byte[] body) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(HTTP_READ_TIMEOUT_MS);
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setFixedLengthStreamingMode(body.length);
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        final String token = writeToken();
+        if (token != null && !token.isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + token);
+        }
+        try {
+            OutputStream out = conn.getOutputStream();
+            try { out.write(body); } finally {
+                try { out.close(); } catch (Exception e) { /* 尽力关闭 */ }
+            }
+            int status = conn.getResponseCode();
+            return new HttpResult(status, readResponseBody(conn, MAX_CONTROL_RESPONSE_BYTES));
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    /**
+     * R2 presigned PUT：从本地文件**流式**上传（setFixedLengthStreamingMode + 64KB 缓冲）。
+     * - 绝不 base64、绝不整图进内存
+     * - 绝不附加 Authorization：presigned URL 自带临时授权，附加头会破坏签名
+     * - requiredHeaders（Content-Type / x-amz-meta-*）是签名的一部分，必须原样发送
+     */
+    private int httpPutFile(String url, File file, JSONObject requiredHeaders) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(HTTP_READ_TIMEOUT_MS);
+        conn.setRequestMethod("PUT");
+        conn.setDoOutput(true);
+        conn.setFixedLengthStreamingMode(file.length());
+        conn.setRequestProperty("Content-Type", CAPTURE_CONTENT_TYPE);
+        if (requiredHeaders != null) {
+            Iterator<String> keys = requiredHeaders.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String v = requiredHeaders.optString(k, "");
+                if (k != null && !k.isEmpty() && v != null && !v.isEmpty()) {
+                    conn.setRequestProperty(k, v);
+                }
+            }
+        }
+        try {
+            FileInputStream in = new FileInputStream(file);
+            try {
+                OutputStream out = conn.getOutputStream();
+                try {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); }
+                } finally {
+                    try { out.close(); } catch (Exception e) { /* 尽力关闭 */ }
+                }
+            } finally {
+                try { in.close(); } catch (Exception e) { /* 尽力关闭 */ }
+            }
+            int status = conn.getResponseCode();
+            readResponseBody(conn, 8 * 1024);   /* 排空小错误体，避免连接悬挂 */
+            return status;
+        } finally {
+            conn.disconnect();
         }
     }
 

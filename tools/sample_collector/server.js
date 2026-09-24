@@ -5,23 +5,33 @@
    API：
      GET  /health                    存活探测（匿名）
      POST /api/sample                { sampleId, photoDataUrl, manifest } → 落盘 capture.jpg + run.json
+     POST /api/sample/init           R2 直传第 1 步：校验 + 返回 presigned PUT URL（小请求）
+     POST /api/sample/commit         R2 直传第 2 步：HeadObject 验证 + 落 run.json（小请求）
      POST /api/feedback              { sampleId, userFlag, screenNumbers? } → 落盘 feedback.json
      GET  /api/update/<channel>/latest   应用内更新 manifest（只读，channel ∈ {dev, stable}）
      GET  /api/update/<channel>/apk      应用内更新 APK（只读，固定文件名映射）
 
+   R2_FAST_TRANSFER_V1（大文件数据面迁移）：
+     capture.jpg 走 手机 → R2 presigned PUT → 私有 sample bucket，完全不经 Tunnel；
+     控制面（init/commit/feedback/auth/latest）仍是本 Collector 的小请求。
+     commit 只做 HeadObject（存在/大小/metadata.sha256），绝不把 JPEG 拉回 PC；
+     PC real_samples 由后台 mirror worker 从 R2 拉取（.tmp → SHA256 → rename）。
+     R2 配置缺失时 init/commit FAIL CLOSED（503），legacy /api/sample 不受影响。
+
    写接口认证（PUBLIC_SAMPLE_AUTH_V1）：
-     POST /api/sample、POST /api/feedback 需要 Authorization: Bearer <token>。
+     POST /api/sample、/api/sample/init、/api/sample/commit、/api/feedback
+     需要 Authorization: Bearer <token>。
      token 来源：环境变量 MSQ_SAMPLE_WRITE_TOKEN 优先，其次 .secrets/sample-write-token。
      支持 CURRENT + PREVIOUS 双 token 轮换；secret 缺失时写接口 FAIL CLOSED（503），
      绝不自动退回匿名写入。鉴权先于读取 body。
-     GET  /api/update/<channel>/latest   应用内更新 manifest（只读，channel ∈ {dev, stable}）
-     GET  /api/update/<channel>/apk      应用内更新 APK（只读，固定文件名映射）
    更新接口安全：
      channel 白名单 + 固定文件名映射，无任意路径/查询参数，纯只读；
      每次请求实时读盘，发布新 APK 后 Collector 无需重启。
    安全：
      - sampleId 必须严格匹配 YYYYMMDD_HHMMSS_hex6，目录名由其派生，天然阻断 ../ 穿越；
-     - 只接受 image/jpeg data URL；body 有大小上限；不执行任何上传内容；无任意文件读取接口；
+     - R2 object key 由服务器派生，客户端只能回传、不能自造路径；
+     - legacy 只接受 image/jpeg data URL；body 有大小上限；不执行任何上传内容；
+       无任意文件读取接口；
      - 已存在的 sampleId 拒绝覆盖（409）；文件先写临时名再 rename，避免半文件。 */
 "use strict";
 
@@ -30,12 +40,17 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
+const { createR2Store } = require("./r2_store.js");
 
 const SERVICE = "msq-sample-collector";
 const VERSION = 1;
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_MAX_BODY_BYTES = 40 * 1024 * 1024; /* 40MB：base64 后约 30MB 照片，够 V1 用 */
+/* R2 直传的 commit body 只有 run.json（OCR 文本），远小于 legacy 的 base64 照片 */
+const DEFAULT_MAX_COMMIT_BODY_BYTES = 8 * 1024 * 1024;
+/* init 只发几个标量字段 */
+const DEFAULT_MAX_INIT_BODY_BYTES = 64 * 1024;
 
 const SAMPLE_ID_RE = /^([0-9]{4})([0-9]{2})([0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})_[0-9a-f]{6}$/;
 const JPEG_DATAURL_RE = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/;
@@ -302,7 +317,7 @@ function handleCollector(req, res, ctx) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Max-Age": "600"
     });
     res.end();
@@ -326,10 +341,13 @@ function handleCollector(req, res, ctx) {
     return;
   }
 
-  const isSamplePost = req.method === "POST" && p === "/api/sample";
+  const isSampleLegacyPost = req.method === "POST" && p === "/api/sample";
+  const isSampleInitPost = req.method === "POST" && p === "/api/sample/init";
+  const isSampleCommitPost = req.method === "POST" && p === "/api/sample/commit";
   const isFeedbackPost = req.method === "POST" && p === "/api/feedback";
-  if (isSamplePost || isFeedbackPost) {
-    /* PUBLIC_SAMPLE_AUTH_V1：鉴权先于读取 body（不读 JPEG/不建目录/不写临时文件） */
+  if (isSampleLegacyPost || isSampleInitPost || isSampleCommitPost || isFeedbackPost) {
+    /* PUBLIC_SAMPLE_AUTH_V1：鉴权先于读取 body（不读 JPEG/不建目录/不写临时文件）。
+       R2 直传同样受同一 device credential 约束——presigned URL 只在认证通过后发放。 */
     const auth = checkWriteAuth(req, ctx);
     if (!auth.ok) {
       const now = Date.now();
@@ -348,7 +366,9 @@ function handleCollector(req, res, ctx) {
       rejectWrite(res, ctx, req, 429, "rate limited");
       return;
     }
-    if (isSamplePost) { handleSample(req, res, ctx); }
+    if (isSampleInitPost) { handleSampleInit(req, res, ctx); }
+    else if (isSampleCommitPost) { handleSampleCommit(req, res, ctx); }
+    else if (isSampleLegacyPost) { handleSample(req, res, ctx); }
     else { handleFeedback(req, res, ctx, ctx.maxFeedbackBodyBytes); }
     return;
   }
@@ -359,6 +379,92 @@ function handleCollector(req, res, ctx) {
     return;
   }
   sendJSON(res, 404, { ok: false, error: "not found" });
+}
+
+/* ---------------- R2 直传（R2_FAST_TRANSFER_V1） ----------------
+   Step 1 /api/sample/init   ：小请求，校验 + 服务器派生 key + 签发 presigned PUT
+   Step 2 /api/sample/commit ：小请求，HeadObject 验证 + 落 run.json（capture 由后台镜像）
+   两步都已通过 Device Auth（见 handleCollector 的写接口分支）。
+   JPEG 本身只走 手机 → R2，绝不经过本进程。 */
+
+function parseJsonBody(raw) {
+  let body;
+  try { body = JSON.parse(raw.toString("utf8")); }
+  catch (e) { return { ok: false, error: "malformed JSON" }; }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "body must be a JSON object" };
+  }
+  return { ok: true, body: body };
+}
+
+function handleSampleInit(req, res, ctx) {
+  if (!ctx.r2 || !ctx.r2.available()) {
+    /* FAIL CLOSED：R2 未配置时不退回隧道大文件上传，也不假装成功 */
+    sendJSON(res, 503, { ok: false, error: "sample upload backend unavailable" });
+    return;
+  }
+  readBody(req, ctx.maxInitBodyBytes).then(function (raw) {
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) { sendJSON(res, 400, { ok: false, error: parsed.error }); return; }
+    const body = parsed.body;
+    if (!validSampleId(body.sampleId)) {
+      sendJSON(res, 400, { ok: false, error: "invalid sampleId" }); return;
+    }
+    const r = ctx.r2.initSample({
+      sampleId: body.sampleId,
+      captureSha256: body.captureSha256,
+      captureSize: body.captureSize,
+      contentType: body.contentType
+    });
+    if (!r.ok) { sendJSON(res, r.status, { ok: false, error: r.error }); return; }
+    sendJSON(res, 200, {
+      ok: true,
+      sampleId: r.sampleId,
+      objectKey: r.objectKey,
+      presignedPutUrl: r.presignedPutUrl,
+      expiresAt: r.expiresAt,
+      expiresInSeconds: r.expiresInSeconds,
+      requiredHeaders: r.requiredHeaders
+    });
+  }).catch(function (e) {
+    if (e && e.code === "TOO_LARGE") { sendJSON(res, 413, { ok: false, error: "body too large" }); }
+    else { sendJSON(res, 500, { ok: false, error: "internal error" }); }
+  });
+}
+
+function handleSampleCommit(req, res, ctx) {
+  if (!ctx.r2 || !ctx.r2.available()) {
+    sendJSON(res, 503, { ok: false, error: "sample upload backend unavailable" });
+    return;
+  }
+  readBody(req, ctx.maxCommitBodyBytes).then(function (raw) {
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) { sendJSON(res, 400, { ok: false, error: parsed.error }); return; }
+    const body = parsed.body;
+    if (!validSampleId(body.sampleId)) {
+      sendJSON(res, 400, { ok: false, error: "invalid sampleId" }); return;
+    }
+    return ctx.r2.commitSample({
+      sampleId: body.sampleId,
+      objectKey: body.objectKey,
+      captureSha256: body.captureSha256,
+      captureSize: body.captureSize,
+      manifest: body.manifest
+    }).then(function (r) {
+      if (!r.ok) { sendJSON(res, r.status, Object.assign({ ok: false }, r)); return; }
+      sendJSON(res, r.status, {
+        ok: true,
+        alreadyCommitted: r.alreadyCommitted === true,
+        sampleId: r.sampleId,
+        objectKey: r.objectKey,
+        captureSha256: r.captureSha256,
+        mirrorStatus: r.mirrorStatus
+      });
+    });
+  }).catch(function (e) {
+    if (e && e.code === "TOO_LARGE") { sendJSON(res, 413, { ok: false, error: "body too large" }); }
+    else { sendJSON(res, 500, { ok: false, error: "internal error" }); }
+  });
 }
 
 function handleSample(req, res, ctx) {
@@ -632,16 +738,31 @@ function handleFeedback(req, res, ctx, maxBodyBytes) {
 
 function createCollector(options) {
   const opts = options || {};
+  const outRoot = path.resolve(opts.out || path.join(__dirname, "..", "..", "real_samples"));
   const ctx = {
-    outRoot: path.resolve(opts.out || path.join(__dirname, "..", "..", "real_samples")),
+    outRoot: outRoot,
     updatesRoot: path.resolve(opts.updatesRoot || path.join(__dirname, "..", "..", "release", "updates")),
     maxBodyBytes: opts.maxBodyBytes || DEFAULT_MAX_BODY_BYTES,
     maxFeedbackBodyBytes: opts.maxFeedbackBodyBytes || (1 * 1024 * 1024),
+    maxInitBodyBytes: opts.maxInitBodyBytes || DEFAULT_MAX_INIT_BODY_BYTES,
+    maxCommitBodyBytes: opts.maxCommitBodyBytes || DEFAULT_MAX_COMMIT_BODY_BYTES,
     /* 写接口 token（CURRENT 在前，PREVIOUS 在后）。空数组 = FAIL CLOSED。
        allowAnonymousWrites 仅限测试显式开启，生产绝不使用。 */
     writeTokens: Array.isArray(opts.writeTokens) ? opts.writeTokens.filter(Boolean) : [],
     allowAnonymousWrites: opts.allowAnonymousWrites === true
   };
+  /* R2 直传后端。测试可注入 r2Store（含 mock S3 client）；生产按 env/secret 文件装载。
+     缺配置时 available()=false → init/commit 503，legacy /api/sample 照常工作。 */
+  const r2Store = opts.r2Store || createR2Store({
+    outRoot: outRoot,
+    root: opts.root,
+    client: opts.r2Client,
+    maxCaptureBytes: opts.maxCaptureBytes,
+    presignTtlSeconds: opts.presignTtlSeconds,
+    mirrorIntervalMs: opts.mirrorIntervalMs,
+    log: opts.log
+  });
+  ctx.r2 = r2Store;
   const server = http.createServer(function (req, res) {
     try {
       handleCollector(req, res, ctx);
@@ -652,6 +773,7 @@ function createCollector(options) {
   return {
     server: server,
     outRoot: ctx.outRoot,
+    r2: r2Store,
     listen: function (host, port) {
       return new Promise(function (resolve, reject) {
         server.once("error", reject);
@@ -659,6 +781,12 @@ function createCollector(options) {
           server.removeListener("error", reject);
           resolve(server.address().port);
         });
+      });
+    },
+    close: function () {
+      r2Store.stopMirrorWorker();
+      return new Promise(function (resolve) {
+        server.close(function () { resolve(); });
       });
     }
   };
@@ -697,7 +825,6 @@ module.exports = {
   parseArgs: parseArgs,
   lanIPv4Addresses: lanIPv4Addresses
 };
-
 /* 写接口 token：环境变量优先，其次 .secrets/sample-write-token。
    均缺失 → writeTokens 为空 → 写接口 FAIL CLOSED（503），读接口不受影响。 */
 function loadWriteTokens(explicit) {
@@ -734,6 +861,20 @@ if (require.main === module) {
     if (!writeTokens.length) {
       console.log("");
       console.log("[警告] 写接口处于 FAIL CLOSED 状态（见上方警告）。");
+    }
+    console.log("");
+    if (collector.r2 && collector.r2.available()) {
+      console.log("R2 直传：ENABLED（capture.jpg 经 presigned PUT 直传私有 bucket）");
+      console.log("  sample bucket : " + collector.r2.config.sampleBucket);
+      console.log("  presign TTL   : " + collector.r2.presignTtlSeconds + "s");
+      console.log("  PC 镜像       : 后台 worker（不阻塞手机）");
+      collector.r2.startMirrorWorker();
+    } else {
+      console.log("R2 直传：DISABLED（" +
+        ((collector.r2 && collector.r2.unavailableReason()) || "not configured") + "）");
+      console.log("  → POST /api/sample/init 与 /api/sample/commit 将返回 503（FAIL CLOSED）");
+      console.log("  → legacy POST /api/sample 不受影响，仍可用");
+      console.log("  → 配置方法：tools/sample_collector/.env.r2.local（见 .env.r2.example）");
     }
   }, function (e) {
     console.error("failed to start: " + (e && e.message));

@@ -8,11 +8,26 @@ import org.json.JSONObject;
  * 状态：pending → uploading → (成功标记 sampleUploaded/feedbackUploaded) 或
  * retry_wait（退避）→ failed（超过自动重试上限，等待手动重试）。
  * App 启动恢复：uploading 一律视为 pending（服务端幂等，重传安全）。
+ *
+ * R2_FAST_TRANSFER_V1 扩展（capture.jpg 直传私有 R2，不再经 Tunnel）：
+ *   pending → uploading_capture → capture_uploaded → (commit) → sampleUploaded → feedback → done
+ * 新增状态/字段：
+ *   status=uploading_capture 正在向 R2 presigned URL PUT capture.jpg
+ *   status=capture_uploaded  capture.jpg 已在 R2；下一步是 /api/sample/commit
+ *   captureUploaded / captureObjectKey / captureSha256  直传进度（持久化，重启可续）
+ *   sampleCommitted          与 sampleUploaded 同一事件的显式名字
+ * 协议幂等：init 对同一 sampleId 恒返回同一 objectKey；重传相同字节是安全覆盖；
+ * commit 对相同 (sampleId, sha256, objectKey) 返回 200 alreadyCommitted。
+ * 因此 App 被杀在 uploading_capture 时，下次启动重新 init+PUT 一定安全。
  */
 public final class SampleQueueModel {
 
     public static final String STATUS_PENDING = "pending";
     public static final String STATUS_UPLOADING = "uploading";
+    /** R2 直传：正在 PUT capture.jpg 到 presigned URL */
+    public static final String STATUS_UPLOADING_CAPTURE = "uploading_capture";
+    /** R2 直传：capture.jpg 已就位，等待 /api/sample/commit */
+    public static final String STATUS_CAPTURE_UPLOADED = "capture_uploaded";
     public static final String STATUS_RETRY_WAIT = "retry_wait";
     public static final String STATUS_FAILED = "failed";
     /** 认证失败（401/403）：非瞬时错误，不自动重试；OTA 新版本或手动重试后恢复。 */
@@ -25,9 +40,16 @@ public final class SampleQueueModel {
     private SampleQueueModel() {
     }
 
-    /** App 启动恢复：进程死亡时可能停在 uploading，统一视为 pending 重新入队。 */
+    /** App 启动恢复：进程死亡时可能停在任一进行中状态，统一视为 pending 重新入队。
+     *  R2 直传的两个中间态同样回落 pending——真实进度由 captureUploaded 等字段承载，
+     *  所以「回到 pending」不会丢失已完成的工作，也不会假设 PUT 已经成功。 */
     public static String normalizeStatusOnBoot(String status) {
-        return STATUS_UPLOADING.equals(status) ? STATUS_PENDING : status;
+        if (STATUS_UPLOADING.equals(status)
+                || STATUS_UPLOADING_CAPTURE.equals(status)
+                || STATUS_CAPTURE_UPLOADED.equals(status)) {
+            return STATUS_PENDING;
+        }
+        return status;
     }
 
     /** 第 retryCount 次失败后的退避时长（retryCount 从 1 计）。 */
@@ -103,7 +125,48 @@ public final class SampleQueueModel {
         st.put("lastError", JSONObject.NULL);
         st.put("sealed", false);
         st.put("feedbackRevision", 0);
+        /* R2 直传进度（R2_FAST_TRANSFER_V1） */
+        st.put("captureUploaded", false);
+        st.put("captureObjectKey", JSONObject.NULL);
+        st.put("captureSha256", JSONObject.NULL);
+        st.put("sampleCommitted", false);
         return st;
+    }
+
+    /** capture.jpg 已成功 PUT 到 R2：记录服务器分配的 objectKey 与本地算出的 sha256。
+     *  objectKey 恒为服务器派生值，客户端只是把它持久化以便 commit 时回传。 */
+    public static JSONObject markCaptureUploaded(JSONObject state, String objectKey, String sha256)
+            throws JSONException {
+        state.put("captureUploaded", true);
+        state.put("captureObjectKey", objectKey == null ? JSONObject.NULL : objectKey);
+        state.put("captureSha256", sha256 == null ? JSONObject.NULL : sha256);
+        state.put("status", STATUS_CAPTURE_UPLOADED);
+        return state;
+    }
+
+    /** commit 成功：capture 已在服务端确认落库。
+     *  sampleCommitted 是本轮新增的显式名字；sampleUploaded 是既有字段，
+     *  两者描述同一事件，因此**只在这里一起写入**，避免出现两个真相。 */
+    public static JSONObject markCommitted(JSONObject state) throws JSONException {
+        state.put("sampleCommitted", true);
+        state.put("sampleUploaded", true);
+        return state;
+    }
+
+    /** commit 发现 R2 上对象不存在（例如 PUT 其实没完成就重启了）：
+     *  清掉直传进度，下次重新 init + PUT。协议幂等，重传安全。 */
+    public static JSONObject resetCaptureUpload(JSONObject state) throws JSONException {
+        state.put("captureUploaded", false);
+        state.put("captureObjectKey", JSONObject.NULL);
+        state.put("sampleCommitted", false);
+        state.put("sampleUploaded", false);
+        return state;
+    }
+
+    /** 是否已完成 R2 直传（可直接进入 commit）。 */
+    public static boolean isCaptureReady(JSONObject state) {
+        return state.optBoolean("captureUploaded", false)
+                && state.optString("captureObjectKey", "").length() > 0;
     }
 
     /** 记录一次失败：未达上限 → retry_wait + nextRetryAt；达上限 → failed。 */
