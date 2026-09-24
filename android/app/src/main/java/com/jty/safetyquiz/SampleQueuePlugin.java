@@ -565,6 +565,11 @@ public class SampleQueuePlugin extends Plugin {
                     markAuthFailed(dir, "init HTTP " + initRes.status);
                     return;
                 }
+                if (initRes.status == 429) {
+                    /* 限流：尊重 Retry-After（没有则用默认退避） */
+                    recordRateLimited(dir, "init HTTP 429", initRes.retryAfterMs);
+                    return;
+                }
                 if (initRes.status < 200 || initRes.status >= 300) {
                     recordFailure(dir, "init HTTP " + initRes.status, isRetryableStatus(initRes.status));
                     return;
@@ -582,15 +587,20 @@ public class SampleQueuePlugin extends Plugin {
                     return;
                 }
 
-                /* ---- Step 2: 直传 R2（原生文件流；不经 Tunnel/Collector，不 base64） ---- */
+                /* ---- Step 2: 直传 COS（原生文件流；不经 Tunnel/Collector，不 base64） ---- */
+                long putStartedAt = android.os.SystemClock.elapsedRealtime();
                 int putStatus = httpPutFile(putUrl, capture, init.optJSONObject("requiredHeaders"));
+                long putElapsedMs = android.os.SystemClock.elapsedRealtime() - putStartedAt;
+                /* 非敏感诊断（真机验收用）：大小 / 耗时 / 平均速率。绝不记录 URL。 */
+                recordUploadDiagnostics(dir, captureSize, putElapsedMs);
                 if (putStatus == 403 || putStatus == 400) {
-                    /* presigned 过期或签名不符：本次放弃，下次重新 init 拿新 URL（幂等） */
-                    recordFailure(dir, "R2 PUT HTTP " + putStatus, true);
+                    /* presigned 过期或签名不符：不做永久 failed，本次放弃，
+                       下次重新 init 拿新 URL（objectKey 由服务器派生，幂等安全） */
+                    recordFailure(dir, "COS PUT HTTP " + putStatus + " (will re-init)", true);
                     return;
                 }
                 if (putStatus < 200 || putStatus >= 300) {
-                    recordFailure(dir, "R2 PUT HTTP " + putStatus, isRetryableStatus(putStatus));
+                    recordFailure(dir, "COS PUT HTTP " + putStatus, isRetryableStatus(putStatus));
                     return;
                 }
                 synchronized (stateLock) {
@@ -622,8 +632,12 @@ public class SampleQueuePlugin extends Plugin {
                 markAuthFailed(dir, "commit HTTP " + commitRes.status);
                 return;
             }
+            if (commitRes.status == 429) {
+                recordRateLimited(dir, "commit HTTP 429", commitRes.retryAfterMs);
+                return;
+            }
             if (commitRes.status == 404) {
-                /* R2 上对象不在（例如上次 PUT 其实没完成就重启）：清直传进度，下次重传 */
+                /* COS 上对象不在（例如上次 PUT 其实没完成就重启）：清直传进度，下次重传 */
                 synchronized (stateLock) {
                     JSONObject cur = readState(dir, sampleId);
                     SampleQueueModel.resetCaptureUpload(cur);
@@ -689,9 +703,40 @@ public class SampleQueuePlugin extends Plugin {
         notifyChanged();
     }
 
-    /** 5xx / 408 / 429 / 网络类错误可退避重试；其余 4xx 视为确定性失败。 */
+    /** 5xx / 408 / 网络类错误可退避重试；429 单独处理（尊重 Retry-After）。 */
     private static boolean isRetryableStatus(int status) {
-        return status >= 500 || status == 408 || status == 429;
+        return status >= 500 || status == 408;
+    }
+
+    /**
+     * 429 限流：尊重服务端 Retry-After（逻辑在 SampleQueueModel，可 JVM 单测）。
+     * 数据照旧保留，只是推迟下次尝试，绝不进入 failed。
+     */
+    private void recordRateLimited(File dir, String error, long retryAfterMs) throws Exception {
+        synchronized (stateLock) {
+            JSONObject cur = readState(dir, dir.getName());
+            SampleQueueModel.markRateLimited(cur, error, System.currentTimeMillis(), retryAfterMs);
+            writeState(dir, cur);
+        }
+        notifyChanged();
+    }
+
+    /**
+     * 非敏感上传诊断（真机验收用）：capture 大小、COS PUT 耗时、平均速率。
+     * 只写数字到本地 state.json，绝不含 URL / 签名 / secret。
+     */
+    private void recordUploadDiagnostics(File dir, long captureSize, long putElapsedMs) {
+        try {
+            synchronized (stateLock) {
+                JSONObject cur = readState(dir, dir.getName());
+                cur.put("captureSize", captureSize);
+                cur.put("captureUploadMs", putElapsedMs);
+                if (putElapsedMs > 0) {
+                    cur.put("captureBytesPerSec", (long) (captureSize * 1000.0 / putElapsedMs));
+                }
+                writeState(dir, cur);
+            }
+        } catch (Exception e) { /* 诊断失败不影响上传主链路 */ }
     }
 
     private static JSONObject tryParseObject(byte[] body) {
@@ -721,7 +766,18 @@ public class SampleQueuePlugin extends Plugin {
     private static final class HttpResult {
         final int status;
         final byte[] body;
-        HttpResult(int status, byte[] body) { this.status = status; this.body = body; }
+        /* 服务端 Retry-After（毫秒），无则为 0 */
+        final long retryAfterMs;
+        HttpResult(int status, byte[] body, long retryAfterMs) {
+            this.status = status; this.body = body; this.retryAfterMs = retryAfterMs;
+        }
+    }
+
+    /** 解析 Retry-After（仅支持秒数形式；HTTP-date 罕见，忽略并回退默认退避）。 */
+    private static long parseRetryAfterMs(String value) {
+        if (value == null || value.isEmpty()) { return 0L; }
+        try { return Math.max(0L, Long.parseLong(value.trim()) * 1000L); }
+        catch (NumberFormatException e) { return 0L; }
     }
 
     /** 读响应体（上限保护），失败时返回空体而不是抛错。 */
@@ -768,7 +824,8 @@ public class SampleQueuePlugin extends Plugin {
                 try { out.close(); } catch (Exception e) { /* 尽力关闭 */ }
             }
             int status = conn.getResponseCode();
-            return new HttpResult(status, readResponseBody(conn, MAX_CONTROL_RESPONSE_BYTES));
+            return new HttpResult(status, readResponseBody(conn, MAX_CONTROL_RESPONSE_BYTES),
+                    parseRetryAfterMs(conn.getHeaderField("Retry-After")));
         } finally {
             conn.disconnect();
         }

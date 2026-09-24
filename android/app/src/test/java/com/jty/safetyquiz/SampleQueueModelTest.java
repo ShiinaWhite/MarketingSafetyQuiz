@@ -278,4 +278,49 @@ public class SampleQueueModelTest {
         st.put("feedbackUploaded", true);
         assertTrue(SampleQueueModel.canCleanup(st, true));         // 全同步 → 可清理
     }
+
+    /* ================= COS_SAMPLE_TRANSFER_V1：限流与诊断 ================= */
+
+    /** 429 + Retry-After：按服务端指示推迟，绝不进入 failed，数据保留。 */
+    @Test
+    public void cos_rateLimited_respectsRetryAfter() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, true);
+        SampleQueueModel.markCaptureUploaded(st, R2_KEY, R2_SHA);
+        SampleQueueModel.markRateLimited(st, "commit HTTP 429", 10_000L, 30_000L);
+        assertEquals(SampleQueueModel.STATUS_RETRY_WAIT, st.getString("status"));
+        assertEquals(40_000L, st.getLong("nextRetryAt"));          // 10000 + 30000
+        assertTrue(st.getBoolean("captureUploaded"));              // 进度与数据保留
+        assertFalse(st.getBoolean("sampleUploaded"));
+        // Retry-After 到期后可被 worker 拾取
+        assertTrue(SampleQueueModel.isRetryDue(st, 40_000L));
+        assertFalse(SampleQueueModel.isRetryDue(st, 39_999L));
+    }
+
+    /** 无 Retry-After 头：回退到默认退避（第一档 5s）。 */
+    @Test
+    public void cos_rateLimited_withoutHeader_usesDefaultBackoff() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        SampleQueueModel.markRateLimited(st, "init HTTP 429", 1_000L, 0L);
+        assertEquals(SampleQueueModel.STATUS_RETRY_WAIT, st.getString("status"));
+        assertEquals(6_000L, st.getLong("nextRetryAt"));           // 1000 + 5000
+    }
+
+    /** Retry-After 异常大：封顶 10 分钟，防止被服务端逼成长时间停摆。 */
+    @Test
+    public void cos_rateLimited_capsHugeRetryAfter() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        SampleQueueModel.markRateLimited(st, "commit HTTP 429", 0L, 86_400_000L);
+        assertEquals(SampleQueueModel.RATE_LIMIT_MAX_WAIT_MS, st.getLong("nextRetryAt"));
+    }
+
+    /** 限流多次累积也不会变成 failed（与普通错误不同：429 永远可重试）。 */
+    @Test
+    public void cos_rateLimited_neverBecomesFailed() throws JSONException {
+        JSONObject st = SampleQueueModel.initialState("20260924_120000_aa11aa", 1000L, false);
+        for (int i = 0; i < 10; i++) {
+            SampleQueueModel.markRateLimited(st, "HTTP 429", i * 1000L, 1000L);
+        }
+        assertEquals(SampleQueueModel.STATUS_RETRY_WAIT, st.getString("status"));
+        assertTrue(SampleQueueModel.isRetryDue(st, st.getLong("nextRetryAt")));
+    }
 }

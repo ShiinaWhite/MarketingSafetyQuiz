@@ -185,6 +185,20 @@ public final class SampleQueueModel {
         return state;
     }
 
+    /** 服务端限流（429）：尊重 Retry-After，封顶 10 分钟，绝不到 failed。 */
+    public static final long RATE_LIMIT_MAX_WAIT_MS = 600_000L;
+
+    public static JSONObject markRateLimited(JSONObject state, String error, long now,
+                                             long retryAfterMs) throws JSONException {
+        long wait = retryAfterMs > 0 ? Math.min(retryAfterMs, RATE_LIMIT_MAX_WAIT_MS)
+                : retryDelayMs(1);
+        state.put("status", STATUS_RETRY_WAIT);
+        state.put("lastError", error == null ? "" : error);
+        state.put("retryCount", state.optInt("retryCount", 0) + 1);
+        state.put("nextRetryAt", now + wait);
+        return state;
+    }
+
     public static JSONObject fromJson(String json) throws JSONException {
         return new JSONObject(json);
     }
