@@ -182,13 +182,23 @@ function credentialScope(dateStamp, region, service) {
 
 /* 由 { endpoint, bucket, key, query, headers, method, payloadHash, now } 生成签名头。
    headers 的 key 原样保留（发送时用），签名时统一小写并排序。
-   spec.omitContentSha256 仅供 AWS 官方测试向量比对（那些向量不带该头）。 */
+   spec.omitContentSha256 仅供 AWS 官方测试向量比对（那些向量不带该头）。
+   寻址风格（COS_SAMPLE_TRANSFER_POC 新增）：
+   - "path"（默认，R2）：canonical URI = /<bucket>/<key>
+   - "virtual"（腾讯 COS 强制要求）：bucket 在 Host 里，canonical URI = /<key>
+     COS 对 path-style 直接返回 PathStyleDomainForbidden，必须 virtual-hosted。 */
+function canonicalUriFor(addressingStyle, bucket, key) {
+  const k = key === undefined || key === null ? "" : key;
+  if (addressingStyle === "virtual") {
+    return "/" + uriEncode(k, false);
+  }
+  return "/" + uriEncode(bucket, false) + (k ? "/" + uriEncode(k, false) : "");
+}
+
 function signRequest(spec) {
   const u = new URL(spec.endpoint);
   const host = u.host;
-  const key = spec.key === undefined || spec.key === null ? "" : spec.key;
-  const canonicalUri = "/" + uriEncode(spec.bucket, false) +
-    (key ? "/" + uriEncode(key, false) : "");
+  const canonicalUri = canonicalUriFor(spec.addressingStyle, spec.bucket, spec.key);
   const region = spec.region || REGION;
   const service = spec.service || SERVICE;
 
@@ -291,8 +301,8 @@ function doRequest(spec, body, resolveBody) {
   });
 }
 
-function requestPath(bucket, key, query) {
-  let p = "/" + uriEncode(bucket, false) + (key ? "/" + uriEncode(key, false) : "");
+function requestPath(addressingStyle, bucket, key, query) {
+  const p = canonicalUriFor(addressingStyle, bucket, key);
   const q = Object.keys(query || {}).sort().map(function (k) {
     return uriEncode(k, true) + "=" + uriEncode(query[k], true);
   }).join("&");
@@ -310,10 +320,12 @@ async function signedFetch(config, opts) {
   const headers = Object.assign({}, opts.headers || {});
   if (body) { headers["Content-Length"] = String(body.length); }
 
+  const addressingStyle = config.virtualHostStyle === true ? "virtual" : "path";
   const signed = signRequest({
     endpoint: config.endpoint,
     bucket: opts.bucket,
     key: opts.key,
+    addressingStyle: addressingStyle,
     query: opts.query,
     method: opts.method,
     headers: headers,
@@ -329,7 +341,7 @@ async function signedFetch(config, opts) {
   const res = await doRequest({
     endpoint: config.endpoint,
     method: opts.method,
-    path: requestPath(opts.bucket, opts.key, opts.query),
+    path: requestPath(addressingStyle, opts.bucket, opts.key, opts.query),
     headers: signed.headers
   }, body, opts.resolveBody);
 
@@ -372,6 +384,18 @@ async function headObject(config, bucket, key, opts) {
     etag: res.headers["etag"] || null,
     metadata: metadata
   };
+}
+
+/* HeadBucket：bucket 存在且 credential 可访问则 2xx；403/404 返回 { ok:false }。
+   用于连通性/权限冒烟（不读任何对象）。 */
+async function headBucket(config, bucket, opts) {
+  const res = await signedFetch(config, {
+    method: "HEAD", bucket: bucket, key: "", now: (opts || {}).now
+  });
+  if (res.status < 200 || res.status >= 300) {
+    return { ok: false, notFound: res.status === 404, forbidden: res.status === 403, status: res.status };
+  }
+  return { ok: true, status: res.status, headers: res.headers };
 }
 
 /* PutObject。body 为 Buffer。metadata 走 x-amz-meta-*，可在 commit 时用 HeadObject 验证。
@@ -474,10 +498,12 @@ function getObjectToFile(config, bucket, key, destPath, opts) {
     (async function () {
       const now = o.now || new Date();
       const stamps = amzDate(now);
+      const addressingStyle = config.virtualHostStyle === true ? "virtual" : "path";
       const signed = signRequest({
         endpoint: config.endpoint,
         bucket: bucket,
         key: key,
+        addressingStyle: addressingStyle,
         query: null,
         method: "GET",
         headers: {},
@@ -492,7 +518,7 @@ function getObjectToFile(config, bucket, key, destPath, opts) {
       const res = await doRequest({
         endpoint: config.endpoint,
         method: "GET",
-        path: requestPath(bucket, key, null),
+        path: requestPath(addressingStyle, bucket, key, null),
         headers: signed.headers
       }, null, false);
 
@@ -549,7 +575,8 @@ function presignPutUrl(config, spec) {
     "X-Amz-SignedHeaders": signedHeaders
   };
 
-  const canonicalUri = "/" + uriEncode(spec.bucket, false) + "/" + uriEncode(spec.key, false);
+  const addressingStyle = config.virtualHostStyle === true ? "virtual" : "path";
+  const canonicalUri = canonicalUriFor(addressingStyle, spec.bucket, spec.key);
   const canonicalQuery = Object.keys(query).sort().map(function (k) {
     return uriEncode(k, true) + "=" + uriEncode(query[k], true);
   }).join("&");
@@ -620,7 +647,10 @@ module.exports = {
   signRequest: signRequest,
   signingKey: signingKey,
   credentialScope: credentialScope,
+  canonicalUriFor: canonicalUriFor,
+  requestPath: requestPath,
   presignPutUrl: presignPutUrl,
+  headBucket: headBucket,
   headObject: headObject,
   putObject: putObject,
   deleteObject: deleteObject,
