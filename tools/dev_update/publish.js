@@ -1,12 +1,22 @@
 #!/usr/bin/env node
-/* publish.js —— DEV 更新发布工具（SELF_UPDATE_V1）
+/* publish.js —— DEV 更新发布工具（SELF_UPDATE_V1 + R2_FAST_TRANSFER_V1）
    零第三方依赖。工作流：
      node tools/dev_update/publish.js [--notes "..."] [--version-code N]
         [--version-name X.Y.Z] [--skip-sync] [--allow-new-signer]
    步骤：确定下一 versionCode → cap sync → assembleDev（-P 注入版本）→
-   aapt/apksigner 实测校验（包名/版本/label/签名证书）→ 原子发布
-   release/updates/dev/（先 APK 后 latest.json）→ 同步 release/营销安规刷题-DEV.apk。
-   任何校验不符：拒绝发布，保留上一版更新不受影响。 */
+   aapt/apksigner 实测校验（包名/版本/label/签名证书）→ SHA256 →
+   上传 APK 到 R2 downloads bucket（key 按 vc 唯一）→ R2 HeadObject 验证 →
+   Custom Domain 轻量 HEAD + 前 1MB Range 比对 → 原子发布 latest.json（最后一步）
+   → prune 旧 DEV APK（保留最新 3 个，绝不删 current latest）。
+
+   R2_FAST_TRANSFER_V1 关键变化：
+   - apkUrl 改为 R2 Custom Domain 的版本化绝对 URL，手机 OTA 不再经过 Tunnel
+   - 发布验证**不再重新下载完整 52MB**（那正是之前把 ZCode 卡死的原因）：
+     改为 HeadObject（Content-Length + metadata.sha256/versionCode）+ 公网 1MB 冒烟比对
+   - 任何 R2 上传/验证失败 → latest.json 保持指向旧版本，绝不出现
+     「latest 已指向 vcN 但 vcN APK 不可下载」
+
+   签名/包名/版本校验与以前完全一致：不符合即拒绝发布，保留上一版更新不受影响。 */
 "use strict";
 
 const { spawnSync } = require("child_process");
@@ -14,6 +24,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+
+const r2 = require("../r2/r2.js");
+const r2publish = require("./r2_publish.js");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const ANDROID = path.join(ROOT, "android");
@@ -31,6 +44,10 @@ const DEV_APK = path.join(ROOT, "release", "营销安规刷题-DEV.apk");
 const EXPECTED_PACKAGE = "com.jty.safetyquiz.dev";
 const EXPECTED_LABEL = "营销安规刷题 DEV";
 const SECRET_FILE = path.join(ROOT, ".secrets", "sample-write-token");
+/* APK 公网下载域（R2 Custom Domain，不经 Tunnel）。可用环境变量覆盖。 */
+const DOWNLOAD_DOMAIN = (process.env.R2_DOWNLOAD_DOMAIN || r2publish.DEFAULT_DOMAIN).trim();
+/* DEV APK 保留个数（publish 时 prune，绝不用 30 天无条件 Lifecycle） */
+const DEV_APK_KEEP_COUNT = 3;
 
 /* PUBLIC_SAMPLE_AUTH_V1：读取样本写接口 secret（环境变量优先，其次 .secrets/）。
    缺失/过短 → 拒绝发布（避免产出无法认证上传的 APK）。 */
@@ -124,11 +141,11 @@ function writeAtomic(target, data) {
   throw lastErr || new Error("rename failed");
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv);
   console.log("== MSQ DEV 更新发布 ==");
 
-  /* 1) 下一 versionCode：显式指定 > max(现有 latest.json, 现有 DEV APK) + 1 */
+  /* 1) 下一 versionCode：显式指定 > max(现有 latest.json, 现有 DEV APK, R2 已有 vc) + 1 */
   let prevCode = 0;
   try {
     const prev = JSON.parse(fs.readFileSync(LATEST_JSON, "utf8"));
@@ -137,6 +154,23 @@ function main() {
   if (fs.existsSync(DEV_APK)) {
     const prevApk = aaptBadging(DEV_APK);
     if (prevApk.versionCode && prevApk.versionCode > prevCode) { prevCode = prevApk.versionCode; }
+  }
+  /* R2 上已有的 vc 也参与：本地 release/ 被清掉时不会重发同一 vc（内容不可变，重发会失败） */
+  if (!args.versionCode) {
+    const loadedForVersion = r2.loadConfig({ root: ROOT });
+    if (loadedForVersion.ok) {
+      try {
+        const listed = await r2.listAllObjects(loadedForVersion.config,
+          loadedForVersion.config.downloadBucket, r2publish.APK_PREFIX + "/");
+        if (listed.ok) {
+          const versions = r2publish.parseApkVersions(listed.contents);
+          if (versions.length && versions[0].versionCode > prevCode) {
+            prevCode = versions[0].versionCode;
+            console.log("（R2 已有更高版本 vc" + prevCode + "，据此递增）");
+          }
+        }
+      } catch (e) { /* R2 暂不可达：本地信息足够，后续上传会再校验 */ }
+    }
   }
   const versionCode = args.versionCode || (prevCode + 1);
   if (!(Number.isInteger(versionCode) && versionCode > 0)) { fail("versionCode 无效"); }
@@ -184,38 +218,165 @@ function main() {
   }
   console.log("签名证书 SHA-256：" + newSigner + (baselineSigner ? "（与上一版一致）" : "（作为基准记录）"));
 
-  /* 5) SHA256 / size */
+  /* 5) SHA256 / size（本地一次算好：既做 payload hash，也写进 R2 metadata） */
   const apkBytes = fs.readFileSync(OUT_APK);
   const sha256 = crypto.createHash("sha256").update(apkBytes).digest("hex");
   const size = apkBytes.length;
 
-  /* 6) 原子发布：先 APK，最后 latest.json */
-  fs.mkdirSync(UPDATES_DIR, { recursive: true });
-  writeAtomic(UPDATES_APK, apkBytes);
-  const manifest = {
-    schemaVersion: 1,
-    channel: "dev",
-    packageName: EXPECTED_PACKAGE,
+  /* 6) R2 发布前置：装载 credential。缺失即拒绝发布（绝不退回 Tunnel 大文件默认路径）。 */
+  const loaded = r2.loadConfig({ root: ROOT });
+  if (!loaded.ok) {
+    fail("未找到 R2 credential（" + loaded.error + "）。\n" +
+      "  本轮起 APK 默认走 R2 Custom Domain，Tunnel 不再承载大文件下载。\n" +
+      "  配置方法：复制 tools/sample_collector/.env.r2.example 为 .env.r2.local 并填入\n" +
+      "  R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /\n" +
+      "  R2_DOWNLOAD_BUCKET / R2_SAMPLE_BUCKET（该文件已在 .gitignore 中）。\n" +
+      "  一次性 Cloudflare 侧操作见 tools/r2/setup_r2.md。");
+  }
+
+  /* 7-9) 上传 R2 → 验证 → 原子发布 latest.json → prune
+     全部顺序保证集中在 releaseApk()（可单测：R2 失败绝不写 latest）。 */
+  const rel = await releaseApk({
+    config: loaded.config,
+    domain: DOWNLOAD_DOMAIN,
     versionCode: versionCode,
     versionName: versionName,
-    apkUrl: "/api/update/dev/apk",
+    packageName: EXPECTED_PACKAGE,
+    apkBytes: apkBytes,
     sha256: sha256,
-    size: size,
-    publishedAt: new Date().toISOString(),
-    notes: args.notes || ""
-  };
-  writeAtomic(LATEST_JSON, JSON.stringify(manifest, null, 2));
-  writeAtomic(DEV_APK, apkBytes);
+    notes: args.notes || "",
+    keepCount: DEV_APK_KEEP_COUNT,
+    prevCode: prevCode,
+    log: console.log
+  });
+  if (!rel.ok) {
+    fail("R2 发布失败（stage=" + rel.stage + "）：" + rel.error + "\n" +
+      "  latest.json 未改动，仍指向上一版本（vc" + prevCode + "）。");
+  }
 
   console.log("\n== 发布完成 ==");
   console.log("latest.json :", LATEST_JSON);
-  console.log("updates APK :", UPDATES_APK);
+  console.log("updates APK :", UPDATES_APK, "（legacy 相对路径兼容副本）");
   console.log("DEV APK     :", DEV_APK);
   console.log("versionCode :", versionCode);
   console.log("versionName :", versionName);
   console.log("size        :", size);
   console.log("sha256      :", sha256);
   console.log("signer      :", newSigner);
+  console.log("apkUrl      :", rel.publicUrl, "（R2 Custom Domain，不经 Tunnel）");
+  console.log("objectKey   :", rel.objectKey);
+  console.log("cacheControl:", r2publish.APK_CACHE_CONTROL);
 }
 
-main();
+/* ---- 发布核心：APK 先可用，latest.json 最后才更新 ----
+   顺序不可交换：任何 R2 上传/验证失败都必须在写 latest.json 之前返回 ok:false。
+   client / paths 可注入，便于单测「R2 失败 → latest 不变」。 */
+async function releaseApk(opts) {
+  const o = opts || {};
+  const paths = o.paths || {
+    updatesDir: UPDATES_DIR, updatesApk: UPDATES_APK,
+    latestJson: LATEST_JSON, devApk: DEV_APK
+  };
+  const client = o.client || {
+    putObject: r2.putObject, headObject: r2.headObject,
+    deleteObject: r2.deleteObject, listAllObjects: r2.listAllObjects
+  };
+  const pruneClient = o.pruneClient || {
+    listAllObjects: r2.listAllObjects, deleteObject: r2.deleteObject
+  };
+  const log = o.log || function () {};
+
+  const objectKey = r2publish.apkObjectKey(o.versionCode);
+  log("→ 上传 APK 到 R2：" + o.config.downloadBucket + "/" + objectKey);
+  log("  （" + o.apkBytes.length + " bytes，metadata 携带 sha256/versionCode/packageName）");
+
+  const pub = await r2publish.publishApk({
+    client: client,
+    config: o.config,
+    domain: o.domain,
+    versionCode: o.versionCode,
+    versionName: o.versionName,
+    packageName: o.packageName,
+    apkBytes: o.apkBytes,
+    sha256: o.sha256,
+    verifyDomain: o.verifyDomain
+  });
+  if (!pub.ok) {
+    /* 关键：此刻 latest.json 一个字节都还没动 */
+    return { ok: false, stage: pub.stage, error: pub.error, wroteManifest: false,
+      objectKey: objectKey, publicUrl: pub.publicUrl };
+  }
+  log("  R2 HeadObject 通过：size=" + pub.uploaded.size +
+    " metadata.sha256=" + String(pub.uploaded.metadata.sha256).slice(0, 12) + "…" +
+    " metadata.versionCode=" + pub.uploaded.metadata.versioncode);
+  log("  Custom Domain 冒烟通过：" + pub.publicUrl);
+  log("    HEAD status=" + pub.domain.head.status +
+    " contentLength=" + pub.domain.head.contentLength +
+    " cacheControl=" + (pub.domain.head.cacheControl || "(none)") +
+    " cfCacheStatus=" + (pub.domain.cacheStatus || "(none)"));
+  log("    Range 前 " + pub.domain.checkedBytes + " bytes 与本地 APK 逐字节一致" +
+    "（status=" + pub.domain.range.status + "）");
+  log("  验证方式：" + pub.verificationMethod);
+
+  const manifest = {
+    schemaVersion: 1,
+    channel: "dev",
+    packageName: o.packageName,
+    versionCode: o.versionCode,
+    versionName: o.versionName,
+    apkUrl: pub.publicUrl,
+    sha256: o.sha256,
+    size: o.apkBytes.length,
+    publishedAt: new Date().toISOString(),
+    notes: o.notes || ""
+  };
+  fs.mkdirSync(paths.updatesDir, { recursive: true });
+  fs.mkdirSync(path.dirname(paths.devApk), { recursive: true });
+  /* 本地副本保留：兼容仍使用相对路径 /api/update/dev/apk 的旧客户端（legacy fallback） */
+  writeAtomic(paths.updatesApk, o.apkBytes);
+  writeAtomic(paths.latestJson, JSON.stringify(manifest, null, 2));
+  writeAtomic(paths.devApk, o.apkBytes);
+
+  const pruned = await r2publish.pruneOldApks({
+    client: pruneClient,
+    config: o.config,
+    keepCount: o.keepCount,
+    currentVersionCode: o.versionCode
+  });
+  if (!pruned.ok) {
+    log("[警告] 旧 APK 清理失败（不影响本次发布）：" + pruned.error);
+  } else {
+    log("→ APK 保留策略：共 " + pruned.total + " 个，保留 " + pruned.kept.length +
+      " 个（keep=" + pruned.keepCount + "，current latest 已保护）");
+    pruned.deleted.forEach(function (d) {
+      log("    删除 vc" + d.versionCode + "：" + d.key);
+    });
+    if (pruned.failedToDelete.length) {
+      log("    [警告] " + pruned.failedToDelete.length + " 个删除失败，下次发布再试");
+    }
+  }
+
+  return {
+    ok: true, wroteManifest: true, manifest: manifest, pub: pub,
+    pruned: pruned, objectKey: objectKey, publicUrl: pub.publicUrl
+  };
+}
+
+/* 仅直接执行时跑构建发布；被 require（单测）时只导出纯逻辑。 */
+if (require.main === module) {
+  main().catch(function (e) {
+    fail("未预期错误：" + (e && e.stack || e));
+  });
+}
+
+module.exports = {
+  main: main,
+  releaseApk: releaseApk,
+  apkObjectKey: r2publish.apkObjectKey,
+  apkPublicUrl: r2publish.apkPublicUrl,
+  DEV_APK_KEEP_COUNT: DEV_APK_KEEP_COUNT,
+  DOWNLOAD_DOMAIN: DOWNLOAD_DOMAIN,
+  EXPECTED_PACKAGE: EXPECTED_PACKAGE,
+  LATEST_JSON: LATEST_JSON,
+  UPDATES_DIR: UPDATES_DIR
+};
