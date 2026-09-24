@@ -48,7 +48,17 @@ function realSecrets() {
     if (loaded.config.secretAccessKey) { out.push({ kind: "R2_SECRET_ACCESS_KEY", value: loaded.config.secretAccessKey }); }
     if (loaded.config.accountId) { out.push({ kind: "R2_ACCOUNT_ID", value: loaded.config.accountId }); }
   }
-  for (const k of ["R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "CLOUDFLARE_API_TOKEN", "MSQ_SAMPLE_WRITE_TOKEN"]) {
+  /* 腾讯云 COS（COS_SAMPLE_TRANSFER_POC）：SecretId/SecretKey 都要比对 */
+  try {
+    const cos = require("../cos/cos.js");
+    const c = cos.loadConfig({ root: ROOT });
+    if (c && c.ok) {
+      if (c.config.accessKeyId) { out.push({ kind: "COS_SECRET_ID", value: c.config.accessKeyId }); }
+      if (c.config.secretAccessKey) { out.push({ kind: "COS_SECRET_KEY", value: c.config.secretAccessKey }); }
+    }
+  } catch (e) { /* 无 COS 配置：跳过 */ }
+  for (const k of ["R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "CLOUDFLARE_API_TOKEN",
+    "MSQ_SAMPLE_WRITE_TOKEN", "COS_SECRET_ID", "COS_SECRET_KEY"]) {
     const v = (process.env[k] || "").trim();
     if (v.length >= 16) { out.push({ kind: k + " (env)", value: v }); }
   }
@@ -65,6 +75,9 @@ const SHAPE_RULES = [
     ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) },
   { kind: "R2_ACCESS_KEY_ID 被赋真实值",
     re: /R2_ACCESS_KEY_ID\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{16,})/,
+    ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) },
+  { kind: "COS_SECRET_KEY 被赋真实值",
+    re: /COS_SECRET_KEY\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{16,})/,
     ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) }
 ];
 
@@ -76,8 +89,8 @@ function scanText(kind, fileLabel, text) {
       const m = rule.re.exec(line);
       if (!m) { continue; }
       if (rule.ignoreIf && rule.ignoreIf(m)) { continue; }
-      /* .env.r2.example 是模板，允许占位 */
-      if (/\.env\.r2\.example$/.test(fileLabel)) { continue; }
+      /* .env.*.example 是模板，允许占位 */
+      if (/\.env\.[a-z0-9]+\.example$/i.test(fileLabel)) { continue; }
       record(rule.kind, fileLabel, i + 1);
     }
     for (const s of SECRETS) {
