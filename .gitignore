@@ -57,3 +57,12 @@ sample_collector.local.*
 
 # ---- 公网样本写接口认证 Secret（本机文件，绝不入库） ----
 .secrets/
+
+# ---- Cloudflare R2 credential（R2_FAST_TRANSFER_V1） ----
+# R2 Account/Access/Secret 只允许存在于 PC 本机，绝不进 Git / JS bundle / APK / 日志 / 错误响应。
+# 模板见 tools/sample_collector/.env.r2.example（占位符，可入库）。
+.env.r2.local
+.env.r2.*
+*.env.r2
+tools/sample_collector/.env.r2.local
+!.env.r2.example
