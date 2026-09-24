@@ -178,7 +178,22 @@ async function main() {
   const versionName = versionNameBase + "-dev";
   console.log("目标版本：versionCode=" + versionCode + " versionName=" + versionName);
 
-  /* 2) cap sync + 构建 */
+  /* 2) R2 credential 前置检查：必须在耗时构建**之前**失败，
+        否则用户会先等一分钟构建、再被告诉 credential 没配。
+        本轮起 APK 默认走 R2 Custom Domain，缺失即拒绝发布（不退回 Tunnel 大文件默认路径）。 */
+  const loaded = r2.loadConfig({ root: ROOT });
+  if (!loaded.ok) {
+    fail("未找到 R2 credential（" + loaded.error + "）。\n" +
+      "  本轮起 APK 默认走 R2 Custom Domain，Tunnel 不再承载大文件下载。\n" +
+      "  配置方法：复制 tools/sample_collector/.env.r2.example 为 .env.r2.local 并填入\n" +
+      "  R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /\n" +
+      "  R2_DOWNLOAD_BUCKET / R2_SAMPLE_BUCKET（该文件已在 .gitignore 中）。\n" +
+      "  一次性 Cloudflare 侧操作见 tools/r2/setup_r2.md。");
+  }
+  const r2config = loaded.config;
+  console.log("R2 目标：bucket=" + r2config.downloadBucket + " domain=" + DOWNLOAD_DOMAIN);
+
+  /* 3) cap sync + 构建 */
   if (!args.skipSync) {
     console.log("→ npx cap sync android");
     const s = run("npx.cmd", ["cap", "sync", "android"], ROOT);
@@ -197,7 +212,7 @@ async function main() {
   if (g.status !== 0) { fail("构建失败：" + (g.stderr || g.stdout).slice(-600)); }
   if (!fs.existsSync(OUT_APK)) { fail("构建产物缺失：" + OUT_APK); }
 
-  /* 3) 实测校验构建产物（不信文件名） */
+  /* 4) 实测校验构建产物（不信文件名） */
   const info = aaptBadging(OUT_APK);
   console.log("构建产物：", JSON.stringify(info));
   if (info.packageName !== EXPECTED_PACKAGE) { fail("packageName 不符：" + info.packageName); }
@@ -205,7 +220,7 @@ async function main() {
   if (info.versionName !== versionName) { fail("versionName 不符：" + info.versionName); }
   if (info.label !== EXPECTED_LABEL) { fail("app label 不符：" + info.label); }
 
-  /* 4) 签名证书与现有 DEV APK 一致性 */
+  /* 5) 签名证书与现有 DEV APK 一致性 */
   const newSigner = signerSha256(OUT_APK);
   if (!newSigner) { fail("无法读取新 APK 签名证书"); }
   let baselineSigner = null;
@@ -218,26 +233,15 @@ async function main() {
   }
   console.log("签名证书 SHA-256：" + newSigner + (baselineSigner ? "（与上一版一致）" : "（作为基准记录）"));
 
-  /* 5) SHA256 / size（本地一次算好：既做 payload hash，也写进 R2 metadata） */
+  /* 6) SHA256 / size（本地一次算好：既做 payload hash，也写进 R2 metadata） */
   const apkBytes = fs.readFileSync(OUT_APK);
   const sha256 = crypto.createHash("sha256").update(apkBytes).digest("hex");
   const size = apkBytes.length;
 
-  /* 6) R2 发布前置：装载 credential。缺失即拒绝发布（绝不退回 Tunnel 大文件默认路径）。 */
-  const loaded = r2.loadConfig({ root: ROOT });
-  if (!loaded.ok) {
-    fail("未找到 R2 credential（" + loaded.error + "）。\n" +
-      "  本轮起 APK 默认走 R2 Custom Domain，Tunnel 不再承载大文件下载。\n" +
-      "  配置方法：复制 tools/sample_collector/.env.r2.example 为 .env.r2.local 并填入\n" +
-      "  R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /\n" +
-      "  R2_DOWNLOAD_BUCKET / R2_SAMPLE_BUCKET（该文件已在 .gitignore 中）。\n" +
-      "  一次性 Cloudflare 侧操作见 tools/r2/setup_r2.md。");
-  }
-
   /* 7-9) 上传 R2 → 验证 → 原子发布 latest.json → prune
      全部顺序保证集中在 releaseApk()（可单测：R2 失败绝不写 latest）。 */
   const rel = await releaseApk({
-    config: loaded.config,
+    config: r2config,
     domain: DOWNLOAD_DOMAIN,
     versionCode: versionCode,
     versionName: versionName,
