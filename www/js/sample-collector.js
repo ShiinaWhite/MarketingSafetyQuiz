@@ -273,10 +273,110 @@
     });
   }
 
+  /* ---------------- 反馈（REAL_SAMPLE_FEEDBACK_V2，纯函数） ----------------
+     页面级反馈 = "这一整页存在结构性问题"；题目级反馈 = "这一题最终答案错了"。
+     状态绑定 sampleId（每个 sample 一份，不跨 sample 残留）；服务器 /api/feedback
+     为幂等 upsert（set 全量替换 / remove 删除）。 */
+
+  var FEEDBACK_PAGE_ISSUES = [
+    { type: "missing_question", label: "漏题" },
+    { type: "wrong_screen_number", label: "题号异常" },
+    { type: "wrong_page_type", label: "题型判断错误" },
+    { type: "other", label: "其他" }
+  ];
+  var FEEDBACK_BLOCK_ISSUES = ["wrong_answer"];
+
+  function feedbackInitialState() {
+    return { pageTypes: [], blocks: {} };
+  }
+
+  function isValidFeedbackOp(op) {
+    if (!op || typeof op !== "object") { return false; }
+    if (op.action !== "set" && op.action !== "remove") { return false; }
+    if (op.scope !== "page" && op.scope !== "block") { return false; }
+    if (typeof op.sampleId !== "string" || !op.sampleId) { return false; }
+    if (op.scope === "page") {
+      if (op.action === "set") {
+        if (!Array.isArray(op.issueTypes) || op.issueTypes.length === 0 ||
+            op.issueTypes.length > FEEDBACK_PAGE_ISSUES.length) { return false; }
+        var known = {};
+        FEEDBACK_PAGE_ISSUES.forEach(function (i) { known[i.type] = true; });
+        for (var i = 0; i < op.issueTypes.length; i++) {
+          if (!known[op.issueTypes[i]]) { return false; }
+        }
+      }
+      return true;
+    }
+    /* block */
+    if (FEEDBACK_BLOCK_ISSUES.indexOf(op.issue) < 0) { return false; }
+    if (typeof op.blockIndex !== "number" || op.blockIndex < 0 ||
+        Math.floor(op.blockIndex) !== op.blockIndex || op.blockIndex > 999) { return false; }
+    if (op.action === "set" && (!op.block || typeof op.block !== "object")) { return false; }
+    return true;
+  }
+
+  function buildPageFeedbackRequest(sampleId, issueTypes) {
+    return { sampleId: sampleId, action: "set", scope: "page", issueTypes: issueTypes.slice() };
+  }
+
+  function buildPageClearRequest(sampleId) {
+    return { sampleId: sampleId, action: "remove", scope: "page" };
+  }
+
+  /* 只提取稳定定位字段（不猜正确答案；不重跑 matcher，直接用当前结果页已有 block） */
+  function buildBlockFeedbackRequest(sampleId, action, blockIndex, block) {
+    var b = block || {};
+    var req = {
+      sampleId: sampleId,
+      action: action === "remove" ? "remove" : "set",
+      scope: "block",
+      issue: "wrong_answer",
+      blockIndex: blockIndex
+    };
+    if (req.action === "set") {
+      req.block = {
+        screenNumber: (b.screenNumber != null) ? String(b.screenNumber) : null,
+        rawScreenNumber: (b.rawScreenNumber != null) ? String(b.rawScreenNumber) : null,
+        numberSource: b.numberSource || "ocr",
+        type: b.type || null,
+        finalAnswer: (b.answer !== undefined) ? b.answer : null,
+        confidence: b.confidence || "none",
+        finalBankId: (b.bankId !== undefined) ? b.bankId : null,
+        matchedByOptions: !!(b.matches && b.matches.assistedByOptions)
+      };
+    }
+    return req;
+  }
+
+  /* 纯函数：把 op 应用到反馈状态，返回新状态（绝不改写入参）。FB-P 系列语义锚点。 */
+  function applyFeedbackToState(state, op) {
+    var next = { pageTypes: (state && state.pageTypes ? state.pageTypes : []).slice(), blocks: {} };
+    var k;
+    var oldBlocks = (state && state.blocks) || {};
+    for (k in oldBlocks) {
+      if (Object.prototype.hasOwnProperty.call(oldBlocks, k)) { next.blocks[k] = oldBlocks[k]; }
+    }
+    if (!isValidFeedbackOp(op)) { return next; }
+    if (op.scope === "page") {
+      if (op.action === "set") {
+        next.pageTypes = op.issueTypes.slice().sort();
+      } else {
+        next.pageTypes = [];
+      }
+      return next;
+    }
+    var key = String(op.blockIndex) + ":" + op.issue;
+    if (op.action === "set") { next.blocks[key] = true; }
+    else { delete next.blocks[key]; }
+    return next;
+  }
+
   return {
     SCHEMA_VERSION: SCHEMA_VERSION,
     SETTINGS_KEY: SETTINGS_KEY,
     SAMPLE_ID_RE: SAMPLE_ID_RE,
+    FEEDBACK_PAGE_ISSUES: FEEDBACK_PAGE_ISSUES,
+    FEEDBACK_BLOCK_ISSUES: FEEDBACK_BLOCK_ISSUES,
     normalizeSettings: normalizeSettings,
     loadSettings: loadSettings,
     saveSettings: saveSettings,
@@ -285,6 +385,12 @@
     joinUrl: joinUrl,
     buildRunManifest: buildRunManifest,
     buildUploadPayload: buildUploadPayload,
+    feedbackInitialState: feedbackInitialState,
+    isValidFeedbackOp: isValidFeedbackOp,
+    buildPageFeedbackRequest: buildPageFeedbackRequest,
+    buildPageClearRequest: buildPageClearRequest,
+    buildBlockFeedbackRequest: buildBlockFeedbackRequest,
+    applyFeedbackToState: applyFeedbackToState,
     requestJSON: requestJSON,
     getJSON: getJSON,
     postJSON: postJSON,

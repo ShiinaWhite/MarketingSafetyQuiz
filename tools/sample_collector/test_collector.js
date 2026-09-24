@@ -208,16 +208,84 @@ async function main() {
       fs.rmSync(tmp2, { recursive: true, force: true });
     }
 
-    /* ---- feedback ---- */
-    section("POST /api/feedback");
+    /* ---- feedback：v1 兼容 + v2 幂等 upsert ---- */
+    section("POST /api/feedback（v1 请求兼容）");
     r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, userFlag: "has_error", screenNumbers: ["31", "33"] });
-    check("feedback 200", r.status === 200);
-    const fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
-    check("feedback.json 落盘且可解析", fb.userFlag === "has_error" && fb.screenNumbers.join() === "31,33");
+    check("v1 请求 feedback 200", r.status === 200);
+    let fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("v1 请求迁移为 v2 且 legacy 保留（不破坏历史数据）",
+      fb.schemaVersion === 2 && fb.legacy && fb.legacy.userFlag === "has_error" &&
+      fb.legacy.screenNumbers.join() === "31,33" && fb.pageIssues.length === 0 && fb.blockIssues.length === 0);
     r = await request(port, "POST", "/api/feedback", { sampleId: "20260923_171536_bb12cd", userFlag: "x" });
     check("样本不存在 → 404", r.status === 404);
     r = await request(port, "POST", "/api/feedback", { sampleId: "../x", userFlag: "x" });
     check("feedback 非法 sampleId → 400", r.status === 400);
+
+    section("POST /api/feedback（v2 幂等 upsert）");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["missing_question", "other"] });
+    check("page set 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("pageIssues = 2 项（已排序去重）",
+      fb.pageIssues.length === 2 && fb.pageIssues[0].type === "missing_question" && fb.pageIssues[1].type === "other");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["missing_question", "other"] });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("重复 set 同 issue 幂等（不产生重复）", fb.pageIssues.length === 2);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["wrong_page_type"] });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("page set 全量替换（修改反馈）",
+      fb.pageIssues.length === 1 && fb.pageIssues[0].type === "wrong_page_type");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "remove", scope: "page" });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("page remove 清空", fb.pageIssues.length === 0);
+
+    const blockPayload = { screenNumber: "27", rawScreenNumber: "27", numberSource: "ocr",
+      type: "single", finalAnswer: "A", confidence: "low", finalBankId: 123, matchedByOptions: false };
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 2, block: blockPayload });
+    check("block set 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("blockIssue 落盘且字段完整",
+      fb.blockIssues.length === 1 && fb.blockIssues[0].blockIndex === 2 &&
+      fb.blockIssues[0].issue === "wrong_answer" && fb.blockIssues[0].finalAnswer === "A" &&
+      fb.blockIssues[0].finalBankId === 123 && fb.blockIssues[0].matchedByOptions === false);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 2, block: blockPayload });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("重复 block set 幂等（upsert 不重复）", fb.blockIssues.length === 1);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 3, block: blockPayload });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("block 3 反馈不影响 block 2", fb.blockIssues.length === 2);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "remove", scope: "block", issue: "wrong_answer", blockIndex: 2 });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("block remove 撤销（只删目标项）",
+      fb.blockIssues.length === 1 && fb.blockIssues[0].blockIndex === 3);
+
+    section("POST /api/feedback（非法输入）");
+    r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, action: "upsert", scope: "page" });
+    check("非法 action → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, action: "set", scope: "page" });
+    check("page set 缺 issueTypes → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["not_a_type"] });
+    check("未知 issueType → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "not_an_issue", blockIndex: 1 });
+    check("未知 block issue → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: -1 });
+    check("blockIndex 非法 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: 1, block: "oops" });
+    check("block 字段非对象 → 400", r.status === 400);
 
     /* ---- 目录净度与穿越隔离 ---- */
     section("目录净度");

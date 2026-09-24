@@ -317,6 +317,74 @@ function handleSample(req, res, ctx) {
   });
 }
 
+/* feedback schema v2（REAL_SAMPLE_FEEDBACK_V2）：
+   {
+     schemaVersion: 2, sampleId, updatedAt,
+     pageIssues:  [{ type }],                     // 白名单见 FEEDBACK_PAGE_TYPES
+     blockIssues: [{ blockIndex, issue, ...稳定定位字段 }],
+     legacy:      { userFlag, screenNumbers }     // 旧 v1 文件/请求的兼容保留
+   }
+   请求模型（幂等 upsert，兼容 v1 请求）：
+     { sampleId, action:"set"|"remove", scope:"page", issueTypes:[...] }   // set=全量替换
+     { sampleId, action:"set"|"remove", scope:"block", issue, blockIndex, block:{...} }
+     { sampleId, userFlag, screenNumbers }                                  // 旧 App v1 请求
+   同 key 重复 set 不产生重复项；remove 删除对应条目。 */
+const FEEDBACK_PAGE_TYPES = ["missing_question", "wrong_screen_number", "wrong_page_type", "other"];
+const FEEDBACK_BLOCK_ISSUES = ["wrong_answer"];
+
+function emptyFeedbackV2(sampleId) {
+  return { schemaVersion: 2, sampleId: sampleId, updatedAt: new Date().toISOString(),
+    pageIssues: [], blockIssues: [], legacy: null };
+}
+
+/* 读现有 feedback.json：v1 文件迁移为 v2（历史数据保留在 legacy，不破坏） */
+function readFeedbackState(dir, sampleId) {
+  const file = path.join(dir, "feedback.json");
+  let raw;
+  try { raw = fs.readFileSync(file, "utf8"); } catch (e) { return emptyFeedbackV2(sampleId); }
+  let old;
+  try { old = JSON.parse(raw); } catch (e) { return emptyFeedbackV2(sampleId); }
+  if (!old || typeof old !== "object") { return emptyFeedbackV2(sampleId); }
+  if (old.schemaVersion === 2) {
+    return {
+      schemaVersion: 2,
+      sampleId: sampleId,
+      updatedAt: old.updatedAt || null,
+      pageIssues: Array.isArray(old.pageIssues) ? old.pageIssues : [],
+      blockIssues: Array.isArray(old.blockIssues) ? old.blockIssues : [],
+      legacy: old.legacy || null
+    };
+  }
+  /* v1 文件：{ sampleId, userFlag, screenNumbers, savedAt } */
+  return {
+    schemaVersion: 2,
+    sampleId: sampleId,
+    updatedAt: old.savedAt || null,
+    pageIssues: [],
+    blockIssues: [],
+    legacy: {
+      userFlag: typeof old.userFlag === "string" ? old.userFlag : "",
+      screenNumbers: Array.isArray(old.screenNumbers) ? old.screenNumbers : []
+    }
+  };
+}
+
+function cleanBlockFields(block) {
+  const b = (block && typeof block === "object" && !Array.isArray(block)) ? block : {};
+  const str = (v, max) => (v === null || v === undefined) ? null : String(v).slice(0, max);
+  return {
+    screenNumber: str(b.screenNumber, 20),
+    rawScreenNumber: str(b.rawScreenNumber, 20),
+    numberSource: str(b.numberSource, 20),
+    type: str(b.type, 20),
+    finalAnswer: str(b.finalAnswer, 40),
+    confidence: str(b.confidence, 20),
+    finalBankId: (typeof b.finalBankId === "number" && isFinite(b.finalBankId)) ? b.finalBankId
+      : (b.finalBankId === null ? null : str(b.finalBankId, 20)),
+    matchedByOptions: b.matchedByOptions === true
+  };
+}
+
 function handleFeedback(req, res, ctx) {
   readBody(req, ctx.maxBodyBytes).then(function (raw) {
     let body;
@@ -332,16 +400,97 @@ function handleFeedback(req, res, ctx) {
     if (!fs.existsSync(dir)) {
       sendJSON(res, 404, { ok: false, error: "sample not found" }); return;
     }
-    const nums = Array.isArray(body.screenNumbers) ? body.screenNumbers
-      .slice(0, 50).map(function (n) { return String(n).slice(0, 20); }) : [];
-    const feedback = {
-      sampleId: body.sampleId,
-      userFlag: typeof body.userFlag === "string" ? body.userFlag.slice(0, 200) : "",
-      screenNumbers: nums,
-      savedAt: new Date().toISOString()
-    };
-    writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(feedback, null, 2));
-    sendJSON(res, 200, { ok: true, sampleId: body.sampleId });
+
+    const state = readFeedbackState(dir, body.sampleId);
+
+    /* ---- v1 请求兼容：{ userFlag, screenNumbers } ---- */
+    if (body.action === undefined && body.scope === undefined && body.userFlag !== undefined) {
+      state.legacy = {
+        userFlag: typeof body.userFlag === "string" ? body.userFlag.slice(0, 200) : "",
+        screenNumbers: Array.isArray(body.screenNumbers)
+          ? body.screenNumbers.slice(0, 50).map(function (n) { return String(n).slice(0, 20); })
+          : []
+      };
+      state.updatedAt = new Date().toISOString();
+      writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+      sendJSON(res, 200, { ok: true, sampleId: body.sampleId });
+      return;
+    }
+
+    /* ---- v2 请求：action set/remove × scope page/block ---- */
+    const action = body.action;
+    const scope = body.scope;
+    if (action !== "set" && action !== "remove") {
+      sendJSON(res, 400, { ok: false, error: "action must be set|remove" }); return;
+    }
+    if (scope !== "page" && scope !== "block") {
+      sendJSON(res, 400, { ok: false, error: "scope must be page|block" }); return;
+    }
+
+    if (scope === "page") {
+      if (action === "set") {
+        if (!Array.isArray(body.issueTypes) || body.issueTypes.length === 0 ||
+            body.issueTypes.length > FEEDBACK_PAGE_TYPES.length) {
+          sendJSON(res, 400, { ok: false, error: "issueTypes must be a non-empty array" }); return;
+        }
+        const uniq = {};
+        for (const t of body.issueTypes) {
+          if (typeof t !== "string" || FEEDBACK_PAGE_TYPES.indexOf(t) < 0) {
+            sendJSON(res, 400, { ok: false, error: "unknown page issue type: " + String(t).slice(0, 40) });
+            return;
+          }
+          uniq[t] = true;
+        }
+        state.pageIssues = Object.keys(uniq).sort().map(function (t) { return { type: t }; });
+      } else {
+        /* remove：缺省清空全部；带 issueTypes 则只删指定 */
+        if (body.issueTypes === undefined) {
+          state.pageIssues = [];
+        } else {
+          if (!Array.isArray(body.issueTypes)) {
+            sendJSON(res, 400, { ok: false, error: "issueTypes must be an array" }); return;
+          }
+          const drop = {};
+          for (const t of body.issueTypes) {
+            if (typeof t !== "string" || FEEDBACK_PAGE_TYPES.indexOf(t) < 0) {
+              sendJSON(res, 400, { ok: false, error: "unknown page issue type: " + String(t).slice(0, 40) });
+              return;
+            }
+            drop[t] = true;
+          }
+          state.pageIssues = state.pageIssues.filter(function (p) { return !drop[p.type]; });
+        }
+      }
+    } else {
+      /* block */
+      const issue = body.issue;
+      if (typeof issue !== "string" || FEEDBACK_BLOCK_ISSUES.indexOf(issue) < 0) {
+        sendJSON(res, 400, { ok: false, error: "unknown block issue" }); return;
+      }
+      const blockIndex = body.blockIndex;
+      if (typeof blockIndex !== "number" || !isFinite(blockIndex) ||
+          blockIndex < 0 || Math.floor(blockIndex) !== blockIndex || blockIndex > 999) {
+        sendJSON(res, 400, { ok: false, error: "blockIndex must be an integer 0..999" }); return;
+      }
+      if (action === "set" && (!body.block || typeof body.block !== "object" || Array.isArray(body.block))) {
+        sendJSON(res, 400, { ok: false, error: "block must be an object" }); return;
+      }
+      state.blockIssues = state.blockIssues.filter(function (b) {
+        return !(b.blockIndex === blockIndex && b.issue === issue);
+      });
+      if (action === "set") {
+        const entry = Object.assign({ blockIndex: blockIndex, issue: issue },
+          cleanBlockFields(body.block));
+        state.blockIssues.push(entry);
+        state.blockIssues.sort(function (a, b2) { return a.blockIndex - b2.blockIndex; });
+      }
+    }
+
+    state.updatedAt = new Date().toISOString();
+    writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+    sendJSON(res, 200, { ok: true, sampleId: body.sampleId, feedback: {
+      pageIssues: state.pageIssues, blockIssues: state.blockIssues
+    } });
   }).catch(function () {
     sendJSON(res, 500, { ok: false, error: "internal error" });
   });
