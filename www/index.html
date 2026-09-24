@@ -122,13 +122,12 @@
         <summary>测试样本采集</summary>
         <label class="sample-row">
           <input type="checkbox" id="sample-enabled">
-          <span>自动上传测试样本（仅开发调试）</span>
+          <span>自动上传测试样本</span>
         </label>
+        <p class="sample-note">服务器：update.shiinalab.top</p>
+        <p class="sample-note">同步状态：<span id="sample-queue-status">未知</span></p>
         <div class="sample-row">
-          <input id="sample-server" type="url" placeholder="http://192.168.x.x:8787"
-                 autocomplete="off" spellcheck="false" inputmode="url">
-        </div>
-        <div class="sample-row">
+          <button id="btn-sample-retry" class="barbtn" type="button">立即重试</button>
           <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
         </div>
         <p id="sample-test-status" class="sample-note hidden"></p>

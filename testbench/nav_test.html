@@ -268,7 +268,9 @@
   const vis = (id) => { const v = document.getElementById(id); return !!v && !v.classList.contains("hidden"); };
 
   try {
-    localStorage.removeItem("msq.sampleCollection.v1");   /* NAV 段固定 OFF 基线（FB 段自行开启） */
+    localStorage.removeItem("msq.sampleCollection.v2");   /* NAV 段固定采集关闭基线（FB 段自行开启） */
+    localStorage.removeItem("msq.sampleCollection.v1");
+    localStorage.setItem("msq.sampleCollection.v2", JSON.stringify({ migrationVersion: 2, autoUpload: false }));
     await poll(() => document.querySelector("#menu-buttons button"));
     await sleep(120);
 
@@ -276,6 +278,8 @@
     window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
     window.__feedbackCalls = [];
     window.__httpFail = 0;
+    window.__queuePersisted = [];
+    window.__queueFeedbacks = [];
     window.Capacitor = { Plugins: {
       Camera: { getPhoto: async () => ({ dataUrl: "data:image/jpeg;base64,QUJD" }) },
       Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
@@ -286,7 +290,26 @@
           }
           if (window.__httpFail > 0) { window.__httpFail -= 1; return { status: 500, data: { ok: false } }; }
           return { status: 200, data: { ok: true } };
-        } }
+        } },
+      SampleQueue: {
+        setServer: async () => ({ ok: true }),
+        init: async () => ({ ok: true, recovered: 0, removed: 0 }),
+        addListener: (ev, cb) => { window.__queueListener = cb; return { remove: () => {} }; },
+        persistSample: async (o) => {
+          window.__queuePersisted.push({
+            sampleId: o.sampleId,
+            dataUrlLen: (o.photoDataUrl || "").length,
+            runJson: JSON.parse(o.runJson)
+          });
+          return { ok: true, sampleId: o.sampleId };
+        },
+        persistFeedback: async (o) => {
+          window.__queueFeedbacks.push(JSON.parse(o.feedbackJson));
+          return { ok: true, sampleId: o.sampleId };
+        },
+        stats: async () => ({ ok: true, pending: 0, uploading: 0, retryWait: 0, failed: 0, pendingBytes: 0 }),
+        retryFailed: async () => ({ ok: true, retried: 0 })
+      }
     }};
     const wrap = (name, key) => {
       const orig = window.MSQ[name];
@@ -396,8 +419,8 @@
     }
     const fbSleep = (ms) => new Promise((r3) => setTimeout(r3, ms));
 
-    localStorage.setItem("msq.sampleCollection.v1",
-      JSON.stringify({ enabled: true, serverUrl: "http://127.0.0.1:8018" }));
+    localStorage.setItem("msq.sampleCollection.v2",
+      JSON.stringify({ migrationVersion: 2, autoUpload: true }));
     document.getElementById("btn-batch-photo").click();
     document.getElementById("btn-take-page").click();
     await poll(() => document.querySelector("#batch-list .batch-row"));
@@ -420,10 +443,11 @@
     await fbSleep(100);
     check("FB-P2 提交后按钮变为本页已反馈",
       fbFlag.textContent.indexOf("本页已反馈") === 0, fbFlag.textContent);
-    let fbBody = window.__feedbackCalls[window.__feedbackCalls.length - 1];
-    check("FB-P2 请求为 page set 且含所选 issueType",
-      fbBody.action === "set" && fbBody.scope === "page" &&
-      fbBody.issueTypes.join() === "missing_question,other", JSON.stringify(fbBody));
+    let fbBody = window.__queueFeedbacks[window.__queueFeedbacks.length - 1];
+    check("FB-P2 反馈已持久化（page set：missing_question+other）",
+      fbBody && fbBody.schemaVersion === 2 &&
+      fbBody.pageIssues.map((p) => p.type).join() === "missing_question,other" &&
+      fbBody.sampleId.indexOf("2026") === 0, JSON.stringify(fbBody));
     fbFlag.click();
     const chips2 = panel.querySelectorAll(".feedback-chip");
     check("FB-P5 重开面板回显当前选择",
@@ -432,9 +456,9 @@
     chips2[0].click();
     panel.querySelectorAll(".feedback-btn")[0].click();
     await fbSleep(100);
-    fbBody = window.__feedbackCalls[window.__feedbackCalls.length - 1];
-    check("FB-P5 修改反馈 = 新 page set 全量替换",
-      fbBody.issueTypes.join() === "other", JSON.stringify(fbBody));
+    fbBody = window.__queueFeedbacks[window.__queueFeedbacks.length - 1];
+    check("FB-P5 修改反馈 = 最新全量状态",
+      fbBody.pageIssues.length === 1 && fbBody.pageIssues[0].type === "other", JSON.stringify(fbBody));
 
     const fbRows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
     const row2 = fbRows[2], row3 = fbRows[3];
@@ -444,12 +468,14 @@
     await fbSleep(100);
     check("FB-B1 长按 block2 → 已标错",
       !!row2.querySelector(".batch-wrongmark"));
-    fbBody = window.__feedbackCalls[window.__feedbackCalls.length - 1];
-    check("FB-B4 block 反馈 payload 字段完整",
-      fbBody.action === "set" && fbBody.scope === "block" && fbBody.issue === "wrong_answer" &&
-      typeof fbBody.blockIndex === "number" && "screenNumber" in fbBody.block &&
-      "finalAnswer" in fbBody.block && "confidence" in fbBody.block && "finalBankId" in fbBody.block,
-      JSON.stringify(fbBody));
+    fbBody = window.__queueFeedbacks[window.__queueFeedbacks.length - 1];
+    check("FB-B4 block 反馈持久化字段完整",
+      fbBody.blockIssues.length === 1 && fbBody.blockIssues[0].blockIndex === 2 &&
+      fbBody.blockIssues[0].issue === "wrong_answer" &&
+      "screenNumber" in fbBody.blockIssues[0] && "finalAnswer" in fbBody.blockIssues[0] &&
+      "confidence" in fbBody.blockIssues[0] && "finalBankId" in fbBody.blockIssues[0] &&
+      "rawScreenNumber" in fbBody.blockIssues[0] && "numberSource" in fbBody.blockIssues[0] &&
+      "matchedByOptions" in fbBody.blockIssues[0], JSON.stringify(fbBody));
     check("FB-B6 长按不触发详情展开",
       !row2.nextElementSibling || row2.nextElementSibling.classList.contains("hidden"));
     fireTouch(row2, "touchstart", 10, 10);
@@ -458,9 +484,9 @@
     await fbSleep(100);
     check("FB-B2 再次长按 → 撤销标错",
       !row2.querySelector(".batch-wrongmark"));
-    fbBody = window.__feedbackCalls[window.__feedbackCalls.length - 1];
-    check("FB-B2 撤销请求为 block remove",
-      fbBody.action === "remove" && fbBody.scope === "block", JSON.stringify(fbBody));
+    fbBody = window.__queueFeedbacks[window.__queueFeedbacks.length - 1];
+    check("FB-B2 撤销后最新持久化反馈不含该 blockIssue",
+      fbBody.blockIssues.every((b) => b.blockIndex !== 2), JSON.stringify(fbBody));
 
     fireTouch(row3, "touchstart", 10, 10);
     await fbSleep(750);
@@ -494,42 +520,25 @@
     await fbSleep(100);
     check("FB-B8 返回后 row2 标错仍显示", !!row2.querySelector(".batch-wrongmark"));
 
-    window.__httpFail = 99;
-    fireTouch(row2, "touchstart", 10, 10);
-    await fbSleep(750);
-    fireTouch(row2, "touchend", 10, 10);
-    await fbSleep(200);
-    check("FB-U5 反馈请求失败不崩溃", vis("view-batch-results"));
-    check("FB-U3 失败后状态提示反馈待上传",
-      document.getElementById("batch-sample-status").textContent.indexOf("反馈待上传") >= 0,
-      document.getElementById("batch-sample-status").textContent);
+    const fbCountAfterMarks = window.__queueFeedbacks.length;
+    check("FB-U9 每次反馈操作均产生一次持久化（无网络直传依赖）",
+      fbCountAfterMarks >= 4, String(fbCountAfterMarks));
+    check("FB-U5 反馈流程不崩溃", vis("view-batch-results"));
     check("FB-U3 答案页未受影响（结果行数量不变）",
       document.querySelectorAll("#batch-list .batch-row").length === fbRows.length);
 
-    window.__httpFail = 0;
-    window.__feedbackCalls.length = 0;
-    document.getElementById("btn-sample-retry").click();
-    await poll(() => window.__feedbackCalls.length >= 2);
-    await fbSleep(250);
-    const pageOps = window.__feedbackCalls.filter((b) => b.scope === "page");
-    const blockOps = window.__feedbackCalls.filter((b) => b.scope === "block");
-    check("FB-U4 重试成功后反馈补传（page+block 重放）",
-      pageOps.length >= 1 && blockOps.length >= 1,
-      JSON.stringify(window.__feedbackCalls.map((b) => b.scope + ":" + b.action)));
-    check("FB-U6 补传为幂等 upsert（同 key set）",
-      blockOps.every((b) => b.action === "set"));
-
-    window.__feedbackCalls.length = 0;
+    window.__queueFeedbacks.length = 0;
     document.getElementById("btn-batch-results-back").click();
-    document.getElementById("btn-take-page").click();
+    document.getElementById("btn-take-page").click();   /* 新的一次拍摄 = 新 sample 落盘 */
     await poll(() => document.querySelector("#batch-list .batch-row"));
     await fbSleep(250);
     check("FB-P4 新 sample 反馈按钮重置为未反馈",
       document.getElementById("btn-sample-flag").textContent.indexOf("反馈本页问题") === 0,
       document.getElementById("btn-sample-flag").textContent);
-    check("FB-U1 新 sample 上传后反馈通道在线（无待上传标记）",
-      document.getElementById("batch-sample-status").textContent.indexOf("待上传") < 0,
-      document.getElementById("batch-sample-status").textContent);
+    check("FB-U1 新 sample 独立落盘（队列持久化记录递增）",
+      window.__queuePersisted.length >= 2, String(window.__queuePersisted.length));
+    check("FB-Q 新旧 sample 数据互不覆盖（sampleId 不同）",
+      window.__queuePersisted[0].sampleId !== window.__queuePersisted[window.__queuePersisted.length - 1].sampleId);
   } catch (e) {
     R.push({ id: "HARNESS", pass: false, info: String((e && e.stack) || e) });
   }

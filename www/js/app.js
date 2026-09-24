@@ -1626,26 +1626,22 @@
     var box = $("sample-panel");
     if (!box || typeof MSQSample === "undefined" || !MSQSample) { return; }
     var s = sampleSettings();
-    $("sample-enabled").checked = s.enabled;
-    $("sample-server").value = s.serverUrl;
+    $("sample-enabled").checked = s.autoUpload;
     var save = function () {
-      MSQSample.saveSettings(null, {
-        enabled: $("sample-enabled").checked,
-        serverUrl: $("sample-server").value
-      });
+      MSQSample.saveSettings(null, { autoUpload: $("sample-enabled").checked });
       updateSampleToolsVisibility();
     };
     $("sample-enabled").addEventListener("change", save);
-    $("sample-server").addEventListener("change", save);
     $("btn-sample-test").addEventListener("click", function () {
-      var url = $("sample-server").value.trim();
-      MSQSample.saveSettings(null, { enabled: $("sample-enabled").checked, serverUrl: url });
       var status = $("sample-test-status");
       status.textContent = "正在连接…";
       status.classList.remove("hidden");
-      MSQSample.testConnection(url, 5000).then(function (r) {
-        status.textContent = r.message;
-      });
+      MSQSample.getJSON(MSQSample.joinUrl(MSQSample.PUBLIC_BASE_URL, "/health"), 8000)
+        .then(function (data) {
+          status.textContent = (data && data.ok === true) ? "已连接到更新服务器" : "服务器响应异常";
+        }, function () {
+          status.textContent = "无法连接到更新服务器，请检查网络";
+        });
     });
   }
 
@@ -1654,18 +1650,8 @@
     var flag = $("btn-sample-flag");
     if (retry) {
       retry.addEventListener("click", function () {
-        if (!lastSampleUpload) { return; }
-        var target = lastSampleUpload;
-        setSampleUploadStatus("样本上传中…", false);
-        MSQSample.postJSON(MSQSample.joinUrl(target.serverUrl, "/api/sample"), target.payload, 20000)
-          .then(function () {
-            target.uploaded = true;
-            setSampleUploadStatus("样本已保存：" + target.payload.sampleId, false);
-            flushFeedbackIfDirty();
-          })
-          .catch(function () {
-            setSampleUploadStatus("样本上传失败", true);
-          });
+        var Queue = sampleQueuePlugin();
+        if (Queue && typeof Queue.retryFailed === "function") { Queue.retryFailed(); }
       });
     }
     if (flag) {
@@ -1678,68 +1664,65 @@
      反馈状态绑定 sampleId（存于 lastSampleUpload.feedback，新 sample 自动重置）。
      服务器要求 sample 目录存在：sample 未上传成功期间反馈保存在内存并标记
      feedbackDirty，上传/重试成功后全量补传；Collector 离线绝不影响答案展示。 */
+  function sampleQueuePlugin() { return getPlugin("SampleQueue"); }
+
+  /* 队列状态轻量展示（结果页状态行 + 设置面板同步状态） */
+  function renderQueueStatus(stats) {
+    if (!stats || typeof MSQSample === "undefined" || !MSQSample) { return; }
+    var todo = (stats.pending || 0) + (stats.uploading || 0) + (stats.retryWait || 0) + (stats.failed || 0);
+    var sizeText = "";
+    if (stats.pendingBytes > 0 && typeof MSQUpdater !== "undefined" && MSQUpdater.formatBytes) {
+      sizeText = " · " + MSQUpdater.formatBytes(stats.pendingBytes);
+    }
+    var text;
+    if ((stats.failed || 0) > 0) {
+      text = "同步失败 " + stats.failed + " 个 · 待处理 " + todo + " 个" + sizeText;
+    } else if ((stats.uploading || 0) > 0) {
+      text = "正在上传 · 待处理 " + todo + " 个" + sizeText;
+    } else if (todo > 0) {
+      text = "等待网络 · 待处理 " + todo + " 个" + sizeText;
+    } else {
+      text = "所有样本已同步";
+    }
+    var el = $("sample-queue-status");
+    if (el) { el.textContent = text; }
+    var line = $("batch-sample-status");
+    if (line && sampleSettings().autoUpload) {
+      line.textContent = text;
+      line.classList.remove("hidden");
+    }
+  }
+
+  function initSampleQueue() {
+    var Queue = sampleQueuePlugin();
+    if (!Queue) { return; }
+    if (typeof Queue.setServer === "function") {
+      Queue.setServer({ serverUrl: MSQSample.PUBLIC_BASE_URL });
+    }
+    if (typeof Queue.init === "function") {
+      Queue.init({ serverUrl: MSQSample.PUBLIC_BASE_URL });
+    }
+    if (typeof Queue.addListener === "function") {
+      Queue.addListener("sampleQueueChanged", function (stats) { renderQueueStatus(stats); });
+    }
+  }
+
   function currentFeedback() {
     return lastSampleUpload ? lastSampleUpload.feedback : null;
   }
 
-  function postFeedbackRequest(reqObj) {
-    return MSQSample.postJSON(
-      MSQSample.joinUrl(lastSampleUpload.serverUrl, "/api/feedback"), reqObj, 10000
-    ).then(function () { return true; }, function () { return false; });
-  }
-
-  function markFeedbackPending() {
-    if (!lastSampleUpload) { return; }
-    lastSampleUpload.feedbackDirty = true;
-    setSampleUploadStatus("样本已保存，反馈待上传", true);
-  }
-
-  function queueFeedbackDelta(deltaOp, blockKey, blockRef) {
-    if (!lastSampleUpload) { return; }
-    if (blockKey && lastSampleUpload.blockRefs && blockRef) {
-      lastSampleUpload.blockRefs[blockKey] = blockRef;
-    }
-    if (!lastSampleUpload.uploaded) {
-      lastSampleUpload.feedbackDirty = true;
-      setSampleUploadStatus("样本上传失败，反馈待上传", true);
-      return;
-    }
-    postFeedbackRequest(deltaOp).then(function (ok) {
-      if (!ok) { markFeedbackPending(); }
-    });
-  }
-
-  function flushFeedbackIfDirty() {
-    if (!lastSampleUpload || !lastSampleUpload.feedbackDirty || typeof MSQSample === "undefined") { return; }
-    var target = lastSampleUpload;
-    var fb = target.feedback;
-    var sid = target.payload.sampleId;
-    var ops = [];
-    ops.push(fb.pageTypes.length
-      ? MSQSample.buildPageFeedbackRequest(sid, fb.pageTypes)
-      : MSQSample.buildPageClearRequest(sid));
-    Object.keys(fb.blocks).forEach(function (key) {
-      var idx = Number(key.split(":")[0]);
-      var block = (target.blockRefs && target.blockRefs[key]) || {};
-      ops.push(MSQSample.buildBlockFeedbackRequest(sid, "set", idx, block));
-    });
-    if (!ops.length) { target.feedbackDirty = false; return; }
-    var seq = Promise.resolve(true);
-    var allOk = true;
-    ops.forEach(function (op) {
-      seq = seq.then(function (ok) {
-        allOk = allOk && ok;
-        return postFeedbackRequest(op);
-      });
-    });
-    seq.then(function (ok) {
-      allOk = allOk && ok;
-      if (allOk) {
-        target.feedbackDirty = false;
-        setSampleUploadStatus("样本已保存：" + sid + "（反馈已补传）", false);
-      } else {
-        setSampleUploadStatus("样本已保存，反馈待上传", true);
-      }
+  /* 反馈持久化：写本地队列（filesDir/sample_queue/<sampleId>/feedback.json），
+     由原生 worker 在 sample 上传成功后自动补传；不做网络直传。 */
+  function persistFeedbackNow() {
+    if (!lastSampleUpload || typeof MSQSample === "undefined" || !MSQSample) { return; }
+    var sid = lastSampleUpload.sampleId;
+    if (!sid) { return; }
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.persistFeedback === "function")) { return; }
+    Queue.persistFeedback({
+      sampleId: sid,
+      feedbackJson: JSON.stringify(
+        MSQSample.buildFeedbackJson(sid, lastSampleUpload.feedback, lastSampleUpload.blockRefs))
     });
   }
 
@@ -1797,8 +1780,7 @@
       if (!types.length || !lastSampleUpload) { panelHint(panel, "请至少选择一项"); return; }
       lastSampleUpload.feedback.pageTypes = types;
       renderFeedbackButton();
-      queueFeedbackDelta(MSQSample.buildPageFeedbackRequest(
-        lastSampleUpload.payload.sampleId, types));
+      persistFeedbackNow();
       showFeedbackToast("已记录本页问题");
       panel.classList.add("hidden");
     });
@@ -1812,7 +1794,7 @@
       if (!lastSampleUpload) { return; }
       lastSampleUpload.feedback.pageTypes = [];
       renderFeedbackButton();
-      queueFeedbackDelta(MSQSample.buildPageClearRequest(lastSampleUpload.payload.sampleId));
+      persistFeedbackNow();
       showFeedbackToast("已清除本页反馈");
       panel.classList.add("hidden");
     });
@@ -1835,10 +1817,10 @@
     updateRowWrongMark(rowEl, nowMarked);
     if (navigator.vibrate) { try { navigator.vibrate(30); } catch (e) { /* 无震动能力 */ } }
     renderFeedbackButton();
-    queueFeedbackDelta(
-      MSQSample.buildBlockFeedbackRequest(lastSampleUpload.payload.sampleId,
-        nowMarked ? "set" : "remove", blockIndex, block),
-      key, nowMarked ? block : null);
+    if (nowMarked && lastSampleUpload.blockRefs) {
+      lastSampleUpload.blockRefs[key] = block;   // 供 feedback.json 构建定位字段
+    }
+    persistFeedbackNow();
     showFeedbackToast(nowMarked ? "已标记该答案有误" : "已取消标错");
   }
 
@@ -1854,24 +1836,30 @@
   function updateSampleToolsVisibility() {
     var box = $("batch-sample-tools");
     var flag = $("btn-sample-flag");
-    var on = sampleSettings().enabled;
+    var on = sampleSettings().autoUpload;
     if (box) { box.classList.toggle("hidden", !on); }
     if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
     renderFeedbackButton();
   }
 
+  /* 落盘优先（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：样本先持久化到
+     filesDir/sample_queue/，持久化成功即 SAFE；后台上传由原生 worker 完成，
+     拍题主链绝不 await 网络。用户主动关闭采集时行为与从前一致（不采集）。 */
   function collectAndUploadSample(state) {
     updateSampleToolsVisibility();
     if (typeof MSQSample === "undefined" || !MSQSample) { return; }
     var s = sampleSettings();
-    if (!MSQSample.shouldCollect(s)) { return; }   /* OFF：与改动前完全一致 */
-    var payload;
+    if (!MSQSample.shouldCollect(s)) { return; }   /* 用户 opt-out */
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.persistSample === "function")) {
+      setSampleUploadStatus("样本队列不可用（需升级安装包）", false);
+      return;
+    }
+    var runJson;
     try {
-      payload = MSQSample.buildUploadPayload({
-        photoDataUrl: state.dataUrl,
-        sampleId: state.sampleId || MSQSample.makeSampleId(new Date()),
+      runJson = JSON.stringify(MSQSample.buildRunManifest({
+        sampleId: state.sampleId,
         capturedAt: new Date().toISOString(),
-        /* pageType = 最终实际用于展示答案的题型（AUTO 判定结果或手动选择） */
         pageType: state.pageType,
         pageTypeMode: state.pageTypeMode,
         resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
@@ -1888,33 +1876,29 @@
           matchMs: state.matchMs, totalMs: state.totalMs
         },
         bankById: batchIndexById
-      });
+      }));
     } catch (e) {
-      setSampleUploadStatus("样本上传失败", true);
+      setSampleUploadStatus("本页样本未能保存（构造失败）", false);
       return;
     }
+    /* 结果页 UI context：反馈面板仍绑定当前 sampleId */
     lastSampleUpload = {
-      serverUrl: s.serverUrl,
-      payload: payload,
-      sampleId: state.sampleId || payload.sampleId,
-      uploaded: false,
-      feedbackDirty: false,
-      feedback: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.feedbackInitialState() : null,
+      sampleId: state.sampleId,
+      feedback: MSQSample.feedbackInitialState(),
       blockRefs: {}
     };
     var panel = $("sample-feedback-panel");
     if (panel) { panel.classList.add("hidden"); }   /* 新 sample：反馈面板收起并重置 */
-    setSampleUploadStatus("样本上传中…", false);
     updateSampleToolsVisibility();
-    MSQSample.postJSON(MSQSample.joinUrl(s.serverUrl, "/api/sample"), payload, 20000)
-      .then(function () {
-        if (lastSampleUpload) { lastSampleUpload.uploaded = true; }
-        setSampleUploadStatus("样本已保存：" + payload.sampleId, false);
-        flushFeedbackIfDirty();
-      })
-      .catch(function () {
-        setSampleUploadStatus("样本上传失败", true);   /* 不向用户展示异常细节 */
-      });
+    Queue.persistSample({
+      sampleId: state.sampleId,
+      photoDataUrl: state.dataUrl,
+      runJson: runJson
+    }).then(function () {
+      /* 数据已 SAFE；上传由 worker 自动进行，状态行由 sampleQueueChanged 驱动 */
+    }, function (e) {
+      setSampleUploadStatus("本页样本未能保存（" + String((e && e.message) || e).slice(0, 40) + "）", false);
+    });
   }
 
   /* ---------------- 应用内自更新（SELF_UPDATE_V1，仅手动"检查更新"） ----------------
@@ -1999,10 +1983,8 @@
   }
 
   function updateResolvedServer() {
-    var sampleSettings = (typeof MSQSample !== "undefined" && MSQSample)
-      ? MSQSample.loadSettings() : { serverUrl: "" };
-    return (typeof MSQUpdater !== "undefined" ? MSQUpdater : null)
-      ? MSQUpdater.resolveUpdateServer(MSQUpdater.loadSettings(), sampleSettings, "") : null;
+    if (typeof MSQUpdater === "undefined" || !MSQUpdater) { return null; }
+    return MSQUpdater.resolveUpdateServer(MSQUpdater.loadSettings(), MSQUpdater.PUBLIC_BASE_URL);
   }
 
   function checkForUpdate() {
@@ -2018,12 +2000,6 @@
       return;
     }
     var server = updateResolvedServer();
-    if (!server) {
-      updatePhase = "invalid";
-      updateSetError("尚未配置更新服务器：请先在「整页拍照搜题 → 测试样本采集」里配置电脑地址");
-      renderUpdateView("");
-      return;
-    }
     var fetchJson = (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
       ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
       : Promise.reject(new Error("无传输层"));
@@ -2255,6 +2231,7 @@
     initBatchTypes();
     initSamplePanel();
     initSampleResultTools();
+    initSampleQueue();
     $("btn-update").addEventListener("click", openUpdateView);
     $("btn-update-back").addEventListener("click", renderMenu);
     /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
