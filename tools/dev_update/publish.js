@@ -95,10 +95,24 @@ function signerSha256(apkPath) {
   return m ? m[1].toLowerCase() : null;
 }
 
+/* 原子写：tmp → rename。Windows 上目标正被读取（如手机经 Tunnel 下载中）会
+   EPERM：短暂退避重试几次，仍失败则清理 tmp 并抛错（上一版更新保持可用）。 */
 function writeAtomic(target, data) {
   const tmp = target + ".tmp-" + process.pid;
   fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, target);
+  let lastErr = null;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      fs.renameSync(tmp, target);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (e.code !== "EPERM") { break; }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    }
+  }
+  try { fs.unlinkSync(tmp); } catch (e) { /* 忽略 */ }
+  throw lastErr || new Error("rename failed");
 }
 
 function main() {

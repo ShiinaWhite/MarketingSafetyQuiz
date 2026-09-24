@@ -205,6 +205,9 @@ function sendApk(res, updatesRoot, channel) {
   const stream = fs.createReadStream(file);
   stream.on("error", function () { try { res.destroy(); } catch (e2) { /* 已断开 */ } });
   stream.pipe(res);
+  /* 客户端断开（手机/Tunnel 中断下载）时必须销毁读流，否则 Windows 上文件句柄
+     会一直被持有，publish 的原子替换 rename 将持续 EPERM */
+  res.on("close", function () { stream.destroy(); });
 }
 
 function handleCollector(req, res, ctx) {
