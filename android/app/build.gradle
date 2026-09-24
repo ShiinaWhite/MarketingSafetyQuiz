@@ -64,6 +64,7 @@ dependencies {
     implementation project(':capacitor-android')
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.json:json:20240303"   // JVM 单测使用真实 org.json（mockable android.jar 的 stub 不可用）
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')

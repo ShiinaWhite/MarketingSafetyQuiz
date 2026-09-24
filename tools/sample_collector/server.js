@@ -282,7 +282,32 @@ function handleSample(req, res, ctx) {
 
     const dir = path.join(ctx.outRoot, sampleIdToDir(body.sampleId));
     if (fs.existsSync(dir)) {
-      sendJSON(res, 409, { ok: false, error: "sampleId already exists" }); return;
+      /* 幂等（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：at-least-once 重传是正常行为。
+         同 sampleId + 同 capture 字节 → 200 alreadyExists（客户端视为上传成功）；
+         同 sampleId 但内容不同 → 409 conflict（绝不覆盖已有数据）。 */
+      const existingSha = (() => {
+        try { return sha256Hex(fs.readFileSync(path.join(dir, "capture.jpg"))); }
+        catch (e) { return null; }
+      })();
+      const incomingSha = sha256Hex(jpg);
+      if (existingSha !== null && existingSha === incomingSha) {
+        sendJSON(res, 200, {
+          ok: true,
+          alreadyExists: true,
+          sampleId: body.sampleId,
+          bytes: jpg.length,
+          sha256: incomingSha
+        });
+        return;
+      }
+      sendJSON(res, 409, {
+        ok: false,
+        error: "sampleId already exists with different content",
+        sampleId: body.sampleId,
+        existingSha256: existingSha,
+        incomingSha256: incomingSha
+      });
+      return;
     }
 
     const size = jpegSize(jpg);

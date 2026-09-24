@@ -11,6 +11,7 @@ public class MainActivity extends BridgeActivity {
         // 否则注册会被静默忽略，WebView 内 getPlugin("Ocr") 返回 null。
         registerPlugin(OcrPlugin.class);
         registerPlugin(UpdatePlugin.class);
+        registerPlugin(SampleQueuePlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

@@ -128,7 +128,17 @@ async function main() {
     /* ---- 重复 / 非法输入 ---- */
     section("重复与非法输入");
     r = await request(port, "POST", "/api/sample", { sampleId: SAMPLE_ID, photoDataUrl: dataUrl, manifest });
-    check("重复 sampleId → 409（禁止覆盖）", r.status === 409);
+    check("重复上传同内容 → 200 alreadyExists（幂等，at-least-once 重传安全）",
+      r.status === 200 && JSON.parse(r.body.toString("utf8")).alreadyExists === true,
+      "status=" + r.status);
+    check("幂等重传后 capture.jpg 未被破坏",
+      fs.readFileSync(path.join(sampleDir, "capture.jpg")).equals(jpg));
+    const jpgB = makeFixtureJpeg(320, 240);
+    r = await request(port, "POST", "/api/sample",
+      { sampleId: SAMPLE_ID, photoDataUrl: "data:image/jpeg;base64," + jpgB.toString("base64"), manifest });
+    check("同 sampleId 不同内容 → 409 conflict（不覆盖）", r.status === 409);
+    check("409 冲突后 capture.jpg 仍为原始字节",
+      fs.readFileSync(path.join(sampleDir, "capture.jpg")).equals(jpg));
 
     const badIds = ["../etc/passwd", "a/b/c", "20260923_171530", "20260923_171530_ZZ12cd",
       "20261301_171530_ab12cd", "", undefined, SAMPLE_ID + "/../../x"];
