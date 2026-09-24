@@ -73,11 +73,13 @@ function readJson(file) {
 function createR2Store(options) {
   const opts = options || {};
   const outRoot = path.resolve(opts.outRoot || path.join(__dirname, "..", "..", "real_samples"));
-  /* 测试可注入 config；生产按 env / .env.r2.local 装载 */
+  /* provider 可注入（测试）；生产由 provider.js 选择（COS 优先，R2 后备）。
+     config 形状对 COS/R2 一致，本模块不关心背后是哪家。 */
   const load = opts.config
     ? { ok: true, error: null, config: opts.config }
-    : r2.loadConfig({ root: opts.root });
+    : (opts.providerResult || r2.loadConfig({ root: opts.root }));
   const config = load.ok ? load.config : null;
+  const providerName = opts.provider || (config && config.provider) || "s3";
 
   const maxCaptureBytes = opts.maxCaptureBytes || DEFAULT_MAX_CAPTURE_BYTES;
   const presignTtlSeconds = opts.presignTtlSeconds || DEFAULT_PRESIGN_TTL_SECONDS;
@@ -524,6 +526,7 @@ function createR2Store(options) {
     outRoot: outRoot,
     maxCaptureBytes: maxCaptureBytes,
     presignTtlSeconds: presignTtlSeconds,
+    provider: providerName,
     initSample: initSample,
     commitSample: commitSample,
     mirrorTick: mirrorTick,

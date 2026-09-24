@@ -41,6 +41,7 @@ const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
 const { createR2Store } = require("./r2_store.js");
+const { selectProvider } = require("./provider.js");
 
 const SERVICE = "msq-sample-collector";
 const VERSION = 1;
@@ -751,11 +752,14 @@ function createCollector(options) {
     writeTokens: Array.isArray(opts.writeTokens) ? opts.writeTokens.filter(Boolean) : [],
     allowAnonymousWrites: opts.allowAnonymousWrites === true
   };
-  /* R2 直传后端。测试可注入 r2Store（含 mock S3 client）；生产按 env/secret 文件装载。
-     缺配置时 available()=false → init/commit 503，legacy /api/sample 照常工作。 */
+  /* 样本数据面后端（COS_SAMPLE_TRANSFER_V1）：COS 优先，R2 后备，都没有则 FAIL CLOSED。
+     测试可注入 r2Store 或 providerResult；对象操作与 provider 无关。 */
+  const providerResult = opts.providerResult || selectProvider({ root: opts.root });
   const r2Store = opts.r2Store || createR2Store({
     outRoot: outRoot,
     root: opts.root,
+    config: providerResult.ok ? providerResult.config : undefined,
+    provider: providerResult.provider || undefined,
     client: opts.r2Client,
     maxCaptureBytes: opts.maxCaptureBytes,
     presignTtlSeconds: opts.presignTtlSeconds,
@@ -763,6 +767,7 @@ function createCollector(options) {
     log: opts.log
   });
   ctx.r2 = r2Store;
+  ctx.providerName = r2Store.provider;
   const server = http.createServer(function (req, res) {
     try {
       handleCollector(req, res, ctx);
@@ -774,6 +779,7 @@ function createCollector(options) {
     server: server,
     outRoot: ctx.outRoot,
     r2: r2Store,
+    providerName: r2Store.provider,
     listen: function (host, port) {
       return new Promise(function (resolve, reject) {
         server.once("error", reject);
@@ -864,17 +870,19 @@ if (require.main === module) {
     }
     console.log("");
     if (collector.r2 && collector.r2.available()) {
-      console.log("R2 直传：ENABLED（capture.jpg 经 presigned PUT 直传私有 bucket）");
+      console.log("样本直传：ENABLED（provider=" + collector.providerName +
+        "，capture.jpg 经 presigned PUT 直传私有 bucket）");
       console.log("  sample bucket : " + collector.r2.config.sampleBucket);
+      console.log("  region        : " + (collector.r2.config.region || "(default)"));
       console.log("  presign TTL   : " + collector.r2.presignTtlSeconds + "s");
       console.log("  PC 镜像       : 后台 worker（不阻塞手机）");
       collector.r2.startMirrorWorker();
     } else {
-      console.log("R2 直传：DISABLED（" +
+      console.log("样本直传：DISABLED（" +
         ((collector.r2 && collector.r2.unavailableReason()) || "not configured") + "）");
       console.log("  → POST /api/sample/init 与 /api/sample/commit 将返回 503（FAIL CLOSED）");
       console.log("  → legacy POST /api/sample 不受影响，仍可用");
-      console.log("  → 配置方法：tools/sample_collector/.env.r2.local（见 .env.r2.example）");
+      console.log("  → 配置方法：tools/sample_collector/.env.cos.local（见 .env.cos.example）");
     }
   }, function (e) {
     console.error("failed to start: " + (e && e.message));
