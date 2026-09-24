@@ -576,7 +576,12 @@ async function main() {
 
     /* ================= 未配置 R2 → FAIL CLOSED ================= */
     section("R2 未配置时 init/commit FAIL CLOSED（503）");
-    const noR2 = createCollector({ out: path.join(tmp, "nor2"), writeTokens: [WRITE_TOKEN] });
+    /* 显式禁用 provider：本机现在装了真实 COS credential，若不显式禁用，
+       auto 选择会拿到 COS，无法验证 FAIL CLOSED 路径。 */
+    const noR2 = createCollector({
+      out: path.join(tmp, "nor2"), writeTokens: [WRITE_TOKEN],
+      providerResult: { ok: false, provider: null, error: "(test: no provider)" }
+    });
     const noR2Port = await noR2.listen("127.0.0.1", 0);
     check("无 R2 配置时 store.available()=false", noR2.r2.available() === false);
     r = await request(noR2Port, "POST", "/api/sample/init", {
