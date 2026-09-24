@@ -105,9 +105,41 @@ async function main() {
       publish.DOWNLOAD_DOMAIN === "download.shiinalab.top", publish.DOWNLOAD_DOMAIN);
     check("R2-A2d apkUrl 是绝对 http(s)（不再依赖相对路径）",
       /^https:\/\//.test(url10));
-    check("R2-A2e 不再出现 /api/update/dev/apk 作为新版本默认下载路径",
-      fs.readFileSync(path.join(__dirname, "publish.js"), "utf8")
-        .indexOf('apkUrl: "/api/update/dev/apk"') < 0);
+    check("R2-A2e --r2 路径的 apkUrl 由 R2 域名生成",
+      r2publish.apkPublicUrl(r2publish.DEFAULT_DOMAIN, 10).indexOf("https://download.shiinalab.top/") === 0);
+
+    /* ---- local 模式（本轮默认）：apkUrl 相对路径，完全不碰 R2 ---- */
+    section("local 模式（默认）：APK 走现有 SELF_UPDATE 链路，不碰 R2");
+    const localPaths = {
+      updatesDir: path.join(tmp, "local", "updates", "dev"),
+      updatesApk: path.join(tmp, "local", "updates", "dev", "营销安规刷题-DEV.apk"),
+      latestJson: path.join(tmp, "local", "updates", "dev", "latest.json"),
+      devApk: path.join(tmp, "local", "release", "营销安规刷题-DEV.apk")
+    };
+    let r2Calls = 0;
+    const noR2Client = new Proxy({}, {
+      get: function () { return function () { r2Calls++; return { ok: false }; }; }
+    });
+    const localApk = fakeApk(11, 64 * 1024);
+    const localRel = await publish.releaseApk({
+      mode: "local",
+      config: null, domain: r2publish.DEFAULT_DOMAIN,
+      versionCode: 30, versionName: "1.0.30-dev",
+      packageName: publish.EXPECTED_PACKAGE,
+      apkBytes: localApk, sha256: r2publish.sha256Hex(localApk),
+      notes: "local mode", keepCount: 3, prevCode: 10, paths: localPaths,
+      client: noR2Client, pruneClient: noR2Client, log: function () { }
+    });
+    check("local 模式发布成功", localRel.ok === true, localRel.error || "");
+    check("local 模式 apkUrl 为相对路径 /api/update/dev/apk",
+      localRel.manifest.apkUrl === "/api/update/dev/apk", localRel.manifest.apkUrl);
+    check("local 模式完全没调用任何 R2 操作", r2Calls === 0, "r2Calls=" + r2Calls);
+    check("local 模式 latest.json 已写入且 sha/size 正确",
+      fs.existsSync(localPaths.latestJson) &&
+      JSON.parse(fs.readFileSync(localPaths.latestJson, "utf8")).sha256 ===
+        r2publish.sha256Hex(localApk));
+    check("local 模式不做 R2 prune（pruned=null）", localRel.pruned === null);
+    check("local 模式本地 APK 副本已写", fs.existsSync(localPaths.updatesApk));
 
     /* ================= 真实发布一次（成功路径） ================= */
     section("发布成功路径：上传 → HeadObject → 公网冒烟 → 写 latest → prune");
@@ -115,6 +147,7 @@ async function main() {
     const apkBytes = fakeApk(3, 3 * 1024 * 1024);
     const sha256 = r2publish.sha256Hex(apkBytes);
     const rel = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: testDomain, versionCode: 10, versionName: "1.0.10-dev",
       packageName: publish.EXPECTED_PACKAGE, apkBytes: apkBytes, sha256: sha256,
       notes: "R2 test release", keepCount: 3, prevCode: 9, paths: paths,
@@ -171,6 +204,7 @@ async function main() {
       listAllObjects: client.listAllObjects
     };
     let bad = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: testDomain, versionCode: 11, versionName: "1.0.11-dev",
       packageName: publish.EXPECTED_PACKAGE, apkBytes: fakeApk(4, 1024),
       sha256: r2publish.sha256Hex(fakeApk(4, 1024)),
@@ -192,6 +226,7 @@ async function main() {
       deleteObject: client.deleteObject, listAllObjects: client.listAllObjects
     };
     bad = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: testDomain, versionCode: 12, versionName: "1.0.12-dev",
       packageName: publish.EXPECTED_PACKAGE, apkBytes: fakeApk(5, 2048),
       sha256: r2publish.sha256Hex(fakeApk(5, 2048)),
@@ -206,6 +241,7 @@ async function main() {
     /* (b2) 声明 sha 与真实字节不符 → 网络请求之前就拒绝 */
     const mismatchBody = fakeApk(9, 4096);
     bad = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: testDomain, versionCode: 16, versionName: "1.0.16-dev",
       packageName: publish.EXPECTED_PACKAGE, apkBytes: mismatchBody,
       sha256: "d".repeat(64),
@@ -223,6 +259,7 @@ async function main() {
     const emptyProxy = createPublicDomainProxy(mock, SAMPLE_BUCKET);   /* 私有 bucket：对象不存在 */
     const emptyPort = await emptyProxy.listen();
     bad = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: "http://127.0.0.1:" + emptyPort, versionCode: 13,
       versionName: "1.0.13-dev", packageName: publish.EXPECTED_PACKAGE,
       apkBytes: fakeApk(6, 1024), sha256: r2publish.sha256Hex(fakeApk(6, 1024)),
@@ -254,6 +291,7 @@ async function main() {
       deleteObject: client.deleteObject, listAllObjects: client.listAllObjects
     };
     bad = await publish.releaseApk({
+      mode: "r2",
       config: config, domain: testDomain, versionCode: 15, versionName: "1.0.15-dev",
       packageName: publish.EXPECTED_PACKAGE, apkBytes: mismatchApk, sha256: mismatchSha,
       keepCount: 3, prevCode: 10, paths: paths, client: noPut, pruneClient: client,

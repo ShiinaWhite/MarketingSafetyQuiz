@@ -1558,6 +1558,45 @@ section("R2 secret 静态扫描：仓库内不得出现真实 credential");
     fs.readFileSync(path.join(__dirname, ".gitignore"), "utf8").includes(".env.r2.local"));
 }
 
+section("COS_SAMPLE_TRANSFER_V1：provider 选择与客户端行为守卫");
+{
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+  const providerSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/provider.js"), "utf8");
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  check("COS-Q1 provider 选择：COS 优先，R2 后备，可显式禁用（FAIL CLOSED 可测）",
+    providerSrc.includes('want === "cos"') &&
+    providerSrc.includes('want === "r2"') &&
+    providerSrc.includes('want === "none"'));
+  check("COS-Q2 presign TTL 300 秒（COS 路径与 R2 共用同一常量）",
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/r2_store.js"), "utf8")
+      .includes("DEFAULT_PRESIGN_TTL_SECONDS = 300"));
+  check("COS-Q3 legacy /api/sample 保留（ENABLED_COMPAT）",
+    serverSrc.includes('p === "/api/sample"'));
+  check("COS-Q4 mirror 在 commit 响应路径之外（后台 worker）",
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/r2_store.js"), "utf8")
+      .includes("function kickMirror"));
+  check("COS-Q5 手机端记录的是数字诊断（耗时/速率），不是 URL",
+    pluginSrc.includes("captureBytesPerSec") &&
+    pluginSrc.includes("captureUploadMs") &&
+    /* state 里绝不写入 presigned URL / 签名（setServer 的 serverUrl 是合法 API 字段） */
+    !/\.put\("(presignedPutUrl|presigned[A-Za-z]*|signature|sig)"/.test(pluginSrc));
+  check("COS-Q6 429 走 model 的 markRateLimited（尊重 Retry-After，可 JVM 单测）",
+    modelSrc.includes("markRateLimited") &&
+    modelSrc.includes("RATE_LIMIT_MAX_WAIT_MS") &&
+    pluginSrc.includes("recordRateLimited(dir, \"commit HTTP 429\"") &&
+    pluginSrc.includes("parseRetryAfterMs"));
+  check("COS-Q7 COS PUT 403/400 不进入永久 failed（会重新 init）",
+    /COS PUT HTTP " \+ putStatus \+ " \(will re-init\)"/.test(pluginSrc));
+  check("COS-Q8 手机 state.json 不落 presigned URL",
+    !/put\("presigned/.test(pluginSrc));
+}
+
 console.log("\n" + "=".repeat(46));
 if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
 console.log("结果：全部通过 ✓");
