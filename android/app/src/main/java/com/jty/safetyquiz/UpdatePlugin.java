@@ -80,7 +80,11 @@ public class UpdatePlugin extends Plugin {
         final String expectedSha256 = call.getString("sha256");
         final String expectedPackageName = call.getString("expectedPackageName");
         final Integer expectedVersionCode = call.getInt("expectedVersionCode");
-        final Long expectedSize = call.getLong("expectedSize");
+        /* APK_DELIVERY_COS_CDN_VC13_V1：多态解析，Integer/Long/Double/整数字符串
+           都可靠转 long（修复 getLong 对 Integer 返回 null 的历史陷阱） */
+        final Long expectedSize = UpdateVerifier.flexibleLong(
+                call.getLong("expectedSize"), call.getDouble("expectedSize"),
+                call.getString("expectedSize"));
         if (url == null || expectedSha256 == null || expectedPackageName == null
                 || expectedVersionCode == null) {
             // versionCode 必填：绝不允许跳过版本一致性校验

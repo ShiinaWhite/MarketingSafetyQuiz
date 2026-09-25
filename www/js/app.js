@@ -2118,19 +2118,33 @@
         renderUpdateView(txt);
       });
     }
-    Update.downloadUpdate({
-      url: url,
-      sha256: updateManifest.sha256,
-      expectedPackageName: updateInfo.id,
-      expectedVersionCode: updateManifest.versionCode,
-      expectedSize: updateManifest.size
-    }).then(function () {
-      afterDownloadVerified();
-    }, function (e) {
-      updatePhase = "available";
-      updateSetError(updateFriendlyError(e));
-      renderUpdateView("下载未完成，可重新下载安装");
-    });
+    var attemptDownload = function (currentUrl, isFallback) {
+      Update.downloadUpdate({
+        url: currentUrl,
+        sha256: updateManifest.sha256,
+        expectedPackageName: updateInfo.id,
+        expectedVersionCode: updateManifest.versionCode,
+        expectedSize: updateManifest.size
+      }).then(function () {
+        afterDownloadVerified();
+      }, function (e) {
+        /* APK_DELIVERY_COS_CDN_VC13_V1：仅明确传输层失败才回退 legacy 通道一次；
+           安全校验失败（SHA/size/package/version/signer/解析）= HARD FAIL，
+           绝不“换通道再试” */
+        var fallbackUrl = (!isFallback && updateManifest.fallbackApkUrl &&
+                           MSQUpdater.shouldTryFallback(e))
+          ? MSQUpdater.fallbackApkUrlFor(updateManifest, updateResolvedServer()) : null;
+        if (fallbackUrl && fallbackUrl !== currentUrl) {
+          renderUpdateView("CDN 通道失败，改用备用通道…");
+          attemptDownload(fallbackUrl, true);
+          return;
+        }
+        updatePhase = "available";
+        updateSetError(updateFriendlyError(e));
+        renderUpdateView("下载未完成，可重新下载安装");
+      });
+    };
+    attemptDownload(url, false);
   }
 
   function afterDownloadVerified() {

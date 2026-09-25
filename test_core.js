@@ -1331,6 +1331,76 @@ const MSQUpdater = require("./www/js/updater.js");
     MSQUpdater.normalizeSettings({ serverUrl: "http://a:1/" }).serverUrl === "http://a:1");
 }
 
+/* ---------- APK_DELIVERY_COS_CDN_VC13_V1：CDN apkUrl + fallback 语义 ---------- */
+section("CDN 迁移：绝对 apkUrl / fallbackApkUrl 前向兼容 / 回退分类（UPD-CDN 系列）");
+{
+  const CDN_URL = "https://apk.shiinalab.top/dev/vc13/msq-dev-vc13.apk";
+  const manifestVc13 = {
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: 13, versionName: "1.0.13-dev",
+    apkUrl: CDN_URL,
+    fallbackApkUrl: "/api/update/dev/apk",
+    sha256: "7".repeat(64), size: 17221414,
+    publishedAt: "2026-09-26T00:00:00Z", notes: "CDN"
+  };
+  const v13 = (m) => MSQUpdater.validateManifest(m, { channel: "dev", packageName: "com.jty.safetyquiz.dev" });
+
+  check("UPD-CDN-1a 绝对 HTTPS CDN apkUrl 原样透传",
+    MSQUpdater.resolveApkUrl("https://update.shiinalab.top", CDN_URL) === CDN_URL);
+  check("UPD-CDN-1b CDN apkUrl 的 manifest 校验通过", v13(manifestVc13).ok);
+  /* #2 vc12 前向兼容：未知 fallbackApkUrl 字段不破坏校验（vc12 代码同样宽松，已实证） */
+  check("UPD-CDN-2 manifest 含 fallbackApkUrl 仍校验通过（vc12 前向兼容）", v13(manifestVc13).ok);
+  check("UPD-CDN-2b 无 fallbackApkUrl 的 manifest 同样通过（legacy 不受影响）",
+    v13(Object.assign({}, manifestVc13, { fallbackApkUrl: undefined })).ok);
+  /* #13 malformed size → manifest 校验拒绝 */
+  check("UPD-CDN-13 size 畸形（字符串/负数/非整数）→ reject",
+    !v13(Object.assign({}, manifestVc13, { size: "17221414" })).ok &&
+    !v13(Object.assign({}, manifestVc13, { size: -1 })).ok &&
+    !v13(Object.assign({}, manifestVc13, { size: 17.5 })).ok);
+
+  /* #3-10 回退分类矩阵：传输失败允许回退，安全失败一律 HARD FAIL */
+  const cls = (e) => MSQUpdater.classifyDownloadFailure(e);
+  const fb = (e) => MSQUpdater.shouldTryFallback(e);
+  check("UPD-CDN-3 DNS/IO 异常（DOWNLOAD_FAILED）→ transport，允许回退",
+    cls({ code: "DOWNLOAD_FAILED", message: "下载失败：Unable to resolve host apk.shiinalab.top" }) === "transport" &&
+    fb({ code: "DOWNLOAD_FAILED", message: "x" }) === true);
+  check("UPD-CDN-4/5/6 HTTP 503 / 429 / 408 → transport，允许回退一次",
+    [503, 500, 429, 408].every((s) =>
+      fb({ code: "HTTP_ERROR", message: "下载失败 HTTP " + s }) === true));
+  check("UPD-CDN-6b HTTP 404/403 → security，禁止回退",
+    cls({ code: "HTTP_ERROR", message: "下载失败 HTTP 404" }) === "security" &&
+    fb({ code: "HTTP_ERROR", message: "下载失败 HTTP 403" }) === false);
+  /* #7-10 安全校验失败 = HARD FAIL，绝不回退 */
+  check("UPD-CDN-7 SHA mismatch → 禁止回退",
+    fb({ code: "SHA_MISMATCH", message: "更新包校验失败（SHA256 不一致）" }) === false &&
+    cls({ code: "SHA_MISMATCH", message: "x" }) === "security");
+  check("UPD-CDN-8 package mismatch → 禁止回退",
+    fb({ code: "PACKAGE_MISMATCH", message: "x" }) === false);
+  check("UPD-CDN-9 version mismatch → 禁止回退",
+    fb({ code: "VERSION_MISMATCH", message: "x" }) === false);
+  check("UPD-CDN-10 signer mismatch / 解析失败 / 超限 / 安装前校验 → 禁止回退",
+    ["SIGNER_MISMATCH", "PARSE_FAILED", "TOO_LARGE", "VERIFY_FAILED"].every((c) =>
+      fb({ code: c, message: "x" }) === false));
+  check("UPD-CDN-10b 无 code 的拒绝（JS 侧参数错误）→ 禁止回退",
+    fb(new Error("下载地址无效")) === false);
+
+  /* fallback URL 解析：相对路径按控制面 server 拼接；缺失 → null */
+  check("UPD-CDN-11 fallbackApkUrl 相对路径 → 控制面拼接",
+    MSQUpdater.fallbackApkUrlFor(manifestVc13, "https://update.shiinalab.top") ===
+      "https://update.shiinalab.top/api/update/dev/apk");
+  check("UPD-CDN-12 无 fallbackApkUrl → null（不触发回退）",
+    MSQUpdater.fallbackApkUrlFor({ apkUrl: CDN_URL }, "https://update.shiinalab.top") === null);
+
+  /* #14 安装前二次校验仍然存在（静态守卫，防未来被误删） */
+  const pluginSrc = fs.readFileSync(path.join(__dirname, "android/app/src/main/java/com/jty/safetyquiz/UpdatePlugin.java"), "utf8");
+  const installIdx = pluginSrc.indexOf("public void installDownloadedUpdate");
+  const verifyIdx = pluginSrc.indexOf("verifyApkFile(call, apk, expectedSha256", installIdx);
+  check("UPD-CDN-14 installDownloadedUpdate 安装前二次全量校验仍在（静态守卫）",
+    installIdx >= 0 && verifyIdx > installIdx);
+  check("UPD-CDN-14b 下载校验使用多态 size 解析（getLong 陷阱修复，静态守卫）",
+    pluginSrc.includes("UpdateVerifier.flexibleLong("));
+}
+
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
 section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
 {

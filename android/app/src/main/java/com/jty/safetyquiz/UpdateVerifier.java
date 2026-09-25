@@ -81,6 +81,34 @@ public final class UpdateVerifier {
     }
 
     /**
+     * PluginCall 数值多态解析（APK_DELIVERY_COS_CDN_VC13_V1，修复 expectedSize
+     * 历史陷阱：JSON number 被解码为 Integer 时 PluginCall.getLong 返回 null，
+     * 精确 size 比对曾被静默跳过）。
+     * 调用方把 getLong/getDouble/getString 三个视图都传入，本方法返回第一个
+     * 可靠的整数值；无法可靠解析时返回 null（调用方按「无期望值」处理，
+     * 由 SHA256 全文件校验兜底）。边界：负数、非整数 double、2^53 以上、
+     * 非纯整数字符串一律 null（宁可无值，不可错值）。
+     */
+    public static Long flexibleLong(Long longView, Double doubleView, String stringView) {
+        if (longView != null) {
+            return longView;
+        }
+        if (doubleView != null && Double.isFinite(doubleView)
+                && doubleView >= 1d && doubleView == Math.floor(doubleView)
+                && doubleView <= 9.007199254740992E15) {
+            return doubleView.longValue();
+        }
+        if (stringView != null) {
+            try {
+                return Long.parseLong(stringView.trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 版本化下载文件名（REAL_SAMPLE_FEEDBACK 排查引入）：每个 versionCode 独立文件，
      * 杜绝固定 update.apk 的旧包残留被安装路径复用。
      */

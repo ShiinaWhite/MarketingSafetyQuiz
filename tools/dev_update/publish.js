@@ -3,6 +3,8 @@
    零第三方依赖。工作流：
      node tools/dev_update/publish.js [--notes "..."] [--version-code N]
         [--version-name X.Y.Z] [--skip-sync] [--allow-new-signer]
+        [--cos-cdn]     (APK_DELIVERY_COS_CDN_VC13_V1: 发布到腾讯 COS
+                         私有桶 + CDN 验证，apkUrl=CDN 绝对 URL，附带 fallbackApkUrl)
         [--arm64-only]  (APK_SIZE_OPTIMIZATION_V1: 透传 -PDEV_ARM64_ONLY，
         发布构建仅保留 arm64-v8a；发布前用 aapt native-code 实测核验)
    步骤：确定下一 versionCode → cap sync → assembleDev（-P 注入版本）→
@@ -29,6 +31,7 @@ const crypto = require("crypto");
 
 const r2 = require("../r2/r2.js");
 const r2publish = require("./r2_publish.js");
+const cospublish = require("./cos_publish.js");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const ANDROID = path.join(ROOT, "android");
@@ -66,7 +69,7 @@ function fail(msg) {
 
 function parseArgs(argv) {
   const a = { notes: "", skipSync: false, allowNewSigner: false, r2: false,
-    arm64Only: false };
+    arm64Only: false, cosCdn: false };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
     if (k === "--notes") { a.notes = argv[++i] || ""; }
@@ -76,6 +79,7 @@ function parseArgs(argv) {
     else if (k === "--allow-new-signer") { a.allowNewSigner = true; }
     else if (k === "--r2") { a.r2 = true; }
     else if (k === "--arm64-only") { a.arm64Only = true; }
+    else if (k === "--cos-cdn") { a.cosCdn = true; }
     else fail("未知参数：" + k);
   }
   return a;
@@ -188,7 +192,20 @@ async function main() {
      /api/update/dev/apk，apkUrl 保持相对路径）。R2 发布路径保留为可选 --r2，
      只有显式传 --r2 才要求 R2 credential —— R2 不是默认，也不再是阻塞项。 */
   const useR2 = args.r2 === true;
-  let r2config = null;
+  /* APK_DELIVERY_COS_CDN_VC13_V1：--cos-cdn 数据面（腾讯 COS 私有桶 + CDN）。
+     与 --r2 / local 互斥；凭据来自仓库根 .env.cos.updates.local（gitignored）。 */
+  const useCosCdn = args.cosCdn === true;
+  let cosConfig = null;
+  let cosCdnBase = null;
+  if (useCosCdn) {
+    if (useR2) { fail("--cos-cdn 与 --r2 互斥"); }
+    const loaded = cospublish.loadUpdatesConfig({});
+    if (!loaded.ok) { fail("cos-cdn 发布需要 .env.cos.updates.local：" + loaded.error); }
+    cosConfig = loaded.config;
+    cosCdnBase = loaded.cdnBaseUrl;
+    console.log("APK 数据面：腾讯 COS 私有桶 + CDN（bucket=" + cosConfig.bucket +
+      " region=" + cosConfig.region + " cdn=" + cosCdnBase + "）");
+  }
   if (useR2) {
     const loaded = r2.loadConfig({ root: ROOT });
     if (!loaded.ok) {
@@ -269,9 +286,11 @@ async function main() {
   /* 7-9) 原子发布 latest.json（local 默认 / --r2 可选）
      全部顺序保证集中在 releaseApk()（可单测：失败绝不写 latest）。 */
   const rel = await releaseApk({
-    mode: useR2 ? "r2" : "local",
-    config: r2config,
+    mode: useR2 ? "r2" : (useCosCdn ? "cos-cdn" : "local"),
+    config: useCosCdn ? cosConfig : r2config,
     domain: DOWNLOAD_DOMAIN,
+    cdnBaseUrl: useCosCdn ? cosCdnBase : null,
+    fallbackApkUrl: useCosCdn ? "/api/update/dev/apk" : null,
     versionCode: versionCode,
     versionName: versionName,
     packageName: EXPECTED_PACKAGE,
@@ -327,6 +346,32 @@ async function releaseApk(opts) {
   const log = o.log || function () {};
   const useR2 = o.mode === "r2";
 
+  if (o.mode === "cos-cdn") {
+    /* COS_PUT → COS_HEAD_VERIFY → CDN_FULL_DOWNLOAD(+SHA/size) 全过才可能走到
+       writeManifestAndPrune；任何失败返回 ok:false，latest.json 保持不变 */
+    const client = o.client || {
+      putObject: r2.putObject, headObject: r2.headObject,
+      deleteObject: r2.deleteObject, listAllObjects: r2.listAllObjects
+    };
+    const pub = await cospublish.publishApk({
+      client: client, config: o.config, cdnBaseUrl: o.cdnBaseUrl,
+      versionCode: o.versionCode, versionName: o.versionName,
+      packageName: o.packageName, apkBytes: o.apkBytes, sha256: o.sha256,
+      verifyCdn: o.verifyCdn
+    });
+    if (!pub.ok) {
+      return { ok: false, stage: pub.stage, error: pub.error, wroteManifest: false,
+        objectKey: pub.objectKey, publicUrl: pub.publicUrl };
+    }
+    log("  COS PUT + HeadObject 通过：size=" + pub.uploaded.size +
+      " metadata.sha256=" + String(pub.uploaded.metadata.sha256).slice(0, 12) + "…");
+    log("  CDN 全量下载验证通过：" + pub.cdn.bytes + " bytes，sha256 一致");
+    return await writeManifestAndPrune(o, paths, pruneClient, log, {
+      apkUrl: pub.publicUrl, fallbackApkUrl: o.fallbackApkUrl || null,
+      objectKey: pub.objectKey, pub: pub, useR2: false
+    });
+  }
+
   if (useR2) {
     const objectKey = r2publish.apkObjectKey(o.versionCode);
     log("→ 上传 APK 到 R2：" + o.config.downloadBucket + "/" + objectKey);
@@ -380,6 +425,7 @@ async function writeManifestAndPrune(o, paths, pruneClient, log, info) {
     versionCode: o.versionCode,
     versionName: o.versionName,
     apkUrl: info.apkUrl || "/api/update/dev/apk",
+    fallbackApkUrl: info.fallbackApkUrl || undefined,
     sha256: o.sha256,
     size: o.apkBytes.length,
     publishedAt: new Date().toISOString(),
@@ -392,7 +438,20 @@ async function writeManifestAndPrune(o, paths, pruneClient, log, info) {
   writeAtomic(paths.devApk, o.apkBytes);
 
   let pruned = null;
-  if (info.useR2) {
+  if (o.mode === "cos-cdn") {
+    pruned = await cospublish.pruneOldApks({
+      client: pruneClient,
+      config: o.config,
+      keepCount: o.keepCount,
+      currentVersionCode: o.versionCode
+    });
+    if (!pruned.ok) {
+      log("[警告] 旧 APK 清理失败（不影响本次发布）：" + pruned.error);
+    } else {
+      log("→ COS prune：共 " + pruned.total + " 个，保留 " + pruned.kept.length +
+        " 个，删除 " + pruned.deleted.length + " 个（current 已保护）");
+    }
+  } else if (info.useR2) {
     pruned = await r2publish.pruneOldApks({
       client: pruneClient,
       config: o.config,

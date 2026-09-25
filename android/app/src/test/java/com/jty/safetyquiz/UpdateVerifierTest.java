@@ -2,6 +2,7 @@ package com.jty.safetyquiz;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.HashSet;
@@ -99,5 +100,36 @@ public class UpdateVerifierTest {
         assertEquals("update-vc5.apk", UpdateVerifier.updateFileName(5));
         // 不同 versionCode → 不同文件名：旧包残留不可能被新版本的安装路径复用
         assertFalse(UpdateVerifier.updateFileName(4).equals(UpdateVerifier.updateFileName(5)));
+    }
+
+    /* ================= APK_DELIVERY_COS_CDN_VC13_V1：expectedSize 多态解析 ================= */
+
+    @Test
+    public void flexibleLong_integerTrapCovered() {
+        /* #11 Integer：getLong 对 JSON Integer 返回 null（历史陷阱），
+           doubleView（getDouble）必须可靠兜住 */
+        assertNull(UpdateVerifier.flexibleLong(null, null, null));
+        assertEquals(Long.valueOf(17221414L),
+                UpdateVerifier.flexibleLong(null, Double.valueOf(17221414d), null));
+        assertEquals(Long.valueOf(1L),
+                UpdateVerifier.flexibleLong(null, Double.valueOf(1d), null));
+        /* #12 Long / 大数值：Long.MAX 内合法；超过 2^53 的 double 拒绝（宁可无值） */
+        assertEquals(Long.valueOf(150L * 1024 * 1024),
+                UpdateVerifier.flexibleLong(150L * 1024 * 1024, null, null));
+        assertEquals(Long.valueOf(9007199254740992L),
+                UpdateVerifier.flexibleLong(null, Double.valueOf(9007199254740992d), null));
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(9.1e18), null));
+        /* #13 边界与畸形：0/负数/非整数 double/非整数字符串 → null（宁可无值，不可错值） */
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(0d), null));
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(-5d), null));
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(17.5d), null));
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(Double.NaN), null));
+        assertNull(UpdateVerifier.flexibleLong(null, Double.valueOf(Double.POSITIVE_INFINITY), null));
+        assertEquals(Long.valueOf(42L), UpdateVerifier.flexibleLong(null, null, " 42 "));
+        assertNull(UpdateVerifier.flexibleLong(null, null, "17.5"));
+        assertNull(UpdateVerifier.flexibleLong(null, null, "abc"));
+        assertNull(UpdateVerifier.flexibleLong(null, null, ""));
+        /* longView 优先：视图间不一致时以 getLong 为准（不猜） */
+        assertEquals(Long.valueOf(7L), UpdateVerifier.flexibleLong(7L, Double.valueOf(9d), "11"));
     }
 }

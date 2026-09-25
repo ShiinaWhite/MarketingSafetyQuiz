@@ -101,6 +101,7 @@
       return { ok: false, error: "更新信息 SHA256 无效" };
     }
     if (typeof manifest.size !== "number" || !isFinite(manifest.size) ||
+        Math.floor(manifest.size) !== manifest.size ||
         manifest.size < 1 || manifest.size > MAX_APK_BYTES) {
       return { ok: false, error: "更新包大小异常" };
     }
@@ -119,6 +120,38 @@
     if (manifest.versionCode > cur) { return "available"; }
     if (manifest.versionCode === cur) { return "latest"; }
     return "downgrade";
+  }
+
+  /* ---------------- 传输层回退（APK_DELIVERY_COS_CDN_VC13_V1） ----------------
+     只有明确的网络/服务端传输失败才允许回退 legacy 通道一次；
+     内容安全校验失败（SHA/size/package/version/signer/解析/超限）一律 HARD FAIL，
+     绝不允许“换通道再试”把安全失败降级成网络失败。
+     native reject code 语义（UpdatePlugin）：
+       DOWNLOAD_FAILED = 异常路径（DNS/connect/read timeout/reset/IO）→ transport
+       HTTP_ERROR      = 非常响应码：消息含 "HTTP <status>"，5xx/429/408 → transport，
+                         其余 4xx（403/404 等）→ security
+       其余（VERIFY_FAILED/SHA_MISMATCH/SIZE_MISMATCH/PARSE_FAILED/
+             PACKAGE_MISMATCH/VERSION_MISMATCH/SIGNER_MISMATCH/TOO_LARGE/…）→ security */
+  function classifyDownloadFailure(err) {
+    var code = String((err && err.code) || "");
+    var msg = String((err && err.message) || err || "");
+    if (code === "DOWNLOAD_FAILED") { return "transport"; }
+    if (code === "HTTP_ERROR") {
+      var m = /HTTP (\d{3})/.exec(msg);
+      var status = m ? Number(m[1]) : 0;
+      return (status >= 500 || status === 429 || status === 408) ? "transport" : "security";
+    }
+    return "security";
+  }
+
+  function shouldTryFallback(err) {
+    return classifyDownloadFailure(err) === "transport";
+  }
+
+  /* manifest.fallbackApkUrl → 绝对 URL（相对路径按更新服务器拼接）；无则 null */
+  function fallbackApkUrlFor(manifest, serverUrl) {
+    if (!manifest || typeof manifest !== "object") { return null; }
+    return resolveApkUrl(serverUrl, manifest.fallbackApkUrl);
   }
 
   function formatBytes(n) {
@@ -144,6 +177,9 @@
     resolveApkUrl: resolveApkUrl,
     validateManifest: validateManifest,
     checkUpdateState: checkUpdateState,
+    classifyDownloadFailure: classifyDownloadFailure,
+    shouldTryFallback: shouldTryFallback,
+    fallbackApkUrlFor: fallbackApkUrlFor,
     formatBytes: formatBytes
   };
 });
