@@ -98,8 +98,8 @@ androidComponents {
    questions.json 仅 www 端 fetch 兜底、explanations.json 零引用、explanations.sample.json
    仅 node 测试夹具）。www/ 源文件与 test_core.js 夹具继续保留；
    assets/public 由 cap sync 生成且不入库，重新 sync 会原样还原，无需恢复逻辑。 */
-tasks.matching { it.name ==~ /merge\w*Assets/ }.configureEach { assetsTask ->
-    assetsTask.doFirst {
+tasks.register("pruneNonRuntimePackagedAssets") {
+    doLast {
         ['questions.json', 'explanations.json', 'explanations.sample.json'].each { name ->
             def f = file("src/main/assets/public/data/$name")
             if (f.exists()) {
@@ -107,6 +107,12 @@ tasks.matching { it.name ==~ /merge\w*Assets/ }.configureEach { assetsTask ->
             }
         }
     }
+}
+/* 用独立前置任务而非 mergeAssets.doFirst：doFirst 删除发生在 AGP 输入指纹
+   之后，增量构建会让 merge worker 读到已删除文件（NoSuchFileException 实测）。
+   dependsOn 保证删除在 merge 的输入扫描之前完成。 */
+tasks.matching { it.name ==~ /merge\w*Assets/ }.configureEach { assetsTask ->
+    assetsTask.dependsOn "pruneNonRuntimePackagedAssets"
 }
 
 dependencies {

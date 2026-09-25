@@ -316,7 +316,8 @@ async function main() {
   console.log("sha256      :", sha256);
   console.log("signer      :", newSigner);
   if (rel.pub) {
-    console.log("apkUrl      :", rel.publicUrl, "（R2 Custom Domain）");
+    console.log("apkUrl      :", rel.publicUrl,
+      useCosCdn ? "（腾讯 CDN）" : "（R2 Custom Domain）");
     console.log("objectKey   :", rel.objectKey);
     console.log("cacheControl:", r2publish.APK_CACHE_CONTROL);
   } else {
