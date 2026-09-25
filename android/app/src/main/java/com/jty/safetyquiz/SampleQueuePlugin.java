@@ -292,7 +292,10 @@ public class SampleQueuePlugin extends Plugin {
         });
     }
 
-    /** 反馈持久化：写本地 feedback.json 并等待队列补传（sample 成功后才发送）。 */
+    /** 反馈持久化：写本地 feedback.json 并等待队列补传（sample 成功后才发送）。
+     *  FEEDBACK_PERSISTENCE_REPAIR_V1：先标记 state 待传、再写文档——崩溃窗口
+     *  只会留下「待传 + 旧/无文档」，绝不会留下「已同步 + 新文档」的静默丢失。
+     *  诊断字段（非敏感）：feedbackRevision / feedbackPersistedAt / feedbackSyncState。 */
     @PluginMethod
     public void persistFeedback(final PluginCall call) {
         final String sampleId = call.getString("sampleId");
@@ -310,16 +313,19 @@ public class SampleQueuePlugin extends Plugin {
                         call.reject("sample 不存在于本地队列", "NOT_FOUND");
                         return;
                     }
-                    writeFileAtomic(new File(dir, FEEDBACK_NAME), feedbackJson.getBytes(StandardCharsets.UTF_8));
                     synchronized (stateLock) {
                         JSONObject st = readState(dir, sampleId);
                         st.put("feedbackUploaded", false);
                         st.put("feedbackRevision", st.optInt("feedbackRevision", 0) + 1);
+                        st.put("feedbackPersistedAt", System.currentTimeMillis());
+                        st.put("feedbackSyncState", "pending");
+                        st.put("feedbackNextRetryAt", JSONObject.NULL);  // 用户主动修改 → 立即可传
                         if (!st.optBoolean("sampleUploaded", false)) {
                             st.put("sealed", false);   // sample 还没传成功：队列必须保留完整样本
                         }
                         writeState(dir, st);
                     }
+                    writeFileAtomic(new File(dir, FEEDBACK_NAME), feedbackJson.getBytes(StandardCharsets.UTF_8));
                     JSObject ret = new JSObject();
                     ret.put("ok", true);
                     ret.put("sampleId", sampleId);
@@ -495,7 +501,10 @@ public class SampleQueuePlugin extends Plugin {
         }
     }
 
-    /** 最老的一条待处理样本（FIFO）；上传完成但未 sealed 的跳过。 */
+    /** 最老的一条待处理样本（FIFO）；上传完成但未 sealed 的跳过。
+     *  FEEDBACK_PERSISTENCE_REPAIR_V1：样本已同步但反馈待传的样本必须被拾取——
+     *  旧逻辑依赖 isRetryDue，而 commit 成功后 status 停在 capture_uploaded，
+     *  isRetryDue 永远返回 false → commit 后提交的反馈被永久搁浅（根因之一）。 */
     private File pickNextDue() {
         File[] dirs = queueDir().listFiles();
         if (dirs == null) { return null; }
@@ -507,6 +516,13 @@ public class SampleQueuePlugin extends Plugin {
             boolean feedbackPending = new File(dir, FEEDBACK_NAME).exists()
                     && !st.optBoolean("feedbackUploaded", true);
             if (sampleDone && !feedbackPending) { continue; }   // 已同步完成
+            if (sampleDone) {
+                // 反馈补传：不受上传重试节奏约束，只看反馈自身退避
+                if (SampleQueueModel.isFeedbackUploadDue(st, System.currentTimeMillis())) {
+                    due.add(dir);
+                }
+                continue;
+            }
             if (SampleQueueModel.isRetryDue(st, System.currentTimeMillis())) {
                 due.add(dir);
             }
@@ -662,22 +678,44 @@ public class SampleQueuePlugin extends Plugin {
             File fbFile = new File(dir, FEEDBACK_NAME);
             String revision = readRevision(fbFile);
             byte[] body = readFile(fbFile);
-            int status = httpPostJson(serverUrl + "/api/feedback", body);
+            /* body 是本机当前反馈的 v2 全量文档；server 端按幂等全量替换处理
+               （FEEDBACK_PERSISTENCE_REPAIR_V1：旧 worker 直接 POST 文档曾被
+               当作操作模型拒绝 400，进而把已同步样本打成 failed——双根因之二） */
+            HttpResult fbRes = httpPostJsonResult(serverUrl + "/api/feedback", body);
+            int status = fbRes.status;
             if (status >= 200 && status < 300) {
                 synchronized (stateLock) {
                     JSONObject cur = readState(dir, sampleId);
                     // revision 保护：仅当本地反馈未再变化才标记已同步
+                    //（server ACK 旧 revision 时不得覆盖本机新 revision）
                     if (readRevision(fbFile).equals(revision)) {
-                        cur.put("feedbackUploaded", true);
+                        SampleQueueModel.markFeedbackSynced(cur);
                     }
                     writeState(dir, cur);
                 }
+                notifyChanged();
             } else if (status == 401 || status == 403) {
                 markAuthFailed(dir, "feedback HTTP " + status);
                 return;
+            } else if (status == 429) {
+                /* 限流：仅退避反馈自身，绝不影响已同步的样本本体 */
+                synchronized (stateLock) {
+                    JSONObject cur = readState(dir, sampleId);
+                    SampleQueueModel.markFeedbackRateLimited(cur, "feedback HTTP 429",
+                            System.currentTimeMillis(), fbRes.retryAfterMs);
+                    writeState(dir, cur);
+                }
+                notifyChanged();
             } else {
-                recordFailure(dir, "feedback HTTP " + status, isRetryableStatus(status));
-                return;
+                /* FEEDBACK_PERSISTENCE_REPAIR_V1：反馈失败不再 recordFailure——
+                   旧逻辑把整个已同步样本降级 failed（4xx 永久），现在只退避反馈 */
+                synchronized (stateLock) {
+                    JSONObject cur = readState(dir, sampleId);
+                    SampleQueueModel.markFeedbackError(cur, "feedback HTTP " + status,
+                            System.currentTimeMillis());
+                    writeState(dir, cur);
+                }
+                notifyChanged();
             }
         }
 

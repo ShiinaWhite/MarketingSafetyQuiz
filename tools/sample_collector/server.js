@@ -656,6 +656,50 @@ function handleFeedback(req, res, ctx, maxBodyBytes) {
       return;
     }
 
+    /* ---- v2 全量文档（FEEDBACK_PERSISTENCE_REPAIR_V1）：手机队列 worker 补传
+       的 feedback.json 本体（{schemaVersion:2, pageIssues, blockIssues}）。
+       语义 = 本机当前反馈全量状态，幂等全量替换；旧 worker 直接 POST 该文档
+       曾被当作操作模型拒绝 400，导致反馈永远无法落库。 */
+    if (body.action === undefined && body.scope === undefined && body.userFlag === undefined
+        && body.schemaVersion === 2) {
+      if (!Array.isArray(body.pageIssues) || !Array.isArray(body.blockIssues)) {
+        sendJSON(res, 400, { ok: false, error: "v2 document requires pageIssues and blockIssues arrays" }); return;
+      }
+      const pageUniq = {};
+      for (const p of body.pageIssues) {
+        if (!p || typeof p !== "object" || typeof p.type !== "string"
+          || FEEDBACK_PAGE_TYPES.indexOf(p.type) < 0) {
+          sendJSON(res, 400, { ok: false, error: "unknown page issue type in v2 document" }); return;
+        }
+        pageUniq[p.type] = true;
+      }
+      state.pageIssues = Object.keys(pageUniq).sort().map(function (t) { return { type: t }; });
+      const blockSeen = {};
+      const blocks = [];
+      for (const b of body.blockIssues) {
+        if (!b || typeof b !== "object" || FEEDBACK_BLOCK_ISSUES.indexOf(b.issue) < 0) {
+          sendJSON(res, 400, { ok: false, error: "unknown block issue in v2 document" }); return;
+        }
+        const idx = b.blockIndex;
+        if (typeof idx !== "number" || !isFinite(idx) || idx < 0
+          || Math.floor(idx) !== idx || idx > 999) {
+          sendJSON(res, 400, { ok: false, error: "blockIndex must be an integer 0..999" }); return;
+        }
+        const key = idx + ":" + b.issue;
+        if (blockSeen[key]) { continue; }
+        blockSeen[key] = true;
+        blocks.push(Object.assign({ blockIndex: idx, issue: b.issue }, cleanBlockFields(b)));
+      }
+      blocks.sort(function (a, b2) { return a.blockIndex - b2.blockIndex; });
+      state.blockIssues = blocks;
+      state.updatedAt = new Date().toISOString();
+      writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+      sendJSON(res, 200, { ok: true, sampleId: body.sampleId, feedback: {
+        pageIssues: state.pageIssues, blockIssues: state.blockIssues
+      } });
+      return;
+    }
+
     /* ---- v2 请求：action set/remove × scope page/block ---- */
     const action = body.action;
     const scope = body.scope;

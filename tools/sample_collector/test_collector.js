@@ -297,6 +297,60 @@ async function main() {
       { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: 1, block: "oops" });
     check("block 字段非对象 → 400", r.status === 400);
 
+    /* ---- FB-P 系列（FEEDBACK_PERSISTENCE_REPAIR_V1）：v2 全量文档 ----
+       手机队列 worker 补传的就是 buildFeedbackJson 产出的文档本体；
+       旧 server 把它当操作模型拒绝 400（根因二），这里用真实 HTTP 锁定。 */
+    section("POST /api/feedback（v2 全量文档 = worker 补传协议）");
+    const doc = (pageIssues, blockIssues) => ({
+      schemaVersion: 2, sampleId: SAMPLE_ID, updatedAt: new Date().toISOString(),
+      pageIssues, blockIssues
+    });
+    const blockDoc = { blockIndex: 2, issue: "wrong_answer", screenNumber: "27",
+      rawScreenNumber: "27", numberSource: "ocr", type: "single", finalAnswer: "A",
+      confidence: "low", finalBankId: 123, matchedByOptions: false };
+    r = await request(port, "POST", "/api/feedback", doc([], []));
+    check("FB-P8 空文档（清除）200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P8 清除后 pageIssues/blockIssues 均空",
+      fb.schemaVersion === 2 && fb.pageIssues.length === 0 && fb.blockIssues.length === 0);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }, { type: "wrong_page_type" }, { type: "other" }], []));
+    check("FB-P3 多页面问题文档 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P3 三类页面问题全量落盘（排序）",
+      fb.pageIssues.length === 3 && fb.pageIssues[0].type === "missing_question" &&
+      fb.pageIssues[1].type === "other" && fb.pageIssues[2].type === "wrong_page_type");
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [blockDoc]));
+    check("FB-P4 wrong_answer+页面问题共存文档 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P4 共存落盘：1 页面问题 + 1 答案错误",
+      fb.pageIssues.length === 1 && fb.blockIssues.length === 1 &&
+      fb.blockIssues[0].blockIndex === 2 && fb.blockIssues[0].finalAnswer === "A" &&
+      fb.blockIssues[0].finalBankId === 123);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [blockDoc]));
+    check("FB-P7 同文档幂等重放 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P7 幂等重放不产生重复", fb.pageIssues.length === 1 && fb.blockIssues.length === 1);
+    r = await request(port, "POST", "/api/feedback", { schemaVersion: 2, sampleId: SAMPLE_ID });
+    check("v2 文档缺数组 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback", doc([{ type: "bogus" }], []));
+    check("v2 文档未知页面问题 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      doc([], [{ blockIndex: -1, issue: "wrong_answer" }]));
+    check("v2 文档非法 blockIndex → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [{ blockIndex: 5, issue: "wrong_answer" }]));
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P9 文档内缺定位字段也可落盘（server 清洗为 null）",
+      r.status === 200 && fb.blockIssues[0].blockIndex === 5 && fb.blockIssues[0].screenNumber === null);
+    r = await request(port, "POST", "/api/feedback", doc([{ type: "missing_question" }], []));
+    check("FB-P9 已存在样本的文档 → 200（只写目标样本）", r.status === 200);
+    r = await request(port, "POST", "/api/feedback",
+      { schemaVersion: 2, sampleId: "20260923_171536_bb12cd", pageIssues: [], blockIssues: [] });
+    check("FB-P9 不存在的样本 → 404（不误写其他样本）", r.status === 404);
+
     /* ---- 写接口认证（PUBLIC_SAMPLE_AUTH_V1：AUTH-1~10 + 限流） ---- */
     section("POST 写接口认证");
     const authRoot = fs.mkdtempSync(path.join(os.tmpdir(), "msq-auth-test-"));

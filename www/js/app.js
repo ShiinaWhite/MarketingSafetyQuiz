@@ -1770,6 +1770,11 @@
       sampleId: sid,
       feedbackJson: JSON.stringify(
         MSQSample.buildFeedbackJson(sid, lastSampleUpload.feedback, lastSampleUpload.blockRefs))
+    }).then(null, function (e) {
+      /* FEEDBACK_PERSISTENCE_REPAIR_V1：持久化失败不再静默——UI toast 已提示
+         "已记录"，若落盘失败必须让用户知道真实结果 */
+      var msg = String((e && e.message) || e || "error").slice(0, 40);
+      showFeedbackToast("反馈保存失败：" + msg);
     });
   }
 

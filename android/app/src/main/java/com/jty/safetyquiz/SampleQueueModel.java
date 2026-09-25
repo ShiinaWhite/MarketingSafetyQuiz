@@ -199,6 +199,60 @@ public final class SampleQueueModel {
         return state;
     }
 
+    /* ---------------- 反馈补传（FEEDBACK_PERSISTENCE_REPAIR_V1） ----------------
+       修复的两个根因都在这里收口为可 JVM 单测的纯函数：
+       1) 样本 commit 成功后 status 停在 capture_uploaded（历史遗留），isRetryDue
+          永远不放行 → commit 后提交的反馈被搁浅。现在样本完成后的反馈补传
+          改由 isFeedbackUploadDue 判定，不再依赖上传重试节奏。
+       2) 反馈上传失败曾把整个样本降级 failed（样本本体明明已同步）。
+          现在反馈失败只退避反馈自身（独立计数/时间），绝不改样本状态。 */
+
+    /** 反馈退避上限（与 RATE_LIMIT_MAX_WAIT_MS 一致）。 */
+    public static final long FEEDBACK_RETRY_MAX_WAIT_MS = 600_000L;
+
+    /**
+     * worker 是否应拾取该样本的反馈补传（调用方保证 feedback.json 存在）。
+     * 样本本体已同步 → 只看反馈自身的退避时间；样本未同步 → 随样本上传节奏
+     * （isRetryDue）处理，processSample 的 needFeedback 会一并补传。
+     */
+    public static boolean isFeedbackUploadDue(JSONObject state, long now) {
+        if (state.optBoolean("feedbackUploaded", true)) { return false; }
+        if (!state.optBoolean("sampleUploaded", false)) { return false; }
+        return state.optLong("feedbackNextRetryAt", 0L) <= now;
+    }
+
+    /** 反馈已同步（2xx 且 revision 未变）：清除退避，标记 synced。 */
+    public static JSONObject markFeedbackSynced(JSONObject state) throws JSONException {
+        state.put("feedbackUploaded", true);
+        state.put("feedbackSyncState", "synced");
+        state.put("feedbackNextRetryAt", JSONObject.NULL);
+        return state;
+    }
+
+    /** 反馈上传失败（4xx/5xx/网络）：仅退避反馈自身，绝不改样本状态/绝不 failed。 */
+    public static JSONObject markFeedbackError(JSONObject state, String error, long now)
+            throws JSONException {
+        int count = state.optInt("feedbackRetryCount", 0) + 1;
+        state.put("feedbackRetryCount", count);
+        state.put("feedbackLastError", error == null ? "" : error);
+        state.put("feedbackSyncState", "pending");
+        long wait = Math.min(retryDelayMs(count), FEEDBACK_RETRY_MAX_WAIT_MS);
+        state.put("feedbackNextRetryAt", now + wait);
+        return state;
+    }
+
+    /** 反馈被限流（429）：尊重服务端 Retry-After，封顶 10 分钟。 */
+    public static JSONObject markFeedbackRateLimited(JSONObject state, String error, long now,
+                                                     long retryAfterMs) throws JSONException {
+        state.put("feedbackRetryCount", state.optInt("feedbackRetryCount", 0) + 1);
+        state.put("feedbackLastError", error == null ? "" : error);
+        state.put("feedbackSyncState", "pending");
+        long wait = retryAfterMs > 0 ? Math.min(retryAfterMs, FEEDBACK_RETRY_MAX_WAIT_MS)
+                : retryDelayMs(1);
+        state.put("feedbackNextRetryAt", now + wait);
+        return state;
+    }
+
     public static JSONObject fromJson(String json) throws JSONException {
         return new JSONObject(json);
     }
