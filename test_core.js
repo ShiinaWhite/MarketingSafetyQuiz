@@ -1959,6 +1959,61 @@ section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
     appSrc.includes('add("最近下载来源"') && appSrc.includes('add("是否发生回退"'));
 }
 
+/* ---------- DEV_TO_MAIN_SYNC_V1：MAIN/STABLE 构建边界守卫（MAIN-1~8） ---------- */
+section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
+{
+  const gradleSrc = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const mainStrings = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/values/strings.xml"), "utf8");
+  const devStrings = fs.readFileSync(path.join(__dirname,
+    "android/app/src/dev/res/values/strings.xml"), "utf8");
+  const pubSrc = fs.readFileSync(path.join(__dirname, "tools/dev_update/publish.js"), "utf8");
+  const cospubSrc = fs.readFileSync(path.join(__dirname, "tools/dev_update/cos_publish.js"), "utf8");
+  const indexSrcMain = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+
+  check("MAIN-1 stable package id 正确（defaultConfig 无后缀，.dev 仅在 dev buildType）",
+    gradleSrc.includes('applicationId "com.jty.safetyquiz"') &&
+    gradleSrc.includes("applicationIdSuffix '.dev'") &&
+    !/applicationId\s+"com\.jty\.safetyquiz\.dev"/.test(gradleSrc));
+  check("MAIN-2 stable label 正确（main=营销安规刷题，dev overlay=营销安规刷题 DEV）",
+    mainStrings.includes(">营销安规刷题<") &&
+    !mainStrings.includes("营销安规刷题 DEV") &&
+    devStrings.includes(">营销安规刷题 DEV<"));
+  check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+    appSrc.includes('diagnosticsChannel(updateInfo.id) === "dev"'));
+  check("MAIN-4 sample config UI 不存在（stable 与 dev 共用同一收口后 UI）",
+    !indexSrcMain.includes("sample-panel") && !indexSrcMain.includes("自动上传测试样本") &&
+    !indexSrcMain.includes("测试连接") && !indexSrcMain.includes("sample-enabled"));
+  check("MAIN-5 AUTO sample collection 生效（shouldCollect 恒 ON）",
+    MSQSample.shouldCollect() === true);
+  {
+    const dbgStart = gradleSrc.indexOf("debug {");
+    const devStart = gradleSrc.indexOf("dev {");
+    const dcStart = gradleSrc.indexOf("defaultConfig {");
+    const dcEnd = gradleSrc.indexOf("buildFeatures {");
+    check("MAIN-6 DEV_ARM64_ONLY 仅作用于 dev buildType（stable 保持全 ABI）",
+      dbgStart > 0 && devStart > dbgStart &&
+      gradleSrc.slice(dbgStart, devStart).indexOf("DEV_ARM64_ONLY") < 0 &&
+      gradleSrc.slice(dbgStart, devStart).indexOf("abiFilters") < 0 &&
+      dcStart > 0 && dcEnd > dcStart &&
+      gradleSrc.slice(dcStart, dcEnd).indexOf("abiFilters") < 0 &&
+      gradleSrc.slice(devStart).indexOf('project.findProperty("DEV_ARM64_ONLY")') >= 0);
+    check("R8/shrinkResources 为共享能力（stable 发布路径 debug buildType 同样启用）",
+      gradleSrc.slice(dbgStart, devStart).includes("minifyEnabled true") &&
+      gradleSrc.slice(dbgStart, devStart).includes("shrinkResources true") &&
+      gradleSrc.slice(dbgStart, devStart).includes("proguardFiles"));
+  }
+  check("MAIN-7 stable updater 走 stable 渠道（updateChannelFor 映射正确）",
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz") === "stable" &&
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz.dev") === "dev");
+  check("MAIN-8 当前 publisher 仅输出 dev 渠道（stable 发布路径未接线，不混用 /dev/）",
+    cospubSrc.includes('const APK_PREFIX = "dev"') &&
+    pubSrc.includes('release", "updates", "dev') &&
+    !pubSrc.includes("stable/") && !cospubSrc.includes("stable/"));
+}
+
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
 section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
 {

@@ -41,6 +41,15 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+        /* DEV_TO_MAIN_SYNC_V1：R8 + 资源收缩成为共享能力 —— stable 发布路径
+           （debug buildType，assembleDebug → 营销安规刷题.apk）与 dev 用同一套
+           minify 配置；ABI 差异仍仅由下方 dev 块内的发布属性控制，
+           stable 保持全 ABI 兼容 */
+        debug {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
         /* DEV 版本号注入（SELF_UPDATE_V1）：-PDEV_VERSION_CODE / -PDEV_VERSION_NAME */
         dev {
             initWith debug
