@@ -85,7 +85,10 @@
 
   function applyExplainState() {
     var open = explainOpen && !!curExplain;
-    $("explain-toggle").textContent = open ? "收起解析与记忆技巧 ▴" : "查看解析与记忆技巧 ▾";
+    var toggle = $("explain-toggle");
+    toggle.innerHTML = (open ? "收起解析与记忆技巧" : "查看解析与记忆技巧") +
+      (typeof MSQIcons !== "undefined" ? MSQIcons.svg("chevronDown") : "");
+    toggle.classList.toggle("open", open);
     $("explain-body").classList.toggle("hidden", !open);
     if (open) {
       $("explain-reason").textContent = curExplain.reason || "";
@@ -605,7 +608,12 @@
               var eb = document.createElement("button");
               eb.type = "button";
               eb.className = "explain-btn";
-              eb.textContent = "查看解析与记忆技巧 ▾";
+              var paintExplainBtn = function (open) {
+                eb.innerHTML = (open ? "收起解析与记忆技巧" : "查看解析与记忆技巧") +
+                  (typeof MSQIcons !== "undefined" ? MSQIcons.svg("chevronDown") : "");
+                eb.classList.toggle("open", open);
+              };
+              paintExplainBtn(false);
               var ebody = document.createElement("div");
               ebody.className = "explain-body hidden";
               var sec1 = document.createElement("div"); sec1.className = "explain-sec";
@@ -619,7 +627,7 @@
               ebody.appendChild(sec1); ebody.appendChild(sec2);
               eb.addEventListener("click", function () {
                 var open = ebody.classList.toggle("hidden") === false;
-                eb.textContent = open ? "收起解析与记忆技巧 ▴" : "查看解析与记忆技巧 ▾";
+                paintExplainBtn(open);
               });
               block.appendChild(eb);
               block.appendChild(ebody);
@@ -828,10 +836,18 @@
       var item = document.createElement("button");
       item.type = "button";
       item.className = "search-item";
-      var typeEl = document.createElement("div");
-      typeEl.className = "s-type";
-      typeEl.textContent = r.type_name;
-      item.appendChild(typeEl);
+      /* UI_DESIGN_V1：题型 badge + 题库号 badge + 题干（mark）+ 命中选项 */
+      var meta = document.createElement("div");
+      meta.className = "search-meta";
+      var typeBadge = document.createElement("span");
+      typeBadge.className = "u-badge primary";
+      typeBadge.textContent = r.type_name;
+      meta.appendChild(typeBadge);
+      var idBadge = document.createElement("span");
+      idBadge.className = "u-badge";
+      idBadge.textContent = "第 " + r.id + " 题";
+      meta.appendChild(idBadge);
+      item.appendChild(meta);
       var stemEl = document.createElement("div");
       stemEl.className = "s-stem";
       renderHighlighted(stemEl, r.stem, q);
@@ -839,7 +855,12 @@
       if (r.hitOption) {
         var optEl = document.createElement("div");
         optEl.className = "s-opt";
-        optEl.textContent = "命中选项：" + r.hitOption;
+        if (typeof MSQIcons !== "undefined") {
+          optEl.appendChild(MSQIcons.el("check", "s-opt-icon"));
+        }
+        var optText = document.createElement("span");
+        optText.textContent = "命中选项：" + r.hitOption;
+        optEl.appendChild(optText);
         item.appendChild(optEl);
       }
       item.addEventListener("click", function () {
@@ -900,27 +921,52 @@
     if (!q) { return; }
     var body = $("search-detail-body");
     body.innerHTML = "";
-    var meta = document.createElement("p");
-    meta.className = "type-line";
-    meta.textContent = MSQ.TYPE_NAMES[q.type] + " ｜ 序号 " + q.id;
+    /* UI_DESIGN_V1：题型 badge + 题库号 → 题干卡 → 选项卡（正确项 success）→ 答案条 */
+    var meta = document.createElement("div");
+    meta.className = "detail-type";
+    var typeBadge = document.createElement("span");
+    typeBadge.className = "u-badge primary";
+    typeBadge.textContent = MSQ.TYPE_NAMES[q.type];
+    meta.appendChild(typeBadge);
+    var idSpan = document.createElement("span");
+    idSpan.className = "detail-id";
+    idSpan.textContent = "第 " + q.id + " 题 · 题库原题";
+    meta.appendChild(idSpan);
     body.appendChild(meta);
     var stemCard = document.createElement("div");
     stemCard.className = "stem";
     stemCard.textContent = q.stem;
     body.appendChild(stemCard);
+    var optList = document.createElement("div");
+    optList.className = "opt-list";
     q.options.forEach(function (opt, i) {
+      var isAns = q.answer.indexOf(i) >= 0;
       var row = document.createElement("div");
-      row.className = "opt" + (q.answer.indexOf(i) >= 0 ? " correct" : " plain");
+      row.className = "opt-row" + (isAns ? " correct" : "");
       var tag = document.createElement("span");
-      tag.className = "tag";
+      tag.className = "letter";
       tag.textContent = MSQ.LETTERS[i] + ".";
       row.appendChild(tag);
-      row.appendChild(document.createTextNode(opt));
-      body.appendChild(row);
+      var text = document.createElement("span");
+      text.className = "opt-text";
+      text.textContent = opt;
+      row.appendChild(text);
+      if (isAns && typeof MSQIcons !== "undefined") {
+        row.appendChild(MSQIcons.el("check", "opt-check"));
+      }
+      optList.appendChild(row);
     });
+    body.appendChild(optList);
     var ans = document.createElement("div");
-    ans.className = "feedback ok";
-    ans.textContent = "【答案】" + MSQ.answerText(q);
+    ans.className = "answer-strip";
+    if (typeof MSQIcons !== "undefined") { ans.appendChild(MSQIcons.el("check")); }
+    var ansLabel = document.createElement("span");
+    ansLabel.textContent = "正确答案";
+    ans.appendChild(ansLabel);
+    var ansVal = document.createElement("span");
+    ansVal.className = "ans";
+    ansVal.textContent = MSQ.answerText(q);
+    ans.appendChild(ansVal);
     body.appendChild(ans);
     detailReturnContext.source = (source === "batch-results") ? "batch-results" : "search";
     if (detailReturnContext.source === "batch-results") {
@@ -1227,20 +1273,23 @@
   }
 
   var BATCH_TYPE_NAMES = { auto: "自动", single: "单选题", multi: "多选题", judge: "判断题" };
+  var CONF_LABELS = { high: "高置信", medium: "中置信", low: "低置信", none: "未匹配" };
+  var CONF_BADGE_CLS = { high: "success", medium: "warning", low: "danger", none: "" };
 
   function batchDetail(b) {
     var d = document.createElement("div");
     d.className = "batch-detail hidden";
-    var add = function (label, value) {
+    var add = function (label, value, valueCls) {
       var p = document.createElement("div");
+      p.className = "kv";
       var k = document.createElement("span"); k.className = "k"; k.textContent = label + "：";
-      var v = document.createElement("span"); v.className = "v"; v.textContent = value;
+      var v = document.createElement("span"); v.className = "v" + (valueCls ? " " + valueCls : "");
+      v.textContent = value;
       p.appendChild(k); p.appendChild(v); d.appendChild(p);
     };
-    add("OCR识别到的题干", b.stemText || "（无）");
-    add("题库题号", b.bankId === null ? "未匹配到" : ("第 " + b.bankId + " 题 ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type)));
-    add("正确答案", b.answerItem ? b.answer : "—");
-    add("置信度", { high: "高", medium: "中", low: "低", none: "无匹配" }[b.confidence] || b.confidence);
+    add("OCR 识别题干", b.stemText || "（无）");
+    add("题库匹配", b.bankId === null ? "未匹配到" : ("第 " + b.bankId + " 题 ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type)));
+    if (b.answerItem) { add("参考答案", b.answer, "answer-inline"); }
     if (b.matches && b.matches.assistedByOptions) { add("匹配方式", "题干 + 选项辅助"); }
     if (b.matches && b.matches.length) {
       var t1 = b.matches[0];
@@ -1252,18 +1301,29 @@
     var cands = (b.matches || []).slice(0, 3);
     if (cands.length > 1 || b.confidence === "low" || b.confidence === "none") {
       var head = document.createElement("div");
-      head.className = "k";
+      head.className = "cand-head";
       head.textContent = cands.length ? "Top" + cands.length + " 候选（点开看原题）" : "没有找到候选";
       d.appendChild(head);
+      var list = document.createElement("div");
+      list.className = "cand-list";
       cands.forEach(function (m, i) {
         var btn = document.createElement("button");
         btn.type = "button";
         btn.className = "batch-cand";
-        btn.textContent = (i + 1) + ". 第" + m.id + "题 ｜ " + m.type_name + " ｜ 得分 " + m.score + "：" +
-          m.stem.slice(0, 40);
+        var rank = document.createElement("span");
+        rank.className = "cand-rank";
+        rank.textContent = String(i + 1);
+        var stem = document.createElement("span");
+        stem.className = "cand-stem";
+        stem.textContent = "第" + m.id + "题 ｜ " + m.type_name + " ｜ " + m.stem.slice(0, 40);
+        var score = document.createElement("span");
+        score.className = "cand-score mono";
+        score.textContent = String(m.score);
+        btn.appendChild(rank); btn.appendChild(stem); btn.appendChild(score);
         btn.addEventListener("click", function () { openSearchDetail(m.id, "batch-results"); });
-        d.appendChild(btn);
+        list.appendChild(btn);
       });
+      d.appendChild(list);
     }
     return d;
   }
@@ -1320,7 +1380,8 @@
       mark = document.createElement("span");
       mark.className = "batch-wrongmark";
       mark.textContent = "已标错";
-      rowEl.appendChild(mark);
+      var host = rowEl.querySelector(".batch-row-tags") || rowEl;
+      host.appendChild(mark);
     } else if (!marked && mark) {
       mark.parentNode.removeChild(mark);
     }
@@ -1338,19 +1399,44 @@
 
   function batchRow(b, blockIndex) {
     var wrap = document.createElement("div");
+    wrap.className = "batch-card";
     var row = document.createElement("button");
     row.type = "button";
     row.className = "batch-row";
+    /* 顶行：题号 + 置信 badge +（已标错 badge）+ chevron */
+    var top = document.createElement("div");
+    top.className = "batch-row-top";
     var no = document.createElement("span");
     no.className = "batch-no";
     no.textContent = b.label;
+    top.appendChild(no);
+    var tags = document.createElement("div");
+    tags.className = "batch-row-tags";
+    var confBadge = document.createElement("span");
+    confBadge.className = "u-badge conf-chip" + (CONF_BADGE_CLS[b.confidence] ? " " + CONF_BADGE_CLS[b.confidence] : "");
+    var dot = document.createElement("span");
+    dot.className = "dot";
+    confBadge.appendChild(dot);
+    confBadge.appendChild(document.createTextNode(CONF_LABELS[b.confidence] || b.confidence));
+    tags.appendChild(confBadge);
+    top.appendChild(tags);
+    if (typeof MSQIcons !== "undefined") {
+      top.appendChild(MSQIcons.el("chevronDown", "batch-chevron"));
+    }
+    row.appendChild(top);
+    /* 答案行：大字答案（置信色只作用于答案）+ OCR 题干两行预览 */
+    var ansRow = document.createElement("div");
+    ansRow.className = "batch-answer-row";
     var ans = document.createElement("span");
     var disp = batchAnswerDisplay(b);
-    /* 结果行只保留 题号 + 答案：置信度用颜色（绿/橙/红/灰）表达，无右侧任何标记 */
     ans.className = "batch-ans" + (disp.cls === "high" ? "" : " " + disp.cls);
     ans.textContent = disp.text;
-    row.appendChild(no);
-    row.appendChild(ans);
+    ansRow.appendChild(ans);
+    var preview = document.createElement("span");
+    preview.className = "batch-ocr-preview";
+    preview.textContent = b.stemText || "";
+    ansRow.appendChild(preview);
+    row.appendChild(ansRow);
     var detail = batchDetail(b);
     var suppressClickUntil = 0;
     row.addEventListener("click", function () {
@@ -1419,9 +1505,15 @@
     var isAuto = state.pageTypeMode === "auto";
     var name = BATCH_TYPE_NAMES[resolved.type] || resolved.type;
     var label = document.createElement("span");
-    label.textContent = isAuto
-      ? ("自动识别：" + name + (resolved.confidence === "ambiguous" ? "（不确定）" : ""))
-      : ("题型：" + name + "（手动）");
+    label.className = "batch-type-label";
+    label.appendChild(document.createTextNode(isAuto ? "自动识别为 " : "题型："));
+    var nameB = document.createElement("b");
+    nameB.textContent = name;
+    label.appendChild(nameB);
+    if (isAuto && resolved.confidence === "ambiguous") {
+      label.appendChild(document.createTextNode("（不确定）"));
+    }
+    if (!isAuto) { label.appendChild(document.createTextNode("（手动）")); }
     wrap.appendChild(label);
     var row = document.createElement("div");
     row.className = "batch-type-switch hidden";
@@ -1477,27 +1569,35 @@
       summary.className = "batch-summary warn";
       summary.textContent = "未能可靠识别本页题目边界，可尝试切换题型重算";
       summary.appendChild(buildBatchTypeLine(state));
-      var tip = document.createElement("div");
-      tip.className = "dim";
-      tip.textContent = "（识别到 " + state.lines.length + " 行文字，" + blocks.length +
-        " 个题号。可展开下方 OCR 原文与行坐标排查）";
-      summary.appendChild(tip);
       appendBatchTools(state);
       return;
     }
     var conf = { high: 0, medium: 0, low: 0, none: 0 };
     blocks.forEach(function (b) { conf[b.confidence] = (conf[b.confidence] || 0) + 1; });
-    summary.textContent = "本页识别 " + blocks.length + " 道题";
-    var sub = document.createElement("div");
-    sub.className = "dim";
-    var parts = [];
-    if (conf.high) { parts.push("高 " + conf.high); }
-    if (conf.medium) { parts.push("中 " + conf.medium); }
-    if (conf.low) { parts.push("低 " + conf.low); }
-    if (conf.none) { parts.push("无匹配 " + conf.none); }
-    sub.textContent = "（置信度：" + parts.join(" · ") + " ｜ 识别 " + state.ocrMs + "ms · 分题 " +
-      state.splitMs + "ms · 匹配 " + state.matchMs + "ms · 合计 " + state.totalMs + "ms）";
-    summary.appendChild(sub);
+    /* UI_DESIGN_V1：标题 =「N 道题已识别」+ 非零置信统计 badge。
+       耗时数据不再进入普通 UI（仍完整保存在 run.json / 采集诊断）。 */
+    var countN = document.createElement("span");
+    countN.className = "batch-count-n";
+    countN.textContent = String(blocks.length);
+    var countU = document.createElement("span");
+    countU.className = "batch-count-u";
+    countU.textContent = " 道题已识别";
+    summary.appendChild(countN);
+    summary.appendChild(countU);
+    var statRow = document.createElement("div");
+    statRow.className = "batch-stat-row";
+    [{ key: "high", cls: "success" }, { key: "medium", cls: "warning" },
+     { key: "low", cls: "danger" }, { key: "none", cls: "" }].forEach(function (def) {
+      if (!conf[def.key]) { return; }
+      var badge = document.createElement("span");
+      badge.className = "u-badge" + (def.cls ? " " + def.cls : "");
+      var dot = document.createElement("span");
+      dot.className = "dot";
+      badge.appendChild(dot);
+      badge.appendChild(document.createTextNode(CONF_LABELS[def.key] + " " + conf[def.key]));
+      statRow.appendChild(badge);
+    });
+    summary.appendChild(statRow);
     summary.appendChild(buildBatchTypeLine(state));
     blocks.forEach(function (b, i) { list.appendChild(batchRow(b, i)); });
     appendBatchTools(state);
@@ -1651,7 +1751,7 @@
     if (!flag) { return; }
     var fb = currentFeedback();
     var done = !!(fb && (fb.pageTypes.length > 0 || Object.keys(fb.blocks).length > 0));
-    flag.textContent = done ? "本页已反馈 ▾" : "反馈本页问题";
+    flag.textContent = done ? "本页已反馈" : "反馈本页问题";
   }
 
   function toggleFeedbackPanel() {
@@ -1679,13 +1779,19 @@
     MSQSample.FEEDBACK_PAGE_ISSUES.forEach(function (issue) {
       var b = document.createElement("button");
       b.type = "button";
+      var paint = function (on) {
+        b.className = "feedback-chip" + (on ? " active" : "");
+        b.innerHTML = "";
+        if (on && typeof MSQIcons !== "undefined") {
+          b.appendChild(MSQIcons.el("check", "chip-check"));
+        }
+        b.appendChild(document.createTextNode(issue.label));
+      };
       var active = !!selected[issue.type];
-      b.className = "feedback-chip" + (active ? " active" : "");
-      b.textContent = (active ? "✓ " : "") + issue.label;
+      paint(active);
       b.addEventListener("click", function () {
         selected[issue.type] = !selected[issue.type];
-        b.className = "feedback-chip" + (selected[issue.type] ? " active" : "");
-        b.textContent = (selected[issue.type] ? "✓ " : "") + issue.label;
+        paint(!!selected[issue.type]);
       });
       panel.appendChild(b);
     });
@@ -1842,10 +1948,8 @@
     var box = $("devdiag-body");
     var Queue = sampleQueuePlugin();
     if (!box || !(Queue && typeof Queue.stats === "function")) { return; }
-    var rows = [];
-    var add = function (k, v) { rows.push(k + "：" + v); };
-    /* VC17：仅显示层中文化（底层 enum/value/schema 不变）。
-       数值格式化只用数字与单位，不出现任何英文标签。 */
+    /* UI_DESIGN_V1：五组诊断卡片（样本队列/最近上传/自动清理/反馈状态/APK 下载）。
+       显示层全中文（VC17：底层 enum/value/schema 不变），不含凭据/地址/域名。 */
     var fmtBytes = function (n) {
       return (typeof MSQUpdater !== "undefined" && MSQUpdater && MSQUpdater.formatBytes)
         ? MSQUpdater.formatBytes(n) : String(n) + " 字节";
@@ -1870,66 +1974,105 @@
       var diagPromise = (typeof Queue.getDiagnostics === "function")
         ? Queue.getDiagnostics() : Promise.resolve(null);
       return diagPromise.then(function (d) {
+        var groups = [
+          { title: "样本队列", rows: [] },
+          { title: "最近上传", rows: [] },
+          { title: "自动清理", rows: [] },
+          { title: "反馈状态", rows: [] },
+          { title: "APK 下载", rows: [] }
+        ];
         if (st) {
-          add("待上传样本", st.pending || 0);
-          add("等待重试", st.retryWait || 0);
-          add("上传失败", st.failed || 0);
-          add("需要重新绑定", st.authFailed || 0);
-          add("队列占用空间", fmtBytes(st.pendingBytes || 0));
+          groups[0].rows.push(["待上传样本", st.pending || 0]);
+          groups[0].rows.push(["等待重试", st.retryWait || 0]);
+          groups[0].rows.push(["上传失败", st.failed || 0]);
+          groups[0].rows.push(["需要重新绑定", st.authFailed || 0]);
+          groups[0].rows.push(["队列占用空间", fmtBytes(st.pendingBytes || 0)]);
         }
         if (d) {
-          add("最老样本等待时间", fmtAge(d.oldestSampleAgeMs));
-          add("最近上传速度", fmtSpeed(d.lastUploadBytesPerSec));
-          add("上次自动清理", d.lastJanitorAt > 0 ? fmtTime(d.lastJanitorAt) : "尚未运行");
-          add("上次清理样本数", d.deletedSamples || 0);
-          add("上次释放空间", fmtBytes(d.deletedBytes || 0));
-          add("最近反馈同步状态", MSQSample.feedbackSyncLabel(d.feedbackPendingCount));
+          groups[1].rows.push(["最近上传速度", fmtSpeed(d.lastUploadBytesPerSec)]);
+          groups[1].rows.push(["最老样本等待时间", fmtAge(d.oldestSampleAgeMs)]);
+          groups[2].rows.push(["上次自动清理", d.lastJanitorAt > 0 ? fmtTime(d.lastJanitorAt) : "尚未运行"]);
+          groups[2].rows.push(["上次清理样本数", d.deletedSamples || 0]);
+          groups[2].rows.push(["上次释放空间", fmtBytes(d.deletedBytes || 0)]);
+          groups[3].rows.push(["最近反馈同步状态", MSQSample.feedbackSyncLabel(d.feedbackPendingCount),
+            String(MSQSample.feedbackSyncLabel(d.feedbackPendingCount)) === "已同步" ? "ok" : "warn"]);
+          groups[3].rows.push(["待同步反馈", d.feedbackPendingCount || 0]);
         } else {
-          add("诊断数据", "需升级安装包");
+          groups[1].rows.push(["诊断数据", "需升级安装包"]);
         }
-        /* APK_CDN_STABILITY_DIAG_V1：最近一次更新下载链路（非敏感，仅 DEV 诊断） */
+        /* 最近一次更新下载链路（非敏感，仅 DEV 诊断） */
         var dl = (typeof MSQDownloadDiag !== "undefined" && MSQDownloadDiag)
           ? MSQDownloadDiag.load(typeof localStorage !== "undefined" ? localStorage : null) : null;
         if (dl) {
-          add("最近下载来源", dl.apkDownloadTransport === "cdn" ? "CDN"
-            : (dl.apkDownloadTransport === "legacy" ? "Legacy 备用通道" : "未知"));
-          add("是否发生回退", dl.apkFallbackUsed ? "是（CDN → Legacy）" : "否");
-          add("回退原因", dl.apkFallbackReason || "—");
-          add("HTTP 状态", dl.apkHttpStatus || "—");
-          add("下载字节数", dl.apkDownloadBytes ? fmtBytes(dl.apkDownloadBytes) : "—");
-          add("下载耗时", dl.apkDownloadMs ? (Math.round(dl.apkDownloadMs / 100) / 10) + " s" : "—");
-          add("平均下载速度", dl.apkBytesPerSec ? Math.round(dl.apkBytesPerSec / 1024) + " KB/s" : "—");
-          add("CDN 缓存", dl.apkCacheStatus === "hit" ? "命中"
-            : (dl.apkCacheStatus === "miss" ? "未命中" : "未知"));
-          add("下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败");
+          groups[4].rows.push(["最近下载来源", dl.apkDownloadTransport === "cdn" ? "CDN"
+            : (dl.apkDownloadTransport === "legacy" ? "Legacy 备用通道" : "未知")]);
+          groups[4].rows.push(["是否发生回退", dl.apkFallbackUsed ? "是（CDN → 备用通道）" : "否"]);
+          groups[4].rows.push(["回退原因", dl.apkFallbackReason || "—"]);
+          groups[4].rows.push(["HTTP 状态", dl.apkHttpStatus || "—"]);
+          groups[4].rows.push(["下载字节数", dl.apkDownloadBytes ? fmtBytes(dl.apkDownloadBytes) : "—"]);
+          groups[4].rows.push(["下载耗时", dl.apkDownloadMs ? (Math.round(dl.apkDownloadMs / 100) / 10) + " s" : "—"]);
+          groups[4].rows.push(["平均下载速度", dl.apkBytesPerSec ? Math.round(dl.apkBytesPerSec / 1024) + " KB/s" : "—"]);
+          groups[4].rows.push(["CDN 缓存", dl.apkCacheStatus === "hit" ? "命中"
+            : (dl.apkCacheStatus === "miss" ? "未命中" : "未知")]);
+          groups[4].rows.push(["下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败",
+            dl.downloadOk ? "ok" : "err"]);
         }
         box.innerHTML = "";
-        rows.forEach(function (line) {
-          var p = document.createElement("p");
-          p.className = "sample-note";
-          p.textContent = line;
-          box.appendChild(p);
+        var banner = document.createElement("div");
+        banner.className = "diag-banner";
+        var devBadge = document.createElement("span");
+        devBadge.className = "u-badge mono";
+        devBadge.textContent = "仅开发版";
+        banner.appendChild(devBadge);
+        var bannerNote = document.createElement("span");
+        bannerNote.className = "diag-note";
+        bannerNote.textContent = "样本队列与更新链路内部诊断";
+        banner.appendChild(bannerNote);
+        box.appendChild(banner);
+        groups.forEach(function (g) {
+          if (!g.rows.length) { return; }
+          var card = document.createElement("div");
+          card.className = "diag-card";
+          var title = document.createElement("div");
+          title.className = "diag-title";
+          title.textContent = g.title;
+          card.appendChild(title);
+          g.rows.forEach(function (r) {
+            var rowEl = document.createElement("div");
+            rowEl.className = "diag-kv";
+            var k = document.createElement("span");
+            k.className = "k";
+            k.textContent = r[0];
+            var v = document.createElement("span");
+            v.className = "v mono" + (r[2] ? " " + r[2] : "");
+            v.textContent = String(r[1]);
+            rowEl.appendChild(k);
+            rowEl.appendChild(v);
+            card.appendChild(rowEl);
+          });
+          box.appendChild(card);
         });
+        var actions = document.createElement("div");
+        actions.className = "diag-actions";
         var bj = document.createElement("button");
         bj.type = "button";
         bj.className = "barbtn";
-        bj.style.marginTop = "14px";
         bj.textContent = "立即清理";
         bj.addEventListener("click", function () {
           if (typeof Queue.runJanitorNow === "function") {
             Queue.runJanitorNow().then(renderDevDiagnostics, function () { });
           }
         });
-        box.appendChild(bj);
+        actions.appendChild(bj);
         var br = document.createElement("button");
         br.type = "button";
         br.className = "barbtn";
-        br.style.marginTop = "10px";
         br.textContent = "立即重试";
         br.addEventListener("click", function () {
           Queue.retryFailed().then(renderDevDiagnostics, function () { });
         });
-        box.appendChild(br);
+        actions.appendChild(br);
+        box.appendChild(actions);
       });
     }, function () {
       box.innerHTML = "";
@@ -1948,17 +2091,6 @@
   var updatePhase = "idle";    /* idle|checking|available|latest|downgrade|invalid|downloading|downloaded|needPermission|installing */
   var updateProgressBound = false;
 
-  function updateButton(label, id, handler, primary) {
-    var b = document.createElement("button");
-    b.type = "button";
-    b.id = id;
-    b.className = "barbtn" + (primary ? " primary" : "");
-    b.style.marginBottom = "10px";
-    b.textContent = label;
-    b.addEventListener("click", handler);
-    return b;
-  }
-
   function updateSetError(msg) {
     var el = $("update-error");
     if (!el) { return; }
@@ -1966,35 +2098,150 @@
     else { el.classList.add("hidden"); }
   }
 
+  function updateButton(label, id, handler, primary) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = id;
+    b.className = "barbtn" + (primary ? " primary" : "");
+    b.textContent = label;
+    b.addEventListener("click", handler);
+    return b;
+  }
+
+  function updateActions() {
+    var wrap = document.createElement("div");
+    wrap.className = "update-actions";
+    return wrap;
+  }
+
+  function updateStatusLine(text) {
+    var status = document.createElement("p");
+    status.className = "dim";
+    status.textContent = text || "";
+    return status;
+  }
+
+  function updateHero(latestName, currentName) {
+    var hero = document.createElement("div");
+    hero.className = "update-hero";
+    var icon = document.createElement("div");
+    icon.className = "hero-icon";
+    icon.innerHTML = (typeof MSQIcons !== "undefined") ? MSQIcons.svg("download") : "";
+    hero.appendChild(icon);
+    var t = document.createElement("p");
+    t.className = "t";
+    t.textContent = "发现新版本";
+    hero.appendChild(t);
+    var v = document.createElement("p");
+    v.className = "v";
+    v.appendChild(document.createTextNode("当前 " + currentName + " · 最新 "));
+    var b = document.createElement("b");
+    b.textContent = latestName;
+    v.appendChild(b);
+    hero.appendChild(v);
+    return hero;
+  }
+
+  function updateKvRow(k, v, opts) {
+    var row = document.createElement("div");
+    row.className = "kv-row";
+    var kEl = document.createElement("span");
+    kEl.className = "k";
+    kEl.textContent = k;
+    var vEl = document.createElement("span");
+    vEl.className = "v" + (opts && opts.mono ? " mono" : "") + (opts && opts.strong ? " strong" : "");
+    vEl.textContent = v;
+    row.appendChild(kEl);
+    row.appendChild(vEl);
+    return row;
+  }
+
   function renderUpdateView(statusText) {
     var body = $("update-body");
     if (!body) { return; }
     body.innerHTML = "";
-    var status = document.createElement("p");
-    status.style.whiteSpace = "pre-line";
-    status.className = "dim";
-    status.textContent = statusText || "";
-    body.appendChild(status);
-
-    if (updateInfo && updatePhase !== "checking" && updatePhase !== "downloading" && updatePhase !== "installing") {
-      body.appendChild(updateButton("检查更新", "btn-update-check", function () { checkForUpdate(); }, true));
+    /* 有新版：Hero + 版本 KV 卡 + 更新说明 + 下载安装 */
+    if (updatePhase === "available" && updateManifest && updateInfo) {
+      body.appendChild(updateHero(updateManifest.versionName, updateInfo.versionName));
+      var card = document.createElement("div");
+      card.className = "card kv-card";
+      card.appendChild(updateKvRow("当前版本", updateInfo.versionName));
+      var latestRow = updateKvRow("最新版本", updateManifest.versionName, { strong: true });
+      var tag = document.createElement("span");
+      tag.className = "u-badge primary ver-tag";
+      tag.textContent = "可更新";
+      latestRow.querySelector(".v").appendChild(tag);
+      card.appendChild(latestRow);
+      card.appendChild(updateKvRow("更新包大小",
+        (typeof MSQUpdater !== "undefined") ? MSQUpdater.formatBytes(updateManifest.size)
+          : String(updateManifest.size), { mono: true }));
+      body.appendChild(card);
+      if (updateManifest.notes) {
+        var notesCard = document.createElement("div");
+        notesCard.className = "card notes-card";
+        var notesH = document.createElement("div");
+        notesH.className = "notes-h";
+        notesH.textContent = "更新内容";
+        notesCard.appendChild(notesH);
+        var notesBody = document.createElement("div");
+        notesBody.className = "notes-body";
+        notesBody.textContent = updateManifest.notes;
+        notesCard.appendChild(notesBody);
+        body.appendChild(notesCard);
+      }
+      var actions = updateActions();
+      actions.appendChild(updateButton("下载安装", "btn-update-download",
+        function () { startUpdateDownload(); }, true));
+      body.appendChild(actions);
+      return;
     }
-    if (updatePhase === "available" && updateManifest) {
-      var info = document.createElement("p");
-      info.style.whiteSpace = "pre-line";
-      info.textContent = "发现新版本 " + updateManifest.versionName +
-        "（versionCode " + updateManifest.versionCode + "）" +
-        (updateManifest.notes ? "\n更新内容：" + updateManifest.notes : "") +
-        "\n大小：" + (typeof MSQUpdater !== "undefined" ? MSQUpdater.formatBytes(updateManifest.size) : updateManifest.size);
-      body.appendChild(info);
-      body.appendChild(updateButton("下载安装", "btn-update-download", function () { startUpdateDownload(); }, true));
+    /* 下载中：线性进度 + 状态行 */
+    if (updatePhase === "downloading") {
+      var wrap = document.createElement("div");
+      wrap.className = "update-progress";
+      var track = document.createElement("div");
+      track.className = "progress-track";
+      var fill = document.createElement("div");
+      fill.className = "progress-fill";
+      var m = /(\d+)%/.exec(statusText || "");
+      fill.style.width = (m ? parseInt(m[1], 10) : 0) + "%";
+      track.appendChild(fill);
+      wrap.appendChild(track);
+      wrap.appendChild(updateStatusLine(statusText));
+      body.appendChild(wrap);
+      return;
+    }
+    /* 通用状态行 */
+    if (statusText === "已经是最新版") {
+      var ok = document.createElement("div");
+      ok.className = "ok-line";
+      if (typeof MSQIcons !== "undefined") { ok.appendChild(MSQIcons.el("check")); }
+      ok.appendChild(document.createTextNode("已经是最新版"));
+      body.appendChild(ok);
+    } else if (statusText) {
+      body.appendChild(updateStatusLine(statusText));
     }
     if (updatePhase === "needPermission") {
-      body.appendChild(updateButton("打开安装权限设置", "btn-update-perm", function () { openInstallPermissionSettings(); }, true));
-      body.appendChild(updateButton("继续安装", "btn-update-install", function () { installUpdate(); }));
+      var permActions = updateActions();
+      permActions.appendChild(updateButton("打开安装权限设置", "btn-update-perm",
+        function () { openInstallPermissionSettings(); }, true));
+      permActions.appendChild(updateButton("继续安装", "btn-update-install",
+        function () { installUpdate(); }));
+      body.appendChild(permActions);
+      return;
     }
     if (updatePhase === "downloaded") {
-      body.appendChild(updateButton("安装更新", "btn-update-install", function () { installUpdate(); }, true));
+      var dlActions = updateActions();
+      dlActions.appendChild(updateButton("安装更新", "btn-update-install",
+        function () { installUpdate(); }, true));
+      body.appendChild(dlActions);
+      return;
+    }
+    if (updateInfo && updatePhase !== "checking" && updatePhase !== "installing") {
+      var idleActions = updateActions();
+      idleActions.appendChild(updateButton("检查更新", "btn-update-check",
+        function () { checkForUpdate(); }, true));
+      body.appendChild(idleActions);
     }
   }
 
@@ -2268,26 +2515,40 @@
      主菜单渲染完成后 markUiReady 才允许展示 Modal（见 boot 段 startupUiReady）。 */
   if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
 
-  /* 启动更新提示 Modal（VC16_UI_POLISH_V1）：复用现有 HTML/CSS Modal 组件，
+  /* 启动更新提示 Modal（VC16_UI_POLISH_V1 + UI_DESIGN_V1）：复用现有 Modal 组件壳，
      不是系统 AlertDialog，也不新增 native plugin。
-     内容只有版本名与简短 notes —— 绝不含 apkUrl/fallback/域名/SHA/size/诊断。
-     立即更新 → openUpdateView(true) 进入既有检查/下载/安装页（同一套
-     UpdatePlugin/SHA256/size/package/versionCode/signer 与 CDN/fallback 链）。 */
+     内容只有版本名与简短更新说明 —— 绝不含任何下载地址/校验值/体积/渠道字段。
+     立即更新 → openUpdateView(true) 进入既有检查/下载/安装页（同一套安全校验链）。 */
   function showStartupUpdateModal(info, manifest) {
     if (!info || !manifest) { return; }
     var notes = (typeof manifest.notes === "string") ? manifest.notes.trim() : "";
     if (notes.length > 60) { notes = notes.slice(0, 60) + "…"; }   /* 防弹窗过高 */
     Modal.open(function (box) {
+      box.className = "modal modal-update";
+      var icon = document.createElement("div");
+      icon.className = "modal-icon";
+      icon.innerHTML = (typeof MSQIcons !== "undefined") ? MSQIcons.svg("download") : "";
+      box.appendChild(icon);
       var h = document.createElement("h3");
       h.textContent = "发现新版本";
       box.appendChild(h);
-      var m = document.createElement("div");
-      m.className = "msg";
-      m.style.whiteSpace = "pre-line";
-      m.textContent = "最新版本：" + manifest.versionName +
-        "\n当前版本：" + info.versionName +
-        (notes ? "\n更新内容：" + notes : "");
-      box.appendChild(m);
+      var vers = document.createElement("div");
+      vers.className = "modal-vers";
+      var cur = document.createElement("p");
+      cur.className = "modal-ver";
+      cur.textContent = "当前版本：" + info.versionName;
+      vers.appendChild(cur);
+      var next = document.createElement("p");
+      next.className = "modal-ver new";
+      next.textContent = "最新版本：" + manifest.versionName;
+      vers.appendChild(next);
+      box.appendChild(vers);
+      if (notes) {
+        var notesBox = document.createElement("div");
+        notesBox.className = "modal-notes";
+        notesBox.textContent = notes;
+        box.appendChild(notesBox);
+      }
       var btns = document.createElement("div");
       btns.className = "btns";
       btns.appendChild(mkBtn("稍后", "barbtn cancel", function () { Modal.close(); }));

@@ -1965,7 +1965,8 @@ section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
     !updSrc.includes("shiinalab") && !/ret\.put\("(url|host|finalHost)"/.test(updSrc));
   check("CDN-D9b 诊断模块已接入 app.js 下载链路与 DEV 诊断页（仅 DEV 可见）",
     appSrc.includes("diag.buildSuccessRecord({") && appSrc.includes("diag.buildFailureRecord({") &&
-    appSrc.includes('add("最近下载来源"') && appSrc.includes('add("是否发生回退"'));
+    appSrc.includes('groups[4].rows.push(["最近下载来源"') &&
+    appSrc.includes('groups[4].rows.push(["是否发生回退"'));
 }
 
 /* ---------- DEV_TO_MAIN_SYNC_V1：MAIN/STABLE 构建边界守卫（MAIN-1~8） ---------- */
