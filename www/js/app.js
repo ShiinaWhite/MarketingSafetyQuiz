@@ -96,13 +96,24 @@
     }
   }
 
-  /* ---------------- 视图切换 ---------------- */
-  function show(id) {
+  /* ---------------- 视图切换（MOTION_IMPLEMENTATION_V1：方案 A enter-only） ----------------
+     direction: "forward" | "backward" | "none"（缺省 forward）。
+     旧页立即 hidden（禁止双页共存/旧页 exit）；新页按方向播放 micro-move enter：
+     forward +8px→0、backward -4px→0，200ms ease-enter（transform+opacity 合成动画）。
+     同页重复 show（如切题型重渲染）不重播动画。导航状态机/返回逻辑零改动。 */
+  function show(id, direction) {
     var views = document.querySelectorAll(".view");
+    var target = document.getElementById(id);
+    var alreadyVisible = !!(target && !target.classList.contains("hidden"));
     for (var i = 0; i < views.length; i++) {
       views[i].classList.toggle("hidden", views[i].id !== id);
     }
     window.scrollTo(0, 0);
+    if (!alreadyVisible && target && direction !== "none") {
+      target.classList.remove("nav-forward", "nav-backward");
+      void target.offsetWidth;   /* 重排以重放 enter 动画 */
+      target.classList.add(direction === "backward" ? "nav-backward" : "nav-forward");
+    }
   }
 
   /* ---------------- 弹窗 ---------------- */
@@ -283,7 +294,17 @@
       });
       box.appendChild(b);
     });
-    show("view-menu");
+    show("view-menu", "backward");   /* 所有 renderMenu 路径 = 返回首页语义 */
+    /* MOT：首页冷启动仅一次轻 fade；动画结束即移除类，之后导航不重放 */
+    var menuView = $("view-menu");
+    if (menuView && !menuView.dataset.homePlayed) {
+      menuView.classList.add("home-enter");
+      menuView.addEventListener("animationend", function h() {
+        menuView.classList.remove("home-enter");
+        menuView.dataset.homePlayed = "1";
+        menuView.removeEventListener("animationend", h);
+      });
+    }
   }
 
   /* ---------------- 刷题 ---------------- */
@@ -327,7 +348,7 @@
       session: {}
     };
     $("btn-handin").classList.add("hidden");
-    show("view-quiz");
+    show("view-quiz", "forward");
     renderQuestion();
   }
 
@@ -514,7 +535,7 @@
   function startExam() {
     E = { paper: MSQ.generateExam(byType, examConfig(), Math.random), answers: {}, pos: 0, result: null };
     P = null;
-    show("view-quiz");
+    show("view-quiz", "forward");
     renderQuestion();
   }
 
@@ -564,7 +585,7 @@
     btns.appendChild(mkBtn("重新生成一套试卷", "barbtn", startExam));
     btns.appendChild(mkBtn("返回主菜单", "barbtn", function () { E = null; renderMenu(); }));
     $("result-body").appendChild(btns);
-    show("view-result");
+    show("view-result", (arguments.length > 0 && arguments[0] === "backward") ? "backward" : "forward");
   }
 
   function renderReview() {
@@ -634,7 +655,7 @@
             }
             body.appendChild(block);
     });
-    show("view-review");
+    show("view-review", "forward");
   }
 
   /* ---------------- 背题模式快速跳转 ---------------- */
@@ -692,6 +713,7 @@
   var SEARCH_RENDER_LIMIT = 30;
   /* 题型筛选：会话内保持（不写 localStorage），App 冷启动回到 all */
   var searchFilter = "all";
+  var searchPrevHadResults = false;   /* MOT：empty↔results 边界检测 */
   var SEARCH_FILTER_DEFS = [
     { key: "all", short: "全部", full: "" },
     { key: "single", short: "单选", full: "单选题" },
@@ -816,6 +838,13 @@
         countEl.textContent = "未找到相关题目";
         countEl.classList.remove("hidden");
       }
+      /* MOT：有结果 → 空态 边界（反向）同样轻淡入一次 */
+      if (searchPrevHadResults === true && box) {
+        box.classList.remove("swap");
+        void box.offsetWidth;
+        box.classList.add("swap");
+      }
+      searchPrevHadResults = false;
       renderHistory();
       return;
     }
@@ -830,6 +859,13 @@
     countEl.textContent = "找到 " + results.length + " " +
       (searchFilter === "all" ? "道题" : "道" + searchFilterLabel(searchFilter, true)) +
       (results.length > SEARCH_RENDER_LIMIT ? "，显示前 " + SEARCH_RENDER_LIMIT + " 道" : "");
+    /* MOT：empty↔results 边界一次性轻淡入（140ms）；逐字符更新不触发 */
+    if (searchPrevHadResults !== true && box && results.length) {
+      box.classList.remove("swap");
+      void box.offsetWidth;
+      box.classList.add("swap");
+    }
+    searchPrevHadResults = results.length > 0;
     if (hist && !hist.classList.contains("hidden")) { hist.classList.add("hidden"); }
     results.slice(0, SEARCH_RENDER_LIMIT).forEach(function (r) {
       var item = document.createElement("button");
@@ -895,7 +931,7 @@
   }
 
   function openSearch() {
-    show("view-search");
+    show("view-search", "forward");
     renderHistory();
     setTimeout(function () {
       try { $("search-input").focus(); } catch (e) { }
@@ -969,7 +1005,7 @@
       detailReturnContext.batchScrollTop = batchScroll ? batchScroll.scrollTop : 0;
       detailReturnContext.batchWindowY = window.pageYOffset || 0;
     }
-    show("view-search-detail");
+    show("view-search-detail", "forward");
   }
 
   /* ---------------- 返回逻辑（页面返回按钮与 Android 系统 Back 共用） ---------------- */
@@ -1008,7 +1044,7 @@
   /* 错题回顾返回 → 成绩页 */
   function handleReviewBack() {
     if (E && E.result) {
-      renderResult();
+      renderResult("backward");
       return;
     }
     E = null;
@@ -1025,7 +1061,7 @@
      左上角返回按钮与 Android 系统 Back（handleBack）共用本函数。 */
   function handleSearchDetailBack() {
     if (detailReturnContext.source === "batch-results") {
-      show("view-batch-results");
+      show("view-batch-results", "backward");
       var y = detailReturnContext.batchScrollTop || 0;
       var wy = detailReturnContext.batchWindowY || 0;
       var el = $("batch-scroll");
@@ -1039,7 +1075,7 @@
       return;
     }
     detailReturnContext.source = "search";
-    show("view-search");
+    show("view-search", "backward");
   }
 
   /* 统一返回入口：系统 Back 与各页返回按钮共用同一套分层。
@@ -1050,7 +1086,7 @@
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
       case "view-update": handleUpdateBack(); return;
-      case "view-devdiag": openUpdateView(); return;
+      case "view-devdiag": openUpdateView(false, "backward"); return;
       case "view-batch-results": handleBatchResultsBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
@@ -1128,7 +1164,7 @@
 
   function batchDetail(b) {
     var d = document.createElement("div");
-    d.className = "batch-detail hidden";
+    d.className = "batch-detail";   /* 可见性由 .open + shell 的 grid-rows 驱动 */
     var add = function (label, value, valueCls) {
       var p = document.createElement("div");
       p.className = "kv";
@@ -1231,26 +1267,27 @@
   }
 
   function updateRowWrongMark(rowEl, marked) {
+    /* MOT：badge 占位常驻，仅切 show 类（opacity+scale 140ms），
+       不再 DOM 插拔导致布局跳动；长按/600ms/feedback 数据零改动 */
     if (!rowEl) { return; }
     var mark = rowEl.querySelector(".batch-wrongmark");
-    if (marked && !mark) {
-      mark = document.createElement("span");
-      mark.className = "batch-wrongmark";
-      mark.textContent = "已标错";
-      var host = rowEl.querySelector(".batch-row-tags") || rowEl;
-      host.appendChild(mark);
-    } else if (!marked && mark) {
-      mark.parentNode.removeChild(mark);
-    }
+    if (!mark) { return; }
+    mark.textContent = "已标错";
+    mark.classList.toggle("show", !!marked);
   }
 
   function showFeedbackToast(msg) {
+    /* MOT：进 200ms / 出 140ms（leaving 播完才移除 DOM）；
+       toast 仅视觉提示，不参与任何 feedback 状态判定 */
     var toast = document.createElement("div");
     toast.className = "fb-toast";
     toast.textContent = msg;
     document.body.appendChild(toast);
     setTimeout(function () {
-      if (toast.parentNode) { toast.parentNode.removeChild(toast); }
+      toast.classList.add("leaving");
+      setTimeout(function () {
+        if (toast.parentNode) { toast.parentNode.removeChild(toast); }
+      }, 150);
     }, 1600);
   }
 
@@ -1269,6 +1306,9 @@
     top.appendChild(no);
     var tags = document.createElement("div");
     tags.className = "batch-row-tags";
+    var wrongmark = document.createElement("span");
+    wrongmark.className = "batch-wrongmark";   /* MOT：常驻占位，show 类驱动 */
+    tags.appendChild(wrongmark);
     var confBadge = document.createElement("span");
     confBadge.className = "u-badge conf-chip" + (CONF_BADGE_CLS[b.confidence] ? " " + CONF_BADGE_CLS[b.confidence] : "");
     var dot = document.createElement("span");
@@ -1301,14 +1341,25 @@
     var suppressClickUntil = 0;
     row.addEventListener("click", function () {
       if (Date.now() < suppressClickUntil) { return; }   /* 长按抑制窗内的合成 click */
-      var open = detail.classList.toggle("hidden") === false;
-      row.classList.toggle("open", open);
+      /* MOT：open 类驱动 grid-rows shell（expand/collapse 双向对称）；
+         不再切 detail.hidden（display:none 会压过动画并使收起瞬时） */
+      row.classList.toggle("open");
     });
     bindLongPress(row, function () {
       toggleBlockFeedback(blockIndex, b, row);
     });
     wrap.appendChild(row);
-    wrap.appendChild(detail);
+    /* MOT：detail 包入 grid-rows shell（expand/collapse 双向对称动画）；
+       detail 保持 row 的相邻兄弟（.batch-row.open + .batch-detail-shell），
+       最差退化（不支持 fr 过渡）= 状态类仍生效 → instant 开合，功能不受影响 */
+    var shell = document.createElement("div");
+    shell.className = "batch-detail-shell";
+    var inner = document.createElement("div");
+    inner.className = "batch-detail-inner";
+    inner.appendChild(detail);
+    shell.appendChild(inner);
+    wrap.appendChild(row);
+    wrap.appendChild(shell);
     return wrap;
   }
 
@@ -1415,7 +1466,7 @@
   }
 
   function renderBatchResults(state) {
-    show("view-batch-results");
+    show("view-batch-results", "none");   /* 同页重算/重渲染：不播导航动画 */
     lastBatch = state;
     var summary = $("batch-summary");
     var list = $("batch-list");
@@ -1488,7 +1539,7 @@
         Modal.alert("无法使用相机", "请授予相机权限后重试");
       }
       /* 用户取消：静默回到入口页，绝不进入任何中间页 */
-      show(captureOriginView);
+      show(captureOriginView, "backward");
       return;
     }
     var totalStart = performance.now();
@@ -1540,7 +1591,7 @@
      搜题页 DOM 从未销毁（show 只切换 hidden），关键词与结果自然保留；
      不回旧中转页、不留空 history entry）。 */
   function handleBatchResultsBack() {
-    show("view-search");
+    show("view-search", "backward");
   }
 
   /* ---------------- 样本采集旁路（SIMPLIFY_CAPTURE_FLOW_V1：纯后台 best-effort） ----------------
@@ -1803,7 +1854,7 @@
     var Queue = sampleQueuePlugin();
     if (!(Queue && typeof Queue.stats === "function")) { return; }
     renderDevDiagnostics();
-    show("view-devdiag");
+    show("view-devdiag", "forward");
   }
 
   function renderDevDiagnostics() {
@@ -2057,10 +2108,21 @@
       body.appendChild(actions);
       return;
     }
-    /* 下载中：线性进度 + 状态行 */
+    /* 下载中：线性进度 + 状态行。
+       MOT：复用已存在的进度元素仅更新 width/文本（width transition 才能平滑），
+       不整段重建；百分比仍只来自真实 onProgress 事件（禁止 fake progress）。 */
     if (updatePhase === "downloading") {
+      var existing = document.getElementById("update-progress");
+      if (existing) {
+        var mExisting = /(\d+)%/.exec(statusText || "");
+        existing.querySelector(".progress-fill").style.width =
+          (mExisting ? parseInt(mExisting[1], 10) : 0) + "%";
+        existing.querySelector(".update-progress-status").textContent = statusText || "";
+        return;
+      }
       var wrap = document.createElement("div");
       wrap.className = "update-progress";
+      wrap.id = "update-progress";
       var track = document.createElement("div");
       track.className = "progress-track";
       var fill = document.createElement("div");
@@ -2069,7 +2131,9 @@
       fill.style.width = (m ? parseInt(m[1], 10) : 0) + "%";
       track.appendChild(fill);
       wrap.appendChild(track);
-      wrap.appendChild(updateStatusLine(statusText));
+      var statusLine = updateStatusLine(statusText);
+      statusLine.className = "dim update-progress-status";
+      wrap.appendChild(statusLine);
       body.appendChild(wrap);
       return;
     }
@@ -2109,8 +2173,8 @@
 
   /* autostart=true：VC16 启动 Modal 的「立即更新」入口 —— 打开页面后自动跑一次
      既有 checkForUpdate()，直接落到 available/下载安装状态（同一套下载安装链） */
-  function openUpdateView(autostart) {
-    show("view-update");
+  function openUpdateView(autostart, direction) {
+    show("view-update", direction || "forward");
     updateSetError("");
     updatePhase = "idle";
     renderUpdateView("正在读取应用信息…");
@@ -2549,7 +2613,7 @@
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
     $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
-    $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });
+    $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(false, "backward"); });
     initSampleResultTools();
     initSampleQueue();
     $("btn-update").addEventListener("click", function () { openUpdateView(); });
@@ -2562,6 +2626,7 @@
         searchInput.value = "";
         doSearch("");
         renderHistory();
+        searchClear.classList.remove("show");
         try { searchInput.focus({ preventScroll: true }); }
         catch (e) { try { searchInput.focus(); } catch (e2) { } }
       });
@@ -2569,7 +2634,7 @@
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
       var v = searchInput.value;
-      if (searchClear) { searchClear.classList.toggle("hidden", !v.trim()); }
+      if (searchClear) { searchClear.classList.toggle("show", !!v.trim()); }
       searchDebounceTimer = setTimeout(function () { doSearch(v); }, 60);
       if (!v.trim()) { renderHistory(); }
     });

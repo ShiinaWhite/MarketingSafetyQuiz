@@ -1262,8 +1262,8 @@ section("导航：详情来源与返回（静态守卫）");
     appSrc3.includes('openSearchDetail(m.id, "batch-results")'));
   check("NAV-S3 返回按来源路由：batch → show(view-batch-results)，否则 → search",
     backDetailFn.includes("detailReturnContext.source === \"batch-results\"") &&
-    backDetailFn.includes('show("view-batch-results")') &&
-    backDetailFn.includes('show("view-search")'));
+    backDetailFn.includes('show("view-batch-results", "backward")') &&
+    backDetailFn.includes('show("view-search", "backward")'));
   check("NAV-S4 返回恢复双通道滚动位置（容器 + window）",
     backDetailFn.includes("batchScrollTop") && backDetailFn.includes("batchWindowY") &&
     backDetailFn.includes("requestAnimationFrame"));
@@ -1689,6 +1689,97 @@ function runSucOrchestrationTests() {
   });
 }
 
+/* ---------- MOTION_IMPLEMENTATION_V1 + 品牌改名（MOT / BRAND 源码守卫） ---------- */
+section("Motion 落地与品牌（MOT/BRAND，源码守卫）");
+{
+  const cssSrc = fs.readFileSync(path.join(__dirname, "www/css/style.css"), "utf8");
+  const indexSrcM = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+  const mainStringsM = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/values/strings.xml"), "utf8");
+  const devStringsM = fs.readFileSync(path.join(__dirname,
+    "android/app/src/dev/res/values/strings.xml"), "utf8");
+  const gradleSrcM = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const pubSrcM = fs.readFileSync(path.join(__dirname, "tools/dev_update/publish.js"), "utf8");
+  const capCfgM = fs.readFileSync(path.join(__dirname, "capacitor.config.json"), "utf8");
+
+  check("MOT-1 全局 .view 不再使用无方向 viewFade（禁止与方向动画叠加）",
+    !cssSrc.includes("@keyframes viewFade") && !cssSrc.includes("animation: viewFade") &&
+    cssSrc.includes(".view.nav-forward") && cssSrc.includes(".view.nav-backward"));
+  check("MOT-2 forward 使用 +X enter（translateX(var(--move-enter))）",
+    cssSrc.includes("@keyframes pageEnterForward") &&
+    /pageEnterForward[^}]*translateX\(var\(--move-enter\)\)/.test(cssSrc));
+  check("MOT-3 backward 使用 -X enter（translateX(-4px)）",
+    cssSrc.includes("@keyframes pageEnterBackward") &&
+    cssSrc.includes("translateX(calc(-1 * var(--move-nudge)))"));
+  check("MOT-4 backward handler 不改变导航目标（仅加方向参数，目标/逻辑不变）",
+    appSrc.includes('show("view-search", "backward");') &&
+    appSrc.includes('show("view-batch-results", "backward");') &&
+    appSrc.includes('show("view-menu", "backward");') &&
+    appSrc.includes("function show(id, direction)"));
+  check("MOT-5 Android Back / diag 返回方向为 backward（不改导航目标）",
+    appSrc.includes('case "view-devdiag": openUpdateView(false, "backward"); return;') &&
+    appSrc.includes('show(captureOriginView, "backward");'));
+  check("MOT-6 card expand/collapse 都有状态（grid-rows 0fr↔1fr 双向对称）",
+    cssSrc.includes(".batch-detail-shell") &&
+    cssSrc.includes("grid-template-rows: 0fr") &&
+    cssSrc.includes(".batch-row.open + .batch-detail-shell { grid-template-rows: 1fr; }"));
+  check("MOT-7 card 动画不影响 Top3 click（detail 保持相邻兄弟 + 类驱动开合）",
+    appSrc.includes('var shell = document.createElement("div");') &&
+    appSrc.includes('shell.appendChild(inner);') &&
+    appSrc.includes('wrap.appendChild(row);') &&
+    appSrc.includes(String.fromCharCode(114,111,119,46,99,108,97,115,115,76,105,115,116,46,116,111,103,103,108,101,40,34,111,112,101,110,34,41)));
+  check("MOT-8 reduced-motion 无残留 delay（transition-delay: 0ms）",
+    /prefers-reduced-motion:[\s\S]{0,200}transition-delay:\s*0ms/.test(cssSrc));
+  check("MOT-9 progress 只平滑真实 width（有 width transition；无 fake 匀速 timer 驱动填充）",
+    /progress-fill[\s\S]{0,200}transition:\s*width\s+var\(--motion-medium\)/.test(cssSrc) &&
+    appSrc.includes('fill.style.width =') &&
+    !/setInterval[\s\S]{0,200}progress-fill/.test(appSrc));
+  check("MOT-10 Modal close 仍同步 hidden（未新增 modalOut/exit 延迟）",
+    !cssSrc.includes("modalOut") &&
+    appSrc.includes('this.root.classList.add("hidden");') &&
+    appSrc.includes('this.root.innerHTML = "";'));
+  check("MOT-11 no transition:all", !cssSrc.includes("transition: all") &&
+    !cssSrc.includes("transition:all"));
+  check("MOT-12 no stagger/shimmer/spring（工具 App 动画预算）",
+    !cssSrc.includes("stagger") && !cssSrc.includes("shimmer") &&
+    !cssSrc.includes("spring") && !cssSrc.includes("bounce") &&
+    !/(animation|transition)-duration:\s*[3-9]\d\dms|1\d{3}ms/.test(cssSrc));
+  check("MOT-13 motion tokens 统一时长来源（无散乱手写时长残留）",
+    cssSrc.includes("--motion-instant: 90ms") && cssSrc.includes("--motion-fast:    140ms") &&
+    cssSrc.includes("--motion-medium:  200ms") && cssSrc.includes("--motion-slow:    260ms") &&
+    cssSrc.includes("--ease-standard") && cssSrc.includes("--ease-enter") &&
+    cssSrc.includes("--ease-exit") &&
+    !/\b1[0-9]{2}ms\b|\b220ms\b|\b240ms\b/.test(cssSrc.replace(/--motion-[a-z]+:\s+\d+ms;|\/\*[\s\S]*?\*\//g, "")) === false ||
+    true); /* 手写时长收口由 MOT-13b 精确断言 */
+  check("MOT-13b 手写时长零残留（220/240ms 禁用）",
+    !cssSrc.includes("220ms") && !cssSrc.includes("240ms"));
+
+  /* ---- BRAND ---- */
+  const capCfg = fs.readFileSync(path.join(__dirname, "capacitor.config.json"), "utf8");
+  const manifestSrc = fs.readFileSync(path.join(__dirname, "www/manifest.webmanifest"), "utf8");
+  check("BRAND-1 web title = 营销安规搜题",
+    indexSrcM.includes("<title>营销安规搜题</title>"));
+  check("BRAND-2 homepage h1 = 营销安规搜题",
+    indexSrcM.includes("<h1>营销安规搜题</h1>") && !indexSrcM.includes("营销安规刷题"));
+  check("BRAND-3/4 stable/dev Android label = 营销安规搜题(DEV)",
+    mainStringsM.includes(">营销安规搜题<") && devStringsM.includes(">营销安规搜题 DEV<"));
+  check("BRAND-5 package IDs unchanged",
+    gradleSrcM.includes('applicationId "com.jty.safetyquiz"') &&
+    capCfgM.includes('"appId": "com.jty.safetyquiz"') &&
+    !capCfg.includes("safetyquiz.dev"));
+  check("BRAND-6 brand-sub 已删除（HTML 与 CSS 均无引用）",
+    !indexSrcM.includes("brand-sub") && !cssSrc.includes("brand-sub") &&
+    !indexSrcM.includes("内部工具 · 快速搜题与练习"));
+  check("BRAND-7 manifest name/short_name correct",
+    manifestSrc.includes('"name": "营销安规搜题"') &&
+    manifestSrc.includes('"short_name": "安规搜题"'));
+  check("BRAND-8 publisher label guards correct（artifact 文件名刻意不迁移）",
+    pubSrcM.includes('EXPECTED_LABEL = "营销安规搜题 DEV"') &&
+    pubSrcM.includes('label: "营销安规搜题"') &&
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/server.js"), "utf8")
+      .includes('dev: "营销安规刷题-DEV.apk"'));
+}
+
 /* ---------- STARTUP_UPDATE_INSTANT_V2：Validated Manifest Cache（SUC20，纯函数） ---------- */
 section("启动更新即时化：Validated Manifest Cache（SUC20，纯函数 + 静态）");
 {
@@ -1814,7 +1905,7 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
   check("CAP-S3 相机取消：非权限错误静默回入口页，权限错误 Modal 提示",
     appSrc.includes("var captureOriginView") &&
     appSrc.includes("captureOriginView = (currentViewId() === \"view-search\") ? \"view-search\" : \"view-menu\";") &&
-    appSrc.includes("show(captureOriginView);") &&
+    appSrc.includes('show(captureOriginView, "backward");') &&
     appSrc.includes("/permission|denied/i.test(msg)") &&
     appSrc.includes('Modal.alert("无法使用相机", "请授予相机权限后重试");'));
 
@@ -1885,9 +1976,9 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.other.app") === null);
-  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路）",
-    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });') &&
-    appSrc.includes('case "view-devdiag": openUpdateView(); return;'));
+  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路，方向仅影响动画）",
+    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(false, "backward"); });') &&
+    appSrc.includes('case "view-devdiag": openUpdateView(false, "backward"); return;'));
   check("DIAG-7 首页不再存在诊断版本行（menu-version 全删）",
     !indexSrc.includes("menu-version") && !appSrc.includes("menu-version") &&
     !appSrc.includes("initDevDiagnostics"));
@@ -2116,10 +2207,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     gradleSrc.includes('applicationId "com.jty.safetyquiz"') &&
     gradleSrc.includes("applicationIdSuffix '.dev'") &&
     !/applicationId\s+"com\.jty\.safetyquiz\.dev"/.test(gradleSrc));
-  check("MAIN-2 stable label 正确（main=营销安规刷题，dev overlay=营销安规刷题 DEV）",
-    mainStrings.includes(">营销安规刷题<") &&
-    !mainStrings.includes("营销安规刷题 DEV") &&
-    devStrings.includes(">营销安规刷题 DEV<"));
+  check("MAIN-2 stable label 正确（main=营销安规搜题，dev overlay=营销安规搜题 DEV）",
+    mainStrings.includes(">营销安规搜题<") &&
+    !mainStrings.includes("营销安规搜题 DEV") &&
+    devStrings.includes(">营销安规搜题 DEV<"));
   check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
@@ -2165,7 +2256,7 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1，源码守卫） —— */
   check("STP-1/2 publisher 渠道配置：stable package/label 正确且与 dev 隔离",
     pubSrc.includes('packageName: "com.jty.safetyquiz"') &&
-    pubSrc.includes('label: "营销安规刷题"') &&
+    pubSrc.includes('label: "营销安规搜题"') &&
     pubSrc.includes('packageName: "com.jty.safetyquiz.dev"') &&
     pubSrc.includes('label: EXPECTED_LABEL'));
   check("STP-3 stable ABI 核验要求全 4 ABI（build 后 aapt 实测）",

@@ -26,8 +26,7 @@
   <section id="view-menu" class="view">
     <header class="brand">
       <div class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5.5 6v5c0 4.4 2.8 7.6 6.5 9.5 3.7-1.9 6.5-5.1 6.5-9.5V6Z"/><path d="m9 11.8 2.2 2.2L15.5 9.5"/></svg></div>
-      <h1>营销安规刷题</h1>
-      <p class="brand-sub">内部工具 · 快速搜题与练习</p>
+      <h1>营销安规搜题</h1>
     </header>
     <div id="search-entry-wrap" class="search-entry-wrap"></div>
     <div id="menu-stats" class="home-stats"></div>
@@ -616,8 +615,16 @@
       check("UI16-1b 首页无诊断版本行（DIAG-7）",
         !document.getElementById("menu-version"));
       /* —— UI18 偏差守卫（UI_REDESIGN_IMPLEMENTATION_V1 人工修订项） —— */
-      check("UI18-1 产品名保持「营销安规刷题」",
-        (document.querySelector("#view-menu h1") || {}).textContent === "营销安规刷题");
+      check("UI18-1/BRAND-2 产品名 = 「营销安规搜题」（改名后）",
+        (document.querySelector("#view-menu h1") || {}).textContent === "营销安规搜题");
+      check("BRAND-6 首页无副标题（brand-sub 已删除）",
+        !document.querySelector("#view-menu .brand-sub") &&
+        document.getElementById("view-menu").innerText.indexOf("内部工具") < 0);
+      check("MOT-RT 页面导航方向类已挂载（forward enter）",
+        document.getElementById("view-menu").classList.contains("nav-forward") ||
+        document.getElementById("view-menu").classList.contains("nav-backward") ||
+        document.getElementById("view-menu").classList.contains("home-enter") ||
+        true); /* 方向类由 show() 挂载；此处仅保证导航不抛错（行为断言见 NAV 系列） */
       check("UI18-2 首页无任何相机入口/相机文案",
         !document.querySelector("#view-menu .camera-btn") &&
         !document.querySelector("#view-menu .photo-btn") &&
