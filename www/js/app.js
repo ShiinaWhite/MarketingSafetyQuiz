@@ -692,7 +692,6 @@
   var SEARCH_RENDER_LIMIT = 30;
   /* 题型筛选：会话内保持（不写 localStorage），App 冷启动回到 all */
   var searchFilter = "all";
-  var searchInputBlurAt = 0;
   var SEARCH_FILTER_DEFS = [
     { key: "all", short: "全部", full: "" },
     { key: "single", short: "单选", full: "单选题" },
@@ -878,12 +877,8 @@
     doSearch($("search-input").value);
     var sc = $("search-scroll");
     if (sc) { sc.scrollTop = 0; }
-    // 触摸端按住按钮会让搜索框失焦（软键盘收起）：刚刚还在输入就把焦点还回去
-    var input = $("search-input");
-    if (input && Date.now() - searchInputBlurAt < 800) {
-      try { input.focus({ preventScroll: true }); }
-      catch (e) { try { input.focus(); } catch (e2) { } }
-    }
+    /* UI_POLISH_AFTER_DEVICE_V1：切换题型绝不回焦搜索框（会弹键盘挡住列表）。
+       键盘只在用户点击搜索框时出现。 */
   }
 
   function initSearchFilters() {
@@ -1142,32 +1137,33 @@
       v.textContent = value;
       p.appendChild(k); p.appendChild(v); d.appendChild(p);
     };
-    add("OCR 识别题干", b.stemText || "（无）");
-    add("题库匹配", b.bankId === null ? "未匹配到" : ("第 " + b.bankId + " 题 ｜ " + (BATCH_TYPE_NAMES[b.type] || b.type)));
-    if (b.answerItem) { add("参考答案", b.answer, "answer-inline"); }
-    if (b.matches && b.matches.assistedByOptions) { add("匹配方式", "题干 + 选项辅助"); }
+    /* UI_POLISH_AFTER_DEVICE_V1：详情只保留「匹配原题」（题干/选项）与「其他候选」。
+       OCR 识别题干/题库匹配/参考答案/匹配方式不再作为用户可见区块
+       （底层数据与 run.json/采集诊断完整保留）。 */
     if (b.matches && b.matches.length) {
       var t1 = b.matches[0];
-      add("完整题干", t1.stem);
+      add("原题题干", t1.stem);
       if (t1.options && t1.options.length) {
-        add("题库选项", t1.options.map(function (o, i) { return MSQ.LETTERS[i] + ". " + o; }).join("　"));
+        add("原题选项", t1.options.map(function (o, i) { return MSQ.LETTERS[i] + ". " + o; }).join("　"));
       }
     }
-    var cands = (b.matches || []).slice(0, 3);
-    if (cands.length > 1 || b.confidence === "low" || b.confidence === "none") {
+    /* 其他候选 = 除当前命中（原第 1）之外的候选项，按原始名次展示；
+       没有其他候选且未匹配到题库时给出明确空态文案。 */
+    var others = (b.matches || []).slice(1, 3);
+    if (others.length) {
       var head = document.createElement("div");
       head.className = "cand-head";
-      head.textContent = cands.length ? "Top" + cands.length + " 候选（点开看原题）" : "没有找到候选";
+      head.textContent = "其他候选（点开看原题）";
       d.appendChild(head);
       var list = document.createElement("div");
       list.className = "cand-list";
-      cands.forEach(function (m, i) {
+      others.forEach(function (m, i) {
         var btn = document.createElement("button");
         btn.type = "button";
         btn.className = "batch-cand";
         var rank = document.createElement("span");
         rank.className = "cand-rank";
-        rank.textContent = String(i + 1);
+        rank.textContent = String(i + 2);
         var stem = document.createElement("span");
         stem.className = "cand-stem";
         stem.textContent = "第" + m.id + "题 ｜ " + (m.type_name || MSQ.TYPE_NAMES[m.type] || "") +
@@ -1180,6 +1176,11 @@
         list.appendChild(btn);
       });
       d.appendChild(list);
+    } else if (!b.matches || !b.matches.length) {
+      var emptyHead = document.createElement("div");
+      emptyHead.className = "cand-head";
+      emptyHead.textContent = "没有找到候选";
+      d.appendChild(emptyHead);
     }
     return d;
   }
@@ -1280,7 +1281,9 @@
       top.appendChild(MSQIcons.el("chevronDown", "batch-chevron"));
     }
     row.appendChild(top);
-    /* 答案行：大字答案（置信色只作用于答案）+ OCR 题干两行预览 */
+    /* 答案行：大字答案（置信色只作用于答案）+ 匹配题干预览。
+       UI_POLISH_AFTER_DEVICE_V1：摘要取匹配后的题库标准题干（OCR 原文可能乱码/
+       残缺）；未匹配到题库时回退 OCR 原文。run.json/详情/诊断数据不受影响。 */
     var ansRow = document.createElement("div");
     ansRow.className = "batch-answer-row";
     var ans = document.createElement("span");
@@ -1289,8 +1292,9 @@
     ans.textContent = disp.text;
     ansRow.appendChild(ans);
     var preview = document.createElement("span");
-    preview.className = "batch-ocr-preview";
-    preview.textContent = b.stemText || "";
+    preview.className = "batch-stem-preview";
+    var matchedStem = (b.matches && b.matches.length) ? b.matches[0].stem : "";
+    preview.textContent = matchedStem || b.stemText || "";
     ansRow.appendChild(preview);
     row.appendChild(ansRow);
     var detail = batchDetail(b);
@@ -1531,10 +1535,12 @@
     collectAndUploadSample(state);
   }
 
-  /* 整页结果 Back → 首页（SIMPLIFY_CAPTURE_FLOW_V1：旧整页拍照中转页已删除，
-     不得再回到已不存在的页面，也不留空 history entry） */
+  /* 整页结果 Back → 搜题页（UI_POLISH_AFTER_DEVICE_V1：相机唯一入口在搜题页，
+     拍摄路径 = 首页 → 搜题页 → 相机 → 整页答案，返回上一级即搜题页。
+     搜题页 DOM 从未销毁（show 只切换 hidden），关键词与结果自然保留；
+     不回旧中转页、不留空 history entry）。 */
   function handleBatchResultsBack() {
-    renderMenu();
+    show("view-search");
   }
 
   /* ---------------- 样本采集旁路（SIMPLIFY_CAPTURE_FLOW_V1：纯后台 best-effort） ----------------
@@ -2544,7 +2550,6 @@
       searchDebounceTimer = setTimeout(function () { doSearch(v); }, 60);
       if (!v.trim()) { renderHistory(); }
     });
-    searchInput.addEventListener("blur", function () { searchInputBlurAt = Date.now(); });
     initSearchFilters();
     searchInput.addEventListener("keydown", function (e) {
       if (e.key === "Enter") {

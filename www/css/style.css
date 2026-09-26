@@ -462,12 +462,13 @@ h1, h2, h3, p { margin: 0; }
 .search-count { font-size: 12.5px; color: var(--text-muted); margin: 0 var(--gutter) var(--sp-2); }
 
 .search-item {
-  display: block; width: 100%; text-align: left;
+  display: block; width: auto; text-align: left;
   background: var(--surface); border-radius: 14px; box-shadow: var(--e-card);
   padding: 13px var(--sp-4); margin: 0 var(--gutter) var(--sp-2);
   font-size: 15.5px; line-height: 1.55; color: var(--text-primary);
   transition: background-color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
   min-height: 0;
+  overflow-wrap: break-word; word-break: break-word;
 }
 .search-item:active { background: var(--primary-tint); transform: scale(.99); }
 .search-item .s-type { font-size: 12.5px; color: var(--primary); font-weight: 700; }
@@ -480,6 +481,8 @@ mark { background: var(--mark-bg); color: inherit; padding: 0 2px; border-radius
 .search-empty { text-align: center; color: var(--text-muted); padding: 40px var(--gutter); font-size: 15px; }
 
 /* ---- 整页答案 ---- */
+/* UI_POLISH_AFTER_DEVICE_V1：底部操作与题卡拉开间距，页底保留安全区 */
+#batch-scroll { padding-bottom: calc(var(--sp-8) + env(safe-area-inset-bottom)); }
 .batch-summary { font-size: 22px; font-weight: 800; line-height: 30px; color: var(--text-primary); margin: 0 2px var(--sp-2); }
 .batch-summary.warn { color: var(--danger-strong); font-size: 16px; font-weight: 700; line-height: 1.6; }
 .batch-summary .dim { font-size: 13px; font-weight: 400; color: var(--text-muted); }
@@ -514,8 +517,8 @@ mark { background: var(--mark-bg); color: inherit; padding: 0 2px; border-radius
   transition: background-color var(--t-fast) var(--ease-out);
 }
 .batch-cand:active { background: var(--primary-tint); }
-.batch-tools { margin-top: var(--sp-2); padding: 0 var(--gutter); }
-.batch-tools .barbtn { width: 100%; margin-bottom: var(--sp-2); }
+.batch-tools { margin-top: var(--sp-5); padding: 0 var(--gutter); }
+.batch-tools .barbtn { width: 100%; margin-bottom: 0; }
 
 /* AUTO_PAGE_TYPE：结果页题型行 / 切题型按钮行 / 轻量提示 */
 .batch-type-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2);
@@ -623,9 +626,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); o
    ============================================================ */
 
 /* ---- 搜索结果 ---- */
-.search-meta { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: 6px; }
+.search-meta { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.search-meta .u-badge { max-width: 100%; }
 .s-opt { display: flex; gap: 5px; align-items: flex-start; }
 .s-opt-icon { flex: 0 0 auto; width: 15px; height: 15px; margin-top: 3px; }
+.s-opt span { flex: 1; min-width: 0; }
 
 /* ---- 题目详情（搜题 / Top3 原题） ---- */
 .detail-type { display: flex; align-items: center; gap: var(--sp-2);
@@ -665,7 +670,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); o
   transition: transform 260ms var(--ease-out); }
 .batch-row.open .batch-chevron { transform: rotate(180deg); }
 .batch-answer-row { display: flex; align-items: center; gap: var(--sp-3); margin-top: 7px; }
-.batch-ocr-preview {
+.batch-stem-preview {
   flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; color: var(--text-muted);
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }

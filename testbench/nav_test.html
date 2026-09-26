@@ -118,7 +118,7 @@
     <main id="batch-scroll" class="pad">
       <div id="batch-summary" class="batch-summary"></div>
       <div id="batch-list"></div>
-      <div id="batch-tools"></div>
+      <div id="batch-tools" class="batch-tools"></div>
       <div id="batch-sample-tools" class="sample-tools">
         <button id="btn-sample-flag" class="linkbtn hidden" type="button">反馈本页问题</button>
         <div id="sample-feedback-panel" class="sample-feedback-panel hidden"></div>
@@ -505,10 +505,17 @@
 
       const c0 = JSON.parse(JSON.stringify(window.__c));
       const rows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
-      const openRow = rows[rows.length - 2];
+      /* UI_POLISH_AFTER_DEVICE_V1：候选只显示当前命中之外的项 →
+         选一个 matches>=2 的题块展开，保证「其他候选」可见 */
+      const blocks = window.__queuePersisted[window.__queuePersisted.length - 1].runJson.blocks;
+      let candIdx = -1;
+      blocks.forEach((blk, i) => {
+        if (candIdx < 0 && blk.matches && blk.matches.length >= 2) { candIdx = i; }
+      });
+      const openRow = rows[candIdx >= 0 ? candIdx : rows.length - 2];
       openRow.click();
       const candBtns = openRow.nextElementSibling.querySelectorAll(".batch-cand");
-      check("NAV-E0 展开题块且 Top3 候选可见",
+      check("NAV-E0 展开题块且其他候选可见（不含当前命中）",
         openRow.classList.contains("open") && candBtns.length >= 1);
       candBtns[Math.min(1, candBtns.length - 1)].click();
       check("NAV-B2 打开 Top2 原题详情", vis("view-search-detail"));
@@ -560,7 +567,8 @@
       /* —— UI16-10：手动检查更新行为不变（无新版 → 已是最新版） —— */
       window.handleBack();   /* 整页答案 → 首页 */
       await sleep(100);
-      check("NAV-J1 整页答案 back → 首页", vis("view-menu") && !vis("view-batch-results"));
+      check("NAV-J1 整页答案 back → 搜题页（UI_POLISH_AFTER_DEVICE_V1）",
+        vis("view-search") && !vis("view-batch-results"));
       document.getElementById("btn-update").click();
       await poll(() => (document.getElementById("update-body").innerText || "").indexOf("当前版本") >= 0);
       document.getElementById("btn-update-check").click();
