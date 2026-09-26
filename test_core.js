@@ -1401,6 +1401,209 @@ section("CDN 迁移：绝对 apkUrl / fallbackApkUrl 前向兼容 / 回退分类
     pluginSrc.includes("UpdateVerifier.flexibleLong("));
 }
 
+/* ---------- STARTUP_UPDATE_CHECK_V1：冷启动自动检查更新（SUC 系列） ----------
+   决策矩阵是纯函数；编排（createController）内部走 Promise 微任务，所以本小节
+   的编排断言在异步函数内完成，文件末尾的统一结论推迟到其完成后输出。 */
+section("启动自动检查更新：startup-update.js（SUC 系列）");
+const MSQStartupUpdate = require("./www/js/startup-update.js");
+const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+
+/* 决策矩阵（SUC-2~6/9 的判定核心，同步纯函数） */
+{
+  const d = (check, flags) => MSQStartupUpdate.decideStartupPrompt(check, flags || {});
+  check("SUC-2 决策：latest.versionCode > current（available）且首屏空闲 → 弹更新提示",
+    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === true &&
+    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "newer-version");
+  check("SUC-3 决策：latest == current（latest）→ 完全静默",
+    d({ ok: true, state: "latest" }).prompt === false);
+  check("SUC-4 决策：latest < current（downgrade）→ 完全静默",
+    d({ ok: true, state: "downgrade" }).prompt === false);
+  check("SUC-5 决策：检查失败（offline/DNS/超时/5xx 归并为 ok:false）→ 完全静默",
+    d({ ok: false }).prompt === false && d(null).prompt === false &&
+    d({ ok: false }).reason === "check-failed");
+  check("SUC-6 决策：manifest 无效（校验失败）→ 完全静默",
+    d({ ok: false, error: "更新信息 versionCode 无效" }).prompt === false);
+  check("SUC-9 决策：用户已关闭提示 → 本次 session 不再自动弹",
+    d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
+  check("SUC-9b 决策：用户已离开首屏/有弹窗（ui-busy）→ 不抢当前操作",
+    d({ ok: true, state: "available" }, { canShowNow: false }).prompt === false &&
+    d({ ok: true, state: "available" }, { canShowNow: false }).reason === "ui-busy");
+}
+
+/* 编排测试：注入 fake io，驱动与 app.js 完全相同的 controller 代码 */
+function runSucOrchestrationTests() {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const SU_CREATE = (io) => MSQStartupUpdate.createController(io);
+  const sucManifest = (vc) => ({
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: vc, versionName: "1.0." + vc, sha256: "a".repeat(64),
+    size: 17221414, apkUrl: "https://apk.shiinalab.top/dev/vc" + vc + "/msq-dev-vc" + vc + ".apk",
+    fallbackApkUrl: "/api/update/dev/apk"
+  });
+  function makeIo(overrides) {
+    const io = {
+      calls: { fetch: 0, prompt: 0 }, logs: [], manifest: null,
+      getAppInfo: () => Promise.resolve(
+        { id: "com.jty.safetyquiz.dev", versionName: "1.0.14", versionCode: 14 }),
+      channelFor: (id) => (id === "com.jty.safetyquiz.dev" ? "dev" : null),
+      fetchLatest: function () {
+        this.calls.fetch++;
+        return this.manifest === "REJECT"
+          ? Promise.reject(new Error("simulated transport failure"))
+          : Promise.resolve(this.manifest);
+      },
+      validate: (m, exp) => MSQUpdater.validateManifest(m, exp),
+      compare: (cur, m) => MSQUpdater.checkUpdateState(cur, m),
+      canShowNow: () => true,
+      showPrompt: function (info, m) {
+        this.calls.prompt++;
+        this.promptedWith = { info: info, m: m };
+      },
+      debug: function (msg) { this.logs.push(msg); }
+    };
+    return Object.assign(io, overrides || {});
+  }
+
+  return Promise.resolve().then(async () => {
+    /* SUC-1 冷启动只触发一次检查（再触发=前台恢复/相机返回/安装器返回） */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      const c = SU_CREATE(io);
+      const r1 = c.trigger();
+      c.trigger(); c.trigger(); c.trigger();
+      await flush();
+      check("SUC-1 冷启动触发检查且整个 session 恰好一次（fetch 恰好 1 次）",
+        r1.ran === true && io.calls.fetch === 1);
+      check("SUC-1b 二次触发被拒并记 debug（后台→前台/相机返回同路径）",
+        io.logs.some((l) => l.includes("already ran this session")));
+    }
+
+    /* SUC-2 有更新 → 弹既有更新提示；SUC-12 manifest 原样透传 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(15);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      check("SUC-2 latest(15) > current(14) → 弹出更新提示一次",
+        io.calls.prompt === 1 && io.promptedWith.m.versionCode === 15 &&
+        io.promptedWith.info.versionCode === 14);
+      check("SUC-12a 启动路径把校验通过的 manifest 原样交给既有更新 UI（apkUrl/fallback/size 不变）",
+        io.promptedWith.m === io.manifest &&
+        io.promptedWith.m.apkUrl === sucManifest(15).apkUrl &&
+        io.promptedWith.m.fallbackApkUrl === "/api/update/dev/apk");
+    }
+
+    /* SUC-3/4 无更新/降级 → 完全静默 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-3 latest == current → 不弹、无 UI 状态",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("not-newer:latest")));
+    }
+    {
+      const io = makeIo(); io.manifest = sucManifest(13);
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-4 latest < current → 不弹",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("not-newer:downgrade")));
+    }
+
+    /* SUC-5 网络失败（offline/DNS/超时/5xx 在 MSQSample.getJSON 一律 reject）→ 静默 */
+    {
+      const io = makeIo(); io.manifest = "REJECT";
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-5 网络失败 → 不弹不抛错，仅非敏感 debug log",
+        io.calls.prompt === 0 &&
+        io.logs.some((l) => l.includes("startup update check failed: network/transport")));
+    }
+
+    /* SUC-6 manifest 畸形/校验失败 → 静默 */
+    {
+      const io = makeIo(); io.manifest = { foo: 1 };
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-6a 畸形 manifest → 不弹",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("check-failed")));
+    }
+    {
+      /* 真 validateManifest 校验矩阵：schema/渠道/包名/versionCode/sha/size 全挡 */
+      const bad = [
+        null,
+        Object.assign(sucManifest(15), { schemaVersion: 2 }),
+        Object.assign(sucManifest(15), { channel: "stable" }),
+        Object.assign(sucManifest(15), { packageName: "com.other.app" }),
+        Object.assign(sucManifest(15), { versionCode: 1.5 }),
+        Object.assign(sucManifest(15), { sha256: "zz" }),
+        Object.assign(sucManifest(15), { size: -1 })
+      ];
+      const allRejected = bad.every((m) =>
+        !MSQUpdater.validateManifest(m, { channel: "dev", packageName: "com.jty.safetyquiz.dev" }).ok);
+      check("SUC-6b 真 validateManifest 挡住全部畸形 manifest（进入启动静默路径）",
+        allRejected);
+    }
+
+    /* SUC-7/8 前台恢复/相机返回不重新检查：一次性状态 + app.js 无生命周期监听器 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      const n1 = io.calls.fetch;
+      c.trigger(); c.trigger(); await flush();
+      check("SUC-7/8 任何后续 trigger（=后台恢复/相机返回）都不再 fetch",
+        n1 === 1 && io.calls.fetch === 1 && c.flags().started === true);
+      check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
+        !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
+        !appSrc.includes("visibilitychange"));
+      check("SUC-1c 启动触发仅在首屏就绪后的调度点（loadBank 成功回调内，源码守卫）",
+        appSrc.includes("registerSystemBack();") &&
+        appSrc.indexOf("startupUpdateCtrl.trigger()") > appSrc.indexOf("registerSystemBack();"));
+    }
+
+    /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
+    {
+      const io = makeIo(); io.manifest = sucManifest(15);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      c.markDismissed();
+      const second = c.trigger(); await flush();
+      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹",
+        io.calls.prompt === 1 && second.ran === false &&
+        c.flags().dismissed === true);
+    }
+
+    /* SUC-10/11 手动"检查更新"交互不受启动静默行为影响（源码守卫） */
+    {
+      const mIdx = appSrc.indexOf("function checkForUpdate()");
+      const endIdx = appSrc.indexOf("function updateFriendlyError", mIdx);
+      const manual = appSrc.slice(mIdx, endIdx);
+      check("SUC-10 手动 checkForUpdate 不读启动一次性/dismissed 状态（dismiss 后仍可查）",
+        mIdx > 0 && endIdx > mIdx &&
+        !manual.includes("startupUpdate") && !manual.includes("dismissed"));
+      check("SUC-11 手动检查的「已是最新版/暂不更新/无法连接」原交互保留",
+        manual.includes("已经是最新版") && manual.includes("暂不更新") &&
+        manual.includes("无法连接更新服务器"));
+    }
+
+    /* SUC-12 启动与手动共用同一获取/校验/比较/弹窗/下载/校验/安装路径（源码守卫） */
+    {
+      const bootIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
+      const startSec = appSrc.slice(bootIdx, appSrc.indexOf("清除记录", bootIdx));
+      check("SUC-12b 启动 fetch 与手动同一 endpoint/超时（/api/update/<channel>/latest, 10000）",
+        startSec.includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12c 启动校验/比较直接调用 MSQUpdater.validateManifest/checkUpdateState",
+        startSec.includes("MSQUpdater.validateManifest(manifest, expected)") &&
+        startSec.includes("MSQUpdater.checkUpdateState(currentVersionCode, manifest)"));
+      check("SUC-12d 启动弹窗 = 手动 available 同一状态机（updatePhase=available + renderUpdateView）",
+        startSec.includes('updatePhase = "available";') &&
+        startSec.includes("renderUpdateView(\"\")"));
+      const dlIdx = appSrc.indexOf("function startUpdateDownload()");
+      const dl = appSrc.slice(dlIdx, appSrc.indexOf("function afterDownloadVerified", dlIdx));
+      check("SUC-12e 下载/回退/校验仍走同一 UpdatePlugin 路径（resolveApkUrl/shouldTryFallback/verifier）",
+        dl.includes("MSQUpdater.resolveApkUrl") && dl.includes("MSQUpdater.shouldTryFallback") &&
+        dl.includes("MSQUpdater.fallbackApkUrlFor") && dl.includes("Update.downloadUpdate") &&
+        dl.includes("sha256: updateManifest.sha256") &&
+        dl.includes("expectedPackageName: updateInfo.id"));
+    }
+  });
+}
+
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
 section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
 {
@@ -1667,6 +1870,15 @@ section("COS_SAMPLE_TRANSFER_V1：provider 选择与客户端行为守卫");
     !/put\("presigned/.test(pluginSrc));
 }
 
-console.log("\n" + "=".repeat(46));
-if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
-console.log("结果：全部通过 ✓");
+function finish() {
+  console.log("\n" + "=".repeat(46));
+  if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
+  console.log("结果：全部通过 ✓");
+}
+/* SUC 编排小节内部走 Promise 微任务（controller 的 getAppInfo/fetchLatest 是异步），
+   统一结论推迟到它完成后输出；异常按失败项记录。 */
+runSucOrchestrationTests().then(finish, function (e) {
+  console.error("\n[SUC] 编排测试异常：", e && e.stack || e);
+  fails.push("SUC 编排测试异常");
+  finish();
+});

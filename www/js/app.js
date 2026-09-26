@@ -991,7 +991,7 @@
     if (Modal.isOpen()) { Modal.close(); return; }
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
-      case "view-update": renderMenu(); return;
+      case "view-update": handleUpdateBack(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
       case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
@@ -2192,6 +2192,63 @@
     });
   }
 
+  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1） ----------------
+     编排与决策在 startup-update.js（可测纯逻辑）；manifest 获取/校验/版本比较/
+     更新提示 UI/下载/校验/安装全部复用手动"检查更新"的同一条路径，无第二套 updater。
+     每个 App process / WebView 生命周期只自动检查一次；任何失败完全静默。 */
+  var startupUpdateCtrl = (typeof MSQStartupUpdate !== "undefined" && MSQStartupUpdate)
+    ? MSQStartupUpdate.createController({
+        getAppInfo: function () {
+          var App = getPlugin("App");
+          if (!(App && typeof App.getInfo === "function")) { return Promise.resolve(null); }
+          return App.getInfo().then(function (info) {
+            return {
+              id: info.id,
+              versionName: info.version,
+              versionCode: parseInt(info.build, 10) || 0
+            };
+          }, function () { return null; });
+        },
+        channelFor: function (id) {
+          return MSQUpdater.updateChannelFor(id);
+        },
+        /* 与手动 checkForUpdate() 完全相同的服务器解析、endpoint 与超时 */
+        fetchLatest: function (channel) {
+          var server = updateResolvedServer();
+          return (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
+            ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
+            : Promise.reject(new Error("无传输层"));
+        },
+        validate: function (manifest, expected) {
+          return MSQUpdater.validateManifest(manifest, expected);
+        },
+        compare: function (currentVersionCode, manifest) {
+          return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
+        },
+        /* 只在用户仍停在首屏且无弹窗时才自动切到更新页，绝不抢正在进行的操作 */
+        canShowNow: function () {
+          return currentViewId() === "view-menu" && !Modal.isOpen();
+        },
+        /* 弹出的就是手动检查结果为 available 时的同一页面与状态机 */
+        showPrompt: function (info, manifest) {
+          updateInfo = info;
+          updateManifest = manifest;
+          updatePhase = "available";
+          updateSetError("");
+          show("view-update");
+          renderUpdateView("");
+        },
+        debug: function (msg) { console.log("[startup-update] " + msg); }
+      })
+    : null;
+
+  /* 更新页返回 = 关闭更新提示：本次 session 不再自动弹（仅影响启动自动检查，
+     手动"检查更新"不受任何影响）。系统 Back 与页内返回按钮共用。 */
+  function handleUpdateBack() {
+    if (startupUpdateCtrl) { startupUpdateCtrl.markDismissed(); }
+    renderMenu();
+  }
+
   /* ---------------- 清除记录 ---------------- */
   function clearRecords() {
     Modal.confirm("清除学习记录",
@@ -2298,7 +2355,7 @@
     initSampleResultTools();
     initSampleQueue();
     $("btn-update").addEventListener("click", openUpdateView);
-    $("btn-update-back").addEventListener("click", renderMenu);
+    $("btn-update-back").addEventListener("click", handleUpdateBack);
     /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
@@ -2334,6 +2391,11 @@
     renderMenu();
     registerSW();
     registerSystemBack();
+    /* STARTUP_UPDATE_CHECK_V1：首屏渲染与监听器注册完成后短异步调度一次自动检查。
+       绝不 await、不阻塞首屏；后台→前台/相机返回/安装器返回不会再次进入本路径。 */
+    setTimeout(function () {
+      if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
+    }, 0);
   }).catch(function (err) {
     document.body.innerHTML = "";
     var box = document.createElement("div");
