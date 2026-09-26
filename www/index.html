@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1565c0">
+<meta name="theme-color" content="#F6F7F9">
 <title>营销安规刷题</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
@@ -13,27 +13,30 @@
 <body>
 <div id="app">
 
-  <!-- 主菜单 -->
+  <!-- 主菜单（UI_DESIGN_V1：品牌区 + 搜题主入口 + 练习模式 + 次级功能；无相机入口） -->
   <section id="view-menu" class="view">
-    <header class="menu-head">
+    <header class="brand">
+      <div class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5.5 6v5c0 4.4 2.8 7.6 6.5 9.5 3.7-1.9 6.5-5.1 6.5-9.5V6Z"/><path d="m9 11.8 2.2 2.2L15.5 9.5"/></svg></div>
       <h1>营销安规刷题</h1>
-      <p id="menu-bank" class="sub"></p>
-      <p id="menu-stats" class="sub"></p>
-      <p id="menu-exam" class="sub dim"></p>
+      <p class="brand-sub">内部工具 · 快速搜题与练习</p>
     </header>
+    <div id="search-entry-wrap" class="search-entry-wrap"></div>
+    <div id="menu-stats" class="home-stats"></div>
+    <div class="section-title">刷题练习</div>
     <div id="menu-buttons" class="grid"></div>
     <div class="menu-foot">
-      <button id="btn-update" class="linkbtn">检查更新</button>
-      <button id="btn-settings" class="linkbtn">模拟考试设置</button>
-      <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
+      <button id="btn-update" class="linkbtn" type="button">检查更新</button>
+      <span class="menu-foot-sep" aria-hidden="true"></span>
+      <button id="btn-settings" class="linkbtn" type="button">模拟考试设置</button>
+      <span class="menu-foot-sep" aria-hidden="true"></span>
+      <button id="btn-clear" class="linkbtn danger" type="button">清除学习记录</button>
     </div>
-    <p class="foot-note">数据仅保存在本机 · 完全离线 · 无网络请求</p>
   </section>
 
   <!-- 刷题 / 模拟考试答题 -->
   <section id="view-quiz" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-back" class="backbtn">‹ 返回</button>
+      <button id="btn-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div id="quiz-title" class="qtitle"></div>
     </header>
     <main id="quiz-scroll">
@@ -56,24 +59,28 @@
       </div>
     </main>
     <footer class="quiz-bar">
-      <button id="btn-prev" class="barbtn">上一题</button>
-      <button id="btn-submit" class="barbtn primary hidden">提交答案</button>
-      <button id="btn-jump" class="barbtn hidden">跳转</button>
-      <button id="btn-next" class="barbtn">下一题</button>
-      <button id="btn-handin" class="barbtn danger hidden">交卷</button>
+      <button id="btn-prev" class="barbtn" type="button">上一题</button>
+      <button id="btn-submit" class="barbtn primary hidden" type="button">提交答案</button>
+      <button id="btn-jump" class="barbtn hidden" type="button">跳转</button>
+      <button id="btn-next" class="barbtn" type="button">下一题</button>
+      <button id="btn-handin" class="barbtn danger hidden" type="button">交卷</button>
     </footer>
   </section>
 
-  <!-- 搜题 -->
+  <!-- 搜题（相机入口唯一位置：搜索框右侧） -->
   <section id="view-search" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-search-back" class="backbtn">‹ 返回</button>
+      <button id="btn-search-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div class="qtitle">搜题</div>
     </header>
     <div class="search-bar-wrap">
-      <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
-             enterkeyhint="search" inputmode="search">
-      <button id="btn-batch-photo" class="photo-btn" type="button" title="拍整页">📷</button>
+      <div class="search-field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+        <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
+               enterkeyhint="search" inputmode="search" aria-label="搜题">
+        <button id="btn-search-clear" class="field-clear hidden" type="button" aria-label="清除搜索词"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <button id="btn-batch-photo" class="camera-btn" type="button" aria-label="拍整页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5C4 7.4 4.9 6.5 6 6.5h1.6l1.2-1.7c.3-.4.7-.6 1.2-.6h4c.5 0 .9.2 1.2.6l1.2 1.7H18c1.1 0 2 .9 2 2v8.4c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2Z"/><circle cx="12" cy="12.6" r="3.4"/></svg></button>
     </div>
     <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
       <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
@@ -85,17 +92,22 @@
       <div id="search-history" class="search-history hidden"></div>
       <div id="search-count" class="search-count hidden"></div>
       <div id="search-results"></div>
+      <div id="search-empty" class="empty">
+        <div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg></div>
+        <p class="t">输入关键词搜题</p>
+        <p class="s">支持题干或选项关键词<br>也可以点相机，拍一整页试卷</p>
+      </div>
     </main>
   </section>
 
   <!-- 拍照搜题 -->
   <section id="view-photo" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-photo-back" class="backbtn">‹ 搜索</button>
+      <button id="btn-photo-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>搜索</span></button>
       <div class="qtitle">拍照搜题</div>
     </header>
     <main class="pad">
-      <button id="btn-take-photo" class="barbtn primary photo-take" type="button">📷 拍照搜题</button>
+      <button id="btn-take-photo" class="barbtn primary photo-take" type="button">拍照搜题</button>
       <p id="photo-status" class="search-count hidden"></p>
       <div id="photo-preview" class="hidden"></div>
       <div id="photo-results"></div>
@@ -105,7 +117,7 @@
   <!-- 整页答案（首页相机按钮 → 直接拍摄 → AUTO → 本页答案） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 首页</button>
+      <button id="btn-batch-results-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>首页</span></button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
@@ -122,7 +134,7 @@
   <!-- 搜题详情 -->
   <section id="view-search-detail" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-detail-back" class="backbtn">‹ 搜索</button>
+      <button id="btn-detail-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>搜索</span></button>
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
@@ -132,7 +144,7 @@
        不含凭据/签名下载地址/域名，普通用户不可见） -->
   <section id="view-devdiag" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
+      <button id="btn-devdiag-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div class="qtitle">开发者诊断</div>
     </header>
     <main id="devdiag-body" class="pad"></main>
@@ -141,7 +153,7 @@
   <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->
   <section id="view-update" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-update-back" class="backbtn">‹ 返回</button>
+      <button id="btn-update-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div class="qtitle">检查更新</div>
     </header>
     <main class="pad">
@@ -160,7 +172,7 @@
   <!-- 考试错题回顾 -->
   <section id="view-review" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-review-back" class="backbtn">‹ 成绩</button>
+      <button id="btn-review-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>成绩</span></button>
       <div id="review-title" class="qtitle"></div>
     </header>
     <main id="review-body" class="pad"></main>
@@ -172,6 +184,7 @@
 <script src="data/config.js"></script>
 <script src="data/questions.js"></script>
 <script src="data/explanations.js"></script>
+<script src="js/icons.js"></script>
 <script src="js/core.js"></script>
 <script src="js/sample-collector.js"></script>
 <script src="js/updater.js"></script>

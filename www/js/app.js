@@ -228,28 +228,26 @@
     return b;
   }
 
-  /* ---------------- 主菜单 ---------------- */
+  /* ---------------- 主菜单（UI_DESIGN_V1：品牌区 + 搜题主入口 + 降级统计 + 练习模式） ---------------- */
+  function homeStat(value, label) {
+    var d = document.createElement("div");
+    d.className = "home-stat";
+    var b = document.createElement("b");
+    b.textContent = String(value);
+    var s = document.createElement("span");
+    s.textContent = label;
+    d.appendChild(b); d.appendChild(s);
+    return d;
+  }
+
   function renderMenu() {
-        var total = bank.questions.length;
+    var total = bank.questions.length;
     var t = Store.totals();
-    var acc = t.a ? (t.c / t.a * 100).toFixed(1) + "%" : "—";
-    var cfg = examConfig();
-    var n = 0, s = 0;
-    MSQ.TYPE_ORDER.forEach(function (k) {
-      n += cfg[MSQ.COUNT_KEYS[k]]; s += cfg[MSQ.COUNT_KEYS[k]] * cfg[MSQ.SCORE_KEYS[k]];
-    });
-    $("menu-bank").textContent = "题库 " + total + " 题 ｜ 单选 " + byType.single.length +
-      " · 多选 " + byType.multi.length + " · 判断 " + byType.judge.length;
-    $("menu-stats").textContent = "累计作答 " + t.a + " 次 ｜ 正确率 " + acc +
-      " ｜ 错题本 " + Store.data.wrong.length + " 题";
-    $("menu-exam").textContent = "模拟考试：单选" + cfg.single_count + "×" + cfg.single_score +
-      "分 + 多选" + cfg.multi_count + "×" + cfg.multi_score + "分 + 判断" + cfg.judge_count +
-      "×" + cfg.judge_score + "分 = " + n + "题/" + s + "分";
 
     var box = $("menu-buttons");
     box.innerHTML = "";
-    // 搜题入口（VC16_UI_POLISH_V1：首页只保留搜题；拍摄走搜题页搜索框右侧 📷，
-    // 仍然直拍 → OCR → AUTO → 结果，无中转页）
+    // 搜题入口（VC16_UI_POLISH_V1：首页只保留搜题；拍摄走搜题页搜索框右侧相机钮，
+    // 仍然直拍 → OCR → AUTO → 结果，无中转页。UI_DESIGN_V1：入口为图标 + 文字卡片）
     if (!$("btn-search-entry")) {
       var searchWrap = document.createElement("div");
       searchWrap.className = "search-entry-wrap";
@@ -257,11 +255,22 @@
       searchBtn.type = "button";
       searchBtn.id = "btn-search-entry";
       searchBtn.className = "search-entry";
-      searchBtn.textContent = "🔍 搜题";
+      searchBtn.innerHTML = (typeof MSQIcons !== "undefined" ? MSQIcons.svg("search") : "") +
+        "<span>搜题</span>";
       searchBtn.addEventListener("click", openSearch);
       searchWrap.appendChild(searchBtn);
-      box.parentNode.insertBefore(searchWrap, box);
+      var entryWrap = $("search-entry-wrap") || box.parentNode;
+      entryWrap.appendChild(searchWrap);
     }
+    /* 统计行：视觉降级为展示性数据，不抢主入口 */
+    var stats = $("menu-stats");
+    if (stats) {
+      stats.innerHTML = "";
+      stats.appendChild(homeStat(total, "题库题数"));
+      stats.appendChild(homeStat(t.a, "累计作答"));
+      stats.appendChild(homeStat(Store.data.wrong.length, "错题本"));
+    }
+
     MODE_TITLES && Object.keys(MODE_TITLES).forEach(function (key) {
       var b = document.createElement("button");
       b.textContent = MODE_TITLES[key];
@@ -781,6 +790,9 @@
 
   function doSearch(raw) {
     var q = String(raw || "").trim();
+    /* 空状态：无关键词时展示引导（有历史时历史卡片同时可见） */
+    var emptyEl = $("search-empty");
+    if (emptyEl) { emptyEl.classList.toggle("hidden", q !== ""); }
     var all = MSQ.searchQuestions(searchIndex, q);
     var counts = MSQ.countSearchResultsByType(all);
     renderFilterBar(counts, q !== "");
@@ -2400,9 +2412,20 @@
     $("btn-update-back").addEventListener("click", handleUpdateBack);
     /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
     var searchInput = $("search-input");
+    var searchClear = $("btn-search-clear");
+    if (searchClear) {
+      searchClear.addEventListener("click", function () {
+        searchInput.value = "";
+        doSearch("");
+        renderHistory();
+        try { searchInput.focus({ preventScroll: true }); }
+        catch (e) { try { searchInput.focus(); } catch (e2) { } }
+      });
+    }
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
       var v = searchInput.value;
+      if (searchClear) { searchClear.classList.toggle("hidden", !v.trim()); }
       searchDebounceTimer = setTimeout(function () { doSearch(v); }, 60);
       if (!v.trim()) { renderHistory(); }
     });
