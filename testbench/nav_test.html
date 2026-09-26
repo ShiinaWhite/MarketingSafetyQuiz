@@ -109,20 +109,6 @@
     </main>
   </section>
 
-  <!-- 拍照搜题（单题） -->
-  <section id="view-photo" class="view hidden">
-    <header class="quiz-head">
-      <button id="btn-photo-back" class="backbtn">‹ 搜索</button>
-      <div class="qtitle">拍照搜题</div>
-    </header>
-    <main class="pad">
-      <button id="btn-take-photo" class="barbtn primary photo-take" type="button">📷 拍照搜题</button>
-      <p id="photo-status" class="search-count hidden"></p>
-      <div id="photo-preview" class="hidden"></div>
-      <div id="photo-results"></div>
-    </main>
-  </section>
-
   <!-- 整页答案（相机直拍直达，无中转页） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
@@ -413,22 +399,24 @@
         mt.indexOf("shiinalab") < 0 && mt.indexOf("17209403") < 0);
       check("UI16-5 不再自动导航到更新页（留在首页）",
         !vis("view-update") && vis("view-menu"));
-      /* 稍后 */
-      Array.from(document.querySelectorAll("#modal-root .barbtn"))
-        .find((b) => b.textContent === "稍后").click();
-      await sleep(120);
-      check("UI16-6 稍后 → Modal 消失且留在首页",
-        !modalVisible() && vis("view-menu") && !vis("view-update"));
-      /* 本 session 不再弹 */
-      document.getElementById("btn-search-entry").click();
-      await sleep(100);
-      window.handleBack();
-      await sleep(100);
-      await sleep(700);
-      check("UI16-7 本 session 不重复弹（导航一圈后仍无 Modal，检查仅 1 次）",
-        !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
-      check("UI16-7b Modal 仍可用 Back 关闭 = 稍后（onClose 标记 dismissed 已生效）",
-        window.__updateFetches === 1);
+      /* 稍后（keepmodal=1 为截图模式：保留 Modal 供人工/截图核对，跳过关闭类断言） */
+      if (Q.get("keepmodal") !== "1") {
+        Array.from(document.querySelectorAll("#modal-root .barbtn"))
+          .find((b) => b.textContent === "稍后").click();
+        await sleep(120);
+        check("UI16-6 稍后 → Modal 消失且留在首页",
+          !modalVisible() && vis("view-menu") && !vis("view-update"));
+        /* 本 session 不再弹 */
+        document.getElementById("btn-search-entry").click();
+        await sleep(100);
+        window.handleBack();
+        await sleep(100);
+        await sleep(700);
+        check("UI16-7 本 session 不重复弹（导航一圈后仍无 Modal，检查仅 1 次）",
+          !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
+        check("UI16-7b Modal 仍可用 Back 关闭 = 稍后（onClose 标记 dismissed 已生效）",
+          window.__updateFetches === 1);
+      }
     }
     /* ============ 基础套件：NAV/FB/CAP/UI16-1/2/3/10/11 + DIAG ============ */
     else {
@@ -456,6 +444,22 @@
         document.getElementById("view-menu").innerText.indexOf("拍整页搜题") < 0);
       check("UI16-1b 首页无诊断版本行（DIAG-7）",
         !document.getElementById("menu-version"));
+      /* —— UI18 偏差守卫（UI_REDESIGN_IMPLEMENTATION_V1 人工修订项） —— */
+      check("UI18-1 产品名保持「营销安规刷题」",
+        (document.querySelector("#view-menu h1") || {}).textContent === "营销安规刷题");
+      check("UI18-2 首页无任何相机入口/相机文案",
+        !document.querySelector("#view-menu .camera-btn") &&
+        !document.querySelector("#view-menu .photo-btn") &&
+        !document.getElementById("btn-camera-entry") &&
+        document.getElementById("view-menu").innerText.indexOf("相机") < 0 &&
+        document.getElementById("view-menu").innerText.indexOf("拍整页") < 0);
+      check("UI18-3 搜题页相机入口唯一（搜索框右侧）",
+        document.querySelectorAll("#view-search .camera-btn").length === 1);
+      const appAllText = document.getElementById("app").textContent;
+      check("UI18-4 全 UI 无「数据仅保存在本机」", appAllText.indexOf("数据仅保存在本机") < 0);
+      check("UI18-5 全 UI 无「完全离线」", appAllText.indexOf("完全离线") < 0);
+      check("UI18-6 全 UI 无「DEV BUILD ONLY」",
+        document.getElementById("app").textContent.indexOf("DEV BUILD ONLY") < 0);
       check("UI16-11 无新版 → 启动完全静默（无 Modal、不跳更新页）",
         !modalVisible() && vis("view-menu") && !vis("view-update") &&
         window.__updateFetches === 1);
@@ -541,6 +545,18 @@
         vis("view-batch-results") && window.__c.ocr === ocrBeforeSwitch &&
         window.__c.auto === autoBeforeSwitch + 1);
 
+      /* —— UI18-8/9：普通 UI 无耗时文本；run.json 耗时字段仍完整保留 —— */
+      const batchText = document.getElementById("batch-scroll").innerText;
+      check("UI18-8 整页普通 UI 无 OCR/分题/匹配/合计耗时",
+        !/识别 \d+ ?ms|分题 \d+ ?ms|匹配 \d+ ?ms|合计 \d+ ?ms/.test(batchText) &&
+        batchText.indexOf("ms ·") < 0 && batchText.indexOf("道题已识别") >= 0,
+        batchText.slice(0, 60));
+      const lastRun = window.__queuePersisted[window.__queuePersisted.length - 1];
+      check("UI18-9 run.json 耗时字段仍保留（timing 采集不删）",
+        !!lastRun && !!lastRun.runJson.timing &&
+        typeof lastRun.runJson.timing.ocrMs === "number" &&
+        typeof lastRun.runJson.timing.totalMs === "number");
+
       /* —— UI16-10：手动检查更新行为不变（无新版 → 已是最新版） —— */
       window.handleBack();   /* 整页答案 → 首页 */
       await sleep(100);
@@ -600,6 +616,14 @@
         ddText.slice(0, 100));
       check("DIAG17-1b 标题为「开发者诊断」",
         document.querySelector("#view-devdiag .qtitle").textContent === "开发者诊断");
+      /* —— UI18-6b/7：诊断页「仅开发版」badge、无 DEV BUILD、可见文字全中文 —— */
+      check("UI18-7 诊断页「仅开发版」badge 且无 DEV BUILD 字样",
+        document.getElementById("devdiag-body").innerText.indexOf("仅开发版") >= 0 &&
+        document.getElementById("devdiag-body").innerText.indexOf("DEV BUILD") < 0);
+      check("UI18-10 stable 渠道无诊断入口（diagnosticsChannel 映射不变）",
+        window.MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+        window.MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+        window.MSQSample.diagnosticsChannel("com.other.app") === null);
       check("DIAG-2b 整行点击均有效（同一行上 7 次点击全部计数）",
         vis("view-devdiag"));
       /* DIAG-6：Back → 检查更新页（按钮 + 系统 Back 双路） */

@@ -841,7 +841,7 @@
       meta.className = "search-meta";
       var typeBadge = document.createElement("span");
       typeBadge.className = "u-badge primary";
-      typeBadge.textContent = r.type_name;
+      typeBadge.textContent = r.type_name || MSQ.TYPE_NAMES[r.type] || "";
       meta.appendChild(typeBadge);
       var idBadge = document.createElement("span");
       idBadge.className = "u-badge";
@@ -1025,11 +1025,6 @@
         renderMenu();
   }
 
-  /* 拍照搜题返回 → 搜题列表 */
-  function handlePhotoBack() {
-        show("view-search");
-  }
-
   /* 搜题详情返回：按来源回父页面。整页答案场景下 batch results DOM 从未销毁
      （show 只切换 hidden class），不重渲染、不重算，只恢复导航与滚动位置。
      左上角返回按钮与 Android 系统 Back（handleBack）共用本函数。 */
@@ -1062,7 +1057,6 @@
       case "view-update": handleUpdateBack(); return;
       case "view-devdiag": openUpdateView(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
-      case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
       case "view-result": E = null; renderMenu(); return;
@@ -1082,8 +1076,10 @@
     }
   }
 
-  /* ---------------- 拍照搜题（本地相机 + 本地 OCR + 本地匹配，零上传） ---------------- */
-  var photoIndex = null;
+  /* ---------------- 相机插件公共辅助（整页拍题主链使用） ----------------
+     DEAD_PAGE_CLEANUP_UI18：旧「拍照搜题（单题）」#view-photo 不可达死页面已删除
+     （openPhotoSearch/renderPhotoResults/startPhotoSearch 全仓无有效调用点；
+     core.js 的 searchQuestionsByOcr/ocrConfidence 纯函数与其单测保留不受影响）。 */
 
   function getPlugin(name) {
     return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
@@ -1097,147 +1093,6 @@
     else { msg = "OCR插件未加载"; }
     var bridge = !!window.Capacitor;
     return msg + "（Camera=" + !!Camera + " Ocr=" + !!Ocr + " 桥=" + bridge + "）";
-  }
-
-  function setPhotoStatus(text) {
-    var el = $("photo-status");
-    if (el) { el.textContent = text; el.classList.remove("hidden"); }
-  }
-
-  function openPhotoSearch() {
-    show("view-photo");
-    var st = $("photo-status");
-    if (st) {
-      st.textContent = "尽量只拍一道题，并保证题干清晰完整";
-      st.classList.remove("hidden");
-    }
-    $("photo-preview").classList.add("hidden");
-    $("photo-results").innerHTML = "";
-  }
-
-  function renderPhotoResults(ocrText, matches, timing) {
-    var box = $("photo-results");
-    box.innerHTML = "";
-    var conf = MSQ.ocrConfidence(matches);
-    var head = document.createElement("div");
-    head.className = "search-count";
-    if (conf.level === "confident") {
-      head.textContent = "最佳匹配：第" + matches[0].id + " 题" +
-        (timing ? "（识别 " + timing.ocrMs + "ms · 匹配 " + timing.matchMs + "ms）" : "");
-    } else if (conf.level === "candidates") {
-      head.textContent = "可能是以下题目（识别 " + (timing ? timing.ocrMs + "ms" : "—") +
-        " · 匹配 " + (timing ? timing.matchMs + "ms" : "—") + "）";
-    } else {
-      head.textContent = "没有找到可靠匹配，请重拍或手动输入关键词";
-    }
-    box.appendChild(head);
-    // OCR 识别文字预览（默认折叠，区分"识别错"与"匹配错"）
-    var pv = document.createElement("button");
-    pv.type = "button";
-    pv.className = "explain-btn";
-    pv.textContent = "查看识别文字 ▾";
-    var pvBody = document.createElement("div");
-    pvBody.className = "explain-body hidden";
-    var pvSec = document.createElement("div");
-    pvSec.className = "explain-sec";
-    var pvText = document.createElement("p");
-    pvText.className = "explain-text";
-    pvText.textContent = ocrText || "（无）";
-    pvSec.appendChild(pvText);
-    pvBody.appendChild(pvSec);
-    pv.addEventListener("click", function () {
-      var open = pvBody.classList.toggle("hidden") === false;
-      pv.textContent = open ? "收起识别文字 ▴" : "查看识别文字 ▾";
-    });
-    box.appendChild(pv);
-    box.appendChild(pvBody);
-    // 结果卡片：非常确定只给 1 条；否则 Top 3~5
-    var limit = conf.level === "confident" ? 1 : Math.min(5, matches.length);
-    matches.slice(0, limit).forEach(function (m, idx) {
-      var item = document.createElement("button");
-      item.type = "button";
-      item.className = "search-item";
-      var typeEl = document.createElement("div");
-      typeEl.className = "s-type";
-      typeEl.textContent = (conf.level === "confident" ? "最佳匹配" : "候选 " + (idx + 1)) +
-        " ｜ " + m.type_name + " ｜ 序号 " + m.id;
-      item.appendChild(typeEl);
-      var stemEl = document.createElement("div");
-      stemEl.className = "s-stem";
-      stemEl.textContent = m.stem;
-      item.appendChild(stemEl);
-      item.addEventListener("click", function () { openSearchDetail(m.id); });
-      box.appendChild(item);
-    });
-  }
-
-  async function startPhotoSearch() {
-    var Camera = getPlugin("Camera");
-    var Ocr = getPlugin("Ocr");
-    if (!Camera || !Ocr) {
-      setPhotoStatus(photoPluginMissingMessage(Camera, Ocr));
-      return;
-    }
-    setPhotoStatus("正在打开相机…");
-    var photo;
-    try {
-      photo = await Camera.getPhoto({
-        quality: 70,
-        width: 1600,
-        resultType: "dataUrl",
-        source: "CAMERA",
-        saveToGallery: false,
-        allowEditing: false
-      });
-    } catch (e) {
-      var msg = String((e && e.message) || e);
-      setPhotoStatus(/permission|denied/i.test(msg)
-        ? "无法使用相机，请授予相机权限后重试"
-        : "未拍摄照片（" + msg.slice(0, 40) + "）");
-      return;
-    }
-    setPhotoStatus("正在识别文字…");
-    var totalStart = performance.now();
-    var ocrMs = 0;
-    var text = "";
-    try {
-      var b64 = String(photo.dataUrl || "").split(",")[1] || "";
-      var res = await Ocr.recognizeText({ base64: b64 });
-      text = (res && res.text) || "";
-      ocrMs = (res && res.ms) || 0;
-    } catch (e) {
-      setPhotoStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
-      return;
-    }
-    if (!text.trim()) {
-      setPhotoStatus("未识别到清晰文字，请重新拍摄");
-      return;
-    }
-    var m0 = performance.now();
-    var matches = MSQ.searchQuestionsByOcr(photoIndex, text);
-    var matchMs = Math.round(performance.now() - m0);
-    if (!matches.length) {
-      setPhotoStatus("没有找到可靠匹配，请重拍或手动输入关键词");
-      var pv = $("photo-preview");
-      if (pv) {
-        pv.innerHTML = "";
-        var btn = document.createElement("button");
-        btn.type = "button"; btn.className = "explain-btn"; btn.textContent = "查看识别文字 ▾";
-        var bd = document.createElement("div"); bd.className = "explain-body hidden";
-        var sc = document.createElement("div"); sc.className = "explain-sec";
-        var tx = document.createElement("p"); tx.className = "explain-text"; tx.textContent = text;
-        sc.appendChild(tx); bd.appendChild(sc); pv.appendChild(btn); pv.appendChild(bd);
-        btn.addEventListener("click", function () {
-          var open = bd.classList.toggle("hidden") === false;
-          btn.textContent = open ? "收起识别文字 ▴" : "查看识别文字 ▾";
-        });
-        pv.classList.remove("hidden");
-      }
-      return;
-    }
-    setPhotoStatus("识别完成（全程本地，图片不保存不上传）");
-    renderPhotoResults(text, matches, { ocrMs: ocrMs, matchMs: matchMs,
-      totalMs: Math.round(performance.now() - totalStart) });
   }
 
   /* ---------------- 整页拍照搜题（SIMPLIFY_CAPTURE_FLOW_V1 收口后的唯一相机主链） ----------------
@@ -1315,7 +1170,8 @@
         rank.textContent = String(i + 1);
         var stem = document.createElement("span");
         stem.className = "cand-stem";
-        stem.textContent = "第" + m.id + "题 ｜ " + m.type_name + " ｜ " + m.stem.slice(0, 40);
+        stem.textContent = "第" + m.id + "题 ｜ " + (m.type_name || MSQ.TYPE_NAMES[m.type] || "") +
+          " ｜ " + m.stem.slice(0, 40);
         var score = document.createElement("span");
         score.className = "cand-score mono";
         score.textContent = String(m.score);
@@ -2662,8 +2518,6 @@
     // 搜题
     $("btn-search-back").addEventListener("click", handleSearchBack);
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
-    $("btn-take-photo").addEventListener("click", startPhotoSearch);
-    $("btn-photo-back").addEventListener("click", handlePhotoBack);
     $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
     $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });
@@ -2709,7 +2563,6 @@
     bank = data;
     byType = MSQ.indexByType(bank.questions);
     searchIndex = MSQ.buildSearchIndex(bank.questions);
-    photoIndex = MSQ.buildOcrIndex(bank.questions);
     batchIndex = MSQ.buildBatchOcrIndex(bank.questions);
     batchIndexById = {};
     batchIndex.forEach(function (it) { batchIndexById[it.id] = it; });
