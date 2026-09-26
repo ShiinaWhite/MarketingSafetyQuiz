@@ -3,6 +3,15 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+
+/* DEV_TO_MAIN_SYNC_V1：源码守卫的行尾鲁棒性 —— merge/checkout 会按 autocrlf
+   把工作区写成 CRLF，守卫里的多行字符串模式一律按 LF 匹配（只影响本测试
+   的文本读取；JSON.parse 等对 \r\n 不敏感）。 */
+const _origReadFileSync = fs.readFileSync.bind(fs);
+fs.readFileSync = function (p, opts) {
+  const c = _origReadFileSync(p, opts);
+  return (typeof c === "string") ? c.replace(/\r\n/g, "\n") : c;
+};
 const MSQ = require("./www/js/core.js");
 
 const fails = [];
