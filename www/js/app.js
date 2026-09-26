@@ -105,6 +105,7 @@
   /* ---------------- 弹窗 ---------------- */
   var Modal = {
     root: null,
+    onClose: null,   /* 当前弹窗关闭回调（VC16：启动更新 Modal 用 Back 关闭 = 稍后） */
     init: function () { this.root = $("modal-root"); },
     isOpen: function () { return !this.root.classList.contains("hidden"); },
     open: function (build) {
@@ -115,7 +116,15 @@
       this.root.appendChild(box);
       this.root.classList.remove("hidden");
     },
-    close: function () { this.root.classList.add("hidden"); this.root.innerHTML = ""; },
+    close: function () {
+      this.root.classList.add("hidden");
+      this.root.innerHTML = "";
+      if (this.onClose) {
+        var cb = this.onClose;
+        this.onClose = null;
+        cb();
+      }
+    },
     alert: function (title, msg, onOk) {
       this.open(function (box) {
         var h = document.createElement("h3"); h.textContent = title || "提示"; box.appendChild(h);
@@ -239,8 +248,8 @@
 
     var box = $("menu-buttons");
     box.innerHTML = "";
-    // 搜题 + 拍题入口（SIMPLIFY_CAPTURE_FLOW_V1：两大主流程直接收口在首页，
-    // 相机按钮跳过一切中转页，直接进入拍摄 → OCR → AUTO → 结果主链）
+    // 搜题入口（VC16_UI_POLISH_V1：首页只保留搜题；拍摄走搜题页搜索框右侧 📷，
+    // 仍然直拍 → OCR → AUTO → 结果，无中转页）
     if (!$("btn-search-entry")) {
       var searchWrap = document.createElement("div");
       searchWrap.className = "search-entry-wrap";
@@ -251,13 +260,6 @@
       searchBtn.textContent = "🔍 搜题";
       searchBtn.addEventListener("click", openSearch);
       searchWrap.appendChild(searchBtn);
-      var cameraBtn = document.createElement("button");
-      cameraBtn.type = "button";
-      cameraBtn.id = "btn-camera-entry";
-      cameraBtn.className = "search-entry camera-entry";
-      cameraBtn.textContent = "📷 拍整页搜题";
-      cameraBtn.addEventListener("click", function () { startBatchPageSearch(); });
-      searchWrap.appendChild(cameraBtn);
       box.parentNode.insertBefore(searchWrap, box);
     }
     MODE_TITLES && Object.keys(MODE_TITLES).forEach(function (key) {
@@ -1000,7 +1002,7 @@
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
       case "view-update": handleUpdateBack(); return;
-      case "view-devdiag": renderMenu(); return;
+      case "view-devdiag": openUpdateView(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
@@ -1795,35 +1797,26 @@
     }
   }
 
-  /* ---------------- DEV 隐藏诊断（SIMPLIFY_CAPTURE_FLOW_V1） ----------------
-     仅 DEV 构建：menu-foot 版本行 3 秒内 7 连击进入；只展示非敏感队列诊断
-     （计数/字节/janitor 记录），提供 Run janitor now / Retry queue now。
-     绝不显示任何凭据、签名下载地址或服务器域名（test_core 有内容守卫）；
-     MAIN（stable）构建无版本行、无入口（CAP-S19/20）。 */
+  /* ---------------- DEV 隐藏诊断（VC16_UI_POLISH_V1） ----------------
+     入口 = 检查更新页的「当前版本：…」整行，3 秒内 7 连击；仅 DEV 构建绑定手势。
+     MAIN：不绑定、不响应、不暴露（openUpdateView 内 diagnosticsChannel 早退）。
+     只展示非敏感队列诊断（计数/字节/janitor 记录），绝不显示任何凭据、
+     签名下载地址或服务器域名（test_core 有内容守卫）。 */
   var devDiagTaps = { count: 0, firstAt: 0 };
 
-  function initDevDiagnostics() {
-    var App = getPlugin("App");
-    if (!(App && typeof App.getInfo === "function")) { return; }
-    App.getInfo().then(function (info) {
-      var el = $("menu-version");
-      if (!el || typeof MSQSample === "undefined" || !MSQSample ||
-          MSQSample.diagnosticsChannel(info.id) !== "dev") {
-        return;   /* MAIN：不渲染版本行，不存在入口 */
+  /* 整行 7 连击绑定：el 是块级 <p>，整行都是点击区（DIAG-2） */
+  function bindDevDiagTap(el) {
+    if (!el) { return; }
+    el.addEventListener("click", function () {
+      var now = Date.now();
+      if (now - devDiagTaps.firstAt > 3000) { devDiagTaps.count = 0; }
+      if (devDiagTaps.count === 0) { devDiagTaps.firstAt = now; }
+      devDiagTaps.count += 1;
+      if (devDiagTaps.count >= 7) {
+        devDiagTaps.count = 0;
+        openDevDiagnostics();
       }
-      el.textContent = "版本 " + info.version + "（" + info.build + "）";
-      el.classList.remove("hidden");
-      el.addEventListener("click", function () {
-        var now = Date.now();
-        if (now - devDiagTaps.firstAt > 3000) { devDiagTaps.count = 0; }
-        if (devDiagTaps.count === 0) { devDiagTaps.firstAt = now; }
-        devDiagTaps.count += 1;
-        if (devDiagTaps.count >= 7) {
-          devDiagTaps.count = 0;
-          openDevDiagnostics();
-        }
-      });
-    }, function () { /* 读不到应用信息：无入口 */ });
+    });
   }
 
   function openDevDiagnostics() {
@@ -1959,7 +1952,9 @@
     }
   }
 
-  function openUpdateView() {
+  /* autostart=true：VC16 启动 Modal 的「立即更新」入口 —— 打开页面后自动跑一次
+     既有 checkForUpdate()，直接落到 available/下载安装状态（同一套下载安装链） */
+  function openUpdateView(autostart) {
     show("view-update");
     updateSetError("");
     updatePhase = "idle";
@@ -1977,6 +1972,14 @@
       };
       renderUpdateView("当前版本：" + updateInfo.versionName +
         "（versionCode " + updateInfo.versionCode + "）");
+      /* VC16：DEV 隐藏诊断入口 = 「当前版本」整行 7 连击（仅 DEV 构建绑定）。
+         整行 <p> 是块级元素，全宽可点（DIAG-2）；MAIN 直接跳过，不绑不响应。 */
+      if (typeof MSQSample !== "undefined" && MSQSample &&
+          MSQSample.diagnosticsChannel(updateInfo.id) === "dev") {
+        var statusEl = $("update-body").querySelector("p.dim");
+        bindDevDiagTap(statusEl);
+      }
+      if (autostart === true) { checkForUpdate(); }
     }, function () {
       renderUpdateView("无法读取应用信息");
     });
@@ -2174,22 +2177,55 @@
         compare: function (currentVersionCode, manifest) {
           return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
         },
-        /* 只在用户仍停在首屏且无弹窗时才自动切到更新页，绝不抢正在进行的操作 */
+        /* 只在用户仍停在首屏且无弹窗时提示，绝不抢正在进行的操作 */
         canShowNow: function () {
           return currentViewId() === "view-menu" && !Modal.isOpen();
         },
-        /* 弹出的就是手动检查结果为 available 时的同一页面与状态机 */
+        /* VC16_UI_POLISH_V1：不再自动跳转更新页，改为首页上的轻量 Modal。
+           稍后/立即更新/系统 Back 都经 Modal.close → onClose 标记 dismissed，
+           本次 session 不再自动弹；真正 cold start 才会重新提醒。 */
         showPrompt: function (info, manifest) {
-          updateInfo = info;
-          updateManifest = manifest;
-          updatePhase = "available";
-          updateSetError("");
-          show("view-update");
-          renderUpdateView("");
+          showStartupUpdateModal(info, manifest);
         },
         debug: function (msg) { console.log("[startup-update] " + msg); }
       })
     : null;
+
+  /* 启动更新提示 Modal（VC16_UI_POLISH_V1）：复用现有 HTML/CSS Modal 组件，
+     不是系统 AlertDialog，也不新增 native plugin。
+     内容只有版本名与简短 notes —— 绝不含 apkUrl/fallback/域名/SHA/size/诊断。
+     立即更新 → openUpdateView(true) 进入既有检查/下载/安装页（同一套
+     UpdatePlugin/SHA256/size/package/versionCode/signer 与 CDN/fallback 链）。 */
+  function showStartupUpdateModal(info, manifest) {
+    if (!info || !manifest) { return; }
+    var notes = (typeof manifest.notes === "string") ? manifest.notes.trim() : "";
+    if (notes.length > 60) { notes = notes.slice(0, 60) + "…"; }   /* 防弹窗过高 */
+    Modal.open(function (box) {
+      var h = document.createElement("h3");
+      h.textContent = "发现新版本";
+      box.appendChild(h);
+      var m = document.createElement("div");
+      m.className = "msg";
+      m.style.whiteSpace = "pre-line";
+      m.textContent = "最新版本：" + manifest.versionName +
+        "\n当前版本：" + info.versionName +
+        (notes ? "\n更新内容：" + notes : "");
+      box.appendChild(m);
+      var btns = document.createElement("div");
+      btns.className = "btns";
+      btns.appendChild(mkBtn("稍后", "barbtn cancel", function () { Modal.close(); }));
+      btns.appendChild(mkBtn("立即更新", "barbtn ok", function () {
+        Modal.close();
+        openUpdateView(true);
+      }));
+      box.appendChild(btns);
+    });
+    /* 任何关闭路径（稍后 / Back / 立即更新）都算"本次 session 已处理"。
+       遮罩点击本就不关闭（Modal 无遮罩点击处理器），避免误触。 */
+    Modal.onClose = function () {
+      if (startupUpdateCtrl) { startupUpdateCtrl.markDismissed(); }
+    };
+  }
 
   /* 更新页返回 = 关闭更新提示：本次 session 不再自动弹（仅影响启动自动检查，
      手动"检查更新"不受任何影响）。系统 Back 与页内返回按钮共用。 */
@@ -2292,11 +2328,10 @@
     $("btn-photo-back").addEventListener("click", handlePhotoBack);
     $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
-    $("btn-devdiag-back").addEventListener("click", renderMenu);
+    $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });
     initSampleResultTools();
     initSampleQueue();
-    initDevDiagnostics();
-    $("btn-update").addEventListener("click", openUpdateView);
+    $("btn-update").addEventListener("click", function () { openUpdateView(); });
     $("btn-update-back").addEventListener("click", handleUpdateBack);
     /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
     var searchInput = $("search-input");

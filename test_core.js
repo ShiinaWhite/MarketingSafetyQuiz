@@ -1585,9 +1585,11 @@ function runSucOrchestrationTests() {
       check("SUC-12c 启动校验/比较直接调用 MSQUpdater.validateManifest/checkUpdateState",
         startSec.includes("MSQUpdater.validateManifest(manifest, expected)") &&
         startSec.includes("MSQUpdater.checkUpdateState(currentVersionCode, manifest)"));
-      check("SUC-12d 启动弹窗 = 手动 available 同一状态机（updatePhase=available + renderUpdateView）",
-        startSec.includes('updatePhase = "available";') &&
-        startSec.includes("renderUpdateView(\"\")"));
+      check("SUC-12d 启动提示为 Modal（VC16），「立即更新」进入既有更新页与下载链",
+        startSec.includes("function showStartupUpdateModal") &&
+        startSec.includes("Modal.open(function (box)") &&
+        startSec.includes("openUpdateView(true)") &&
+        !startSec.includes('show("view-update")'));
       const dlIdx = appSrc.indexOf("function startUpdateDownload()");
       const dl = appSrc.slice(dlIdx, appSrc.indexOf("function afterDownloadVerified", dlIdx));
       check("SUC-12e 下载/回退/校验仍走同一 UpdatePlugin 路径（resolveApkUrl/shouldTryFallback/verifier）",
@@ -1608,12 +1610,11 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
   const modelSrc = fs.readFileSync(path.join(__dirname,
     "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
 
-  /* —— CAP-S1 首页相机直接启动现有拍摄流程 —— */
-  check("CAP-S1a 首页新增相机入口按钮，点击直接调用 startBatchPageSearch",
-    appSrc.includes('cameraBtn.id = "btn-camera-entry";') &&
-    appSrc.includes('cameraBtn.addEventListener("click", function () { startBatchPageSearch(); });'));
-  check("CAP-S1b 搜题页相机按钮保留且同样直拍",
-    indexSrc.includes('id="btn-batch-photo"') &&
+  /* —— UI16-1 首页无「拍整页搜题」大按钮；UI16-2 搜题页相机仍直拍 —— */
+  check("UI16-1 首页相机入口已删除（VC16），只保留搜题入口",
+    !appSrc.includes("btn-camera-entry") && !appSrc.includes("拍整页搜题") &&
+    appSrc.includes('searchBtn.id = "btn-search-entry";'));
+  check("UI16-2 搜题框右侧相机仍直接调用 startBatchPageSearch",
     appSrc.includes('$("btn-batch-photo").addEventListener("click", startBatchPageSearch);'));
 
   /* —— CAP-S2 不再导航到旧整页拍照页面 —— */
@@ -1687,22 +1688,58 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     !indexSrc.includes("shiinalab") && !appSrc.includes("shiinalab") &&
     !indexSrc.includes("apk.shiinalab") && !indexSrc.includes("update.shiinalab"));
 
-  /* —— CAP-S19/S20 DEV 隐藏诊断 —— */
-  check("CAP-S19a diagnosticsChannel 纯函数：dev/stable/其他",
-    MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+  /* —— DIAG 系列：DEV 隐藏诊断入口 = 检查更新页「当前版本」整行 7 连击 —— */
+  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（仅 dev 渠道；块级整行可点）",
+    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) === "dev"') &&
+    appSrc.indexOf('renderUpdateView("当前版本："') < appSrc.indexOf("bindDevDiagTap(statusEl)") &&
+    appSrc.includes("function bindDevDiagTap(el)") &&
+    appSrc.includes("devDiagTaps.count >= 7"));
+  check("DIAG-3/4 计数逻辑：>=7 才进入，超 3 秒重置",
+    appSrc.includes("now - devDiagTaps.firstAt > 3000") &&
+    appSrc.includes("if (devDiagTaps.count >= 7) {"));
+  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel 非 dev 直接跳过）",
+    appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
-    MSQSample.diagnosticsChannel("com.other.app") === null &&
-    MSQSample.diagnosticsChannel(undefined) === null);
-  check("CAP-S19b DEV 诊断入口：版本行仅 dev 渲染，7 连击进入 view-devdiag",
-    appSrc.includes('MSQSample.diagnosticsChannel(info.id) !== "dev"') &&
-    appSrc.includes("devDiagTaps.count >= 7") &&
-    appSrc.includes('show("view-devdiag");') &&
-    indexSrc.includes('id="view-devdiag"') && indexSrc.includes('id="menu-version"'));
-  check("CAP-S20 MAIN 无诊断入口（stable 早退，不渲染版本行不绑点击）",
-    appSrc.includes("return;   /* MAIN：不渲染版本行，不存在入口 */") &&
-    appSrc.includes("openDevDiagnostics") &&
-    /diagnosticsChannel\(info\.id\) !== "dev"[\s\S]{0,120}return;/.test(
-      appSrc.replace(/\r?\n/g, "\n")));
+    MSQSample.diagnosticsChannel("com.other.app") === null);
+  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路）",
+    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });') &&
+    appSrc.includes('case "view-devdiag": openUpdateView(); return;'));
+  check("DIAG-7 首页不再存在诊断版本行（menu-version 全删）",
+    !indexSrc.includes("menu-version") && !appSrc.includes("menu-version") &&
+    !appSrc.includes("initDevDiagnostics"));
+
+  /* —— UI16-4~9/13 启动更新 Modal（源码守卫；行为在 nav_test 实测） —— */
+  {
+    const mIdx = appSrc.indexOf("function showStartupUpdateModal");
+    const modalFn = mIdx > 0
+      ? appSrc.slice(mIdx, appSrc.indexOf("function handleUpdateBack", mIdx))
+      : "";
+    check("UI16-4 Modal 内容只有版本信息与简短 notes（≤60 字截断）",
+      modalFn.includes('"发现新版本"') && modalFn.includes('"最新版本："') &&
+      modalFn.includes("当前版本：") && modalFn.includes("notes.length > 60"));
+    check("UI16-4b Modal 绝不含 apkUrl/fallback/域名/SHA/size/诊断字段",
+      !/apkUrl|fallbackApkUrl|sha256|shiinalab|versionCode/.test(modalFn.replace(/[^;]*notes[^;]*;/g, "")) &&
+      !modalFn.includes("manifest.size") && !modalFn.includes("manifest.sha256"));
+    check("UI16-5 启动不再自动导航（showPrompt 只调 Modal；Modal 内无页面跳转）",
+      appSrc.includes("showPrompt: function (info, manifest) {\n          showStartupUpdateModal(info, manifest);\n        }") &&
+      !modalFn.includes('show("') && !modalFn.includes("renderMenu"));
+    check("UI16-6 稍后 = 仅关闭 Modal 留在当前页（不导航）",
+      /稍后[^;]*barbtn cancel[^;]*function \(\) \{ Modal\.close\(\); \}/.test(modalFn.replace(/\r?\n/g, "")));
+    check("UI16-7/8 任何关闭路径都 markDismissed（本 session 不再弹；Back=稍后）",
+      modalFn.includes("Modal.onClose = function () {") &&
+      modalFn.includes("markDismissed()") &&
+      appSrc.includes("var cb = this.onClose;") &&
+      appSrc.includes("if (Modal.isOpen()) { Modal.close(); return; }"));
+    check("UI16-9 立即更新 → openUpdateView(true)（autostart 复用既有 checkForUpdate/下载链）",
+      modalFn.includes("openUpdateView(true)") &&
+      appSrc.includes("if (autostart === true) { checkForUpdate(); }") &&
+      appSrc.includes('$("btn-update").addEventListener("click", function () { openUpdateView(); });'));
+    check("UI16-13 抢操作守卫：canShowNow 仍是「首屏 + 无弹窗」",
+      appSrc.includes("currentViewId() === \"view-menu\" && !Modal.isOpen()"));
+    check("UI16 遮罩不关闭（modal-root 无点击关闭处理器）",
+      !appSrc.includes('this.root.addEventListener("click"') &&
+      !/modal-root[\s\S]{0,120}addEventListener\("click"/.test(appSrc));
+  }
   check("CAP-S20b 诊断内容守卫：无 token/URL/Authorization 字段",
     !appSrc.includes("presignedPutUrl") && !appSrc.includes("Authorization") &&
     !appSrc.includes("MSQ_SAMPLE_WRITE_TOKEN") &&
