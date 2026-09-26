@@ -1415,9 +1415,10 @@ const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
 /* 决策矩阵（SUC-2~6/9 的判定核心，同步纯函数） */
 {
   const d = (check, flags) => MSQStartupUpdate.decideStartupPrompt(check, flags || {});
-  check("SUC-2 决策：latest.versionCode > current（available）且首屏空闲 → 弹更新提示",
-    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === true &&
-    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "newer-version");
+  check("SUC-2 决策（DEFERRED）：fresh available → 本 session 永不弹（deferred 到下次冷启动）",
+    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === false &&
+    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "fresh-discovery-deferred-next-cold-start" &&
+    d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
   check("SUC-3 决策：latest == current（latest）→ 完全静默",
     d({ ok: true, state: "latest" }).prompt === false);
   check("SUC-4 决策：latest < current（downgrade）→ 完全静默",
@@ -1429,9 +1430,9 @@ const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
     d({ ok: false, error: "更新信息 versionCode 无效" }).prompt === false);
   check("SUC-9 决策：用户已关闭提示 → 本次 session 不再自动弹",
     d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
-  check("SUC-9b 决策：用户已离开首屏/有弹窗（ui-busy）→ 不抢当前操作",
+  check("SUC-9b 决策（DEFERRED）：fresh 路径不再读 canShowNow（页面位置只影响 cache prompt 门）",
     d({ ok: true, state: "available" }, { canShowNow: false }).prompt === false &&
-    d({ ok: true, state: "available" }, { canShowNow: false }).reason === "ui-busy");
+    d({ ok: true, state: "available" }, {}).reason === "fresh-discovery-deferred-next-cold-start");
 }
 
 /* 编排测试：注入 fake io，驱动与 app.js 完全相同的 controller 代码 */
@@ -1482,18 +1483,14 @@ function runSucOrchestrationTests() {
         io.logs.some((l) => l.includes("already ran this session")));
     }
 
-    /* SUC-2 有更新 → 弹既有更新提示；SUC-12 manifest 原样透传 */
+    /* SUC-2（DEFERRED_PROMPT_V1）有更新 → fresh discovery 静默完成，本 session 不弹 */
     {
       const io = makeIo(); io.manifest = sucManifest(15);
       const c = SU_CREATE(io);
       c.trigger(); await flush();
-      check("SUC-2 latest(15) > current(14) → 弹出更新提示一次",
-        io.calls.prompt === 1 && io.promptedWith.m.versionCode === 15 &&
-        io.promptedWith.info.versionCode === 14);
-      check("SUC-12a 启动路径把校验通过的 manifest 原样交给既有更新 UI（apkUrl/fallback/size 不变）",
-        io.promptedWith.m === io.manifest &&
-        io.promptedWith.m.apkUrl === sucManifest(15).apkUrl &&
-        io.promptedWith.m.fallbackApkUrl === "/api/update/dev/apk");
+      check("SUC-2 latest(15) > current(14) → fresh discovery 静默（本 session 不弹）",
+        io.calls.prompt === 0 &&
+        io.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
     }
 
     /* SUC-3/4 无更新/降级 → 完全静默 */
@@ -1562,8 +1559,8 @@ function runSucOrchestrationTests() {
         appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
         appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then(") &&
         appSrc.includes("startupUpdateCtrl.markUiReady();"));
-      check("SUC17-2b canShowNow 含 modalUiReady 门（未就绪绝不展示）",
-        appSrc.includes("return modalUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
+      check("SUC17-2b cache prompt 门：modalUiReady + 首页 + 无弹窗（不就绪绝不展示）",
+        appSrc.includes("!modalUiReady || currentViewId() !== \"view-menu\" || Modal.isOpen()"));
     }
 
     /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
@@ -1573,8 +1570,8 @@ function runSucOrchestrationTests() {
       c.trigger(); await flush();
       c.markDismissed();
       const second = c.trigger(); await flush();
-      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹",
-        io.calls.prompt === 1 && second.ran === false &&
+      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹（fresh 路径恒静默）",
+        io.calls.prompt === 0 && second.ran === false &&
         c.flags().dismissed === true);
     }
 
@@ -1619,49 +1616,75 @@ function runSucOrchestrationTests() {
 
     /* ====== VC17：启动检查提前并行（fetch 与初始化重叠，就绪后才展示） ====== */
     {
-      /* SUC17-3 fetch 先完成 → menu ready 后立即 Modal */
+      /* SUC17-3（DEFERRED）fetch 先完成（用户在别处/未就绪）→ discovery 静默，不弹不暂存 */
       const ioA = makeIo(); ioA.manifest = sucManifest(15);   /* 对 current=14 为 available */
-      ioA.canShowNow = () => false;                            /* UI 未就绪 */
       const cA = SU_CREATE(ioA);
       cA.trigger(); await flush();
-      check("SUC17-3a fetch 先完成但 UI 未就绪 → 暂存不弹",
-        ioA.calls.prompt === 0 && cA.flags().pendingPrompt === true);
-      ioA.canShowNow = () => true;                             /* 主菜单就绪且空闲 */
-      cA.markUiReady(); await flush();
-      check("SUC17-3b menu ready → 立即弹（网络与初始化时间重叠）",
-        ioA.calls.prompt === 1 && cA.flags().pendingPrompt === false &&
-        cA.flags().uiReady === true);
+      check("SUC17-3 fetch 完成（无论 UI 状态）→ discovery 静默、不暂存",
+        ioA.calls.prompt === 0 &&
+        ioA.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
 
-      /* SUC17-4 menu 先就绪 → fetch 返回后立即弹 */
+      /* SUC17-4 menu 先就绪 → fetch 返回后同样不弹（页面位置与 fresh 解耦） */
       const ioB = makeIo(); ioB.manifest = sucManifest(15);
       const cB = SU_CREATE(ioB);
       cB.markUiReady();
       cB.trigger(); await flush();
-      check("SUC17-4 menu 先 ready → fetch 返回后立即 Modal",
-        ioB.calls.prompt === 1 && cB.flags().pendingPrompt === false);
+      check("SUC17-4 menu 先 ready → fetch 返回后仍不弹（deferred）",
+        ioB.calls.prompt === 0 &&
+        ioB.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
 
-      /* SUC17-5 UI 已就绪但用户已离开首页 → 放弃（不抢弹、不暂存） */
-      const ioC = makeIo(); ioC.manifest = sucManifest(15);
-      ioC.canShowNow = () => false;
-      const cC = SU_CREATE(ioC);
-      cC.markUiReady();               /* 就绪，但 canShowNow=false = 用户在别处/弹窗中 */
-      cC.trigger(); await flush();
-      check("SUC17-5 user 已离开 menu → 直接放弃",
-        ioC.calls.prompt === 0 && cC.flags().pendingPrompt === false &&
-        ioC.logs.some((l) => l.includes("ui-busy")));
-
-      /* SUC17-8/9 一次性与 dismiss 语义在暂存态下依然成立 */
+      /* SUC17-8/9 一次性触发与 dismiss 语义保留 */
       const ioD = makeIo(); ioD.manifest = sucManifest(15);
-      ioD.canShowNow = () => false;
       const cD = SU_CREATE(ioD);
       cD.trigger(); await flush();
       const rD2 = cD.trigger(); await flush();
       cD.markDismissed();
-      ioD.canShowNow = () => true;
-      cD.markUiReady(); await flush();
-      check("SUC17-8/9 暂存态下二次触发无效、dismiss 后即使就绪也不弹",
+      check("SUC17-8/9 二次触发无效、dismiss 语义保留（fresh 恒静默）",
         rD2.ran === false && ioD.calls.fetch === 1 && ioD.calls.prompt === 0 &&
-        cD.flags().dismissed === true && cD.flags().pendingPrompt === false);
+        cD.flags().dismissed === true);
+    }
+
+    /* ====== SDP-7/8：timer 自动重试（node 真定时器；浏览器 hidden 页 timer 被冻结，
+       延时自动性只能在 node 进程里证明；storage/fetch 全 mock，30ms delay） ====== */
+    {
+      const mockStore = (() => { const m = {}; return {
+        setItem: (k, v) => { m[k] = String(v); },
+        getItem: (k) => (k in m ? m[k] : null),
+        removeItem: (k) => { delete m[k]; }
+      }; })();
+      const validManifest20 = () => ({ schemaVersion: 1, channel: "dev",
+        packageName: "com.jty.safetyquiz.dev", versionCode: 15,
+        versionName: "1.0.15-dev", sha256: "a".repeat(64), size: 17209403,
+        apkUrl: "https://cdn.example/dev/vc15/msq-dev-vc15.apk" });
+      let latestCalls = 0;
+      global.MSQUpdater = MSQUpdater;
+      global.MSQSample = { getJSON: function () {
+        latestCalls += 1;
+        return latestCalls === 1
+          ? Promise.reject(new Error("simulated connect timeout"))
+          : Promise.resolve(validManifest20());
+      } };
+      global.localStorage = mockStore;
+      global.__MSQStartupPrefetchRetryDelayMs = 20;
+      global.Capacitor = { Plugins: { App: {
+        getInfo: async () => ({ id: "com.jty.safetyquiz.dev", version: "1.0.14", build: "14" }),
+        addListener: function () { return { remove: function () { } }; }
+      } } };
+      delete require.cache[require.resolve("./www/js/startup-update-prefetch.js")];
+      const pfRaw = require("./www/js/startup-update-prefetch.js");
+      /* node 下模块 root=module.exports（self 未定义），浏览器下挂 window —— 两者兼容 */
+      const P = pfRaw.__MSQStartupUpdatePrefetch || pfRaw;
+      const result = await P.ready.then(function (r) { return r.freshReady; });
+      const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+      await sleepMs(60);   /* 给 retry timer 充分触发窗口 */
+      const cached = MSQUpdater.readLatestCache(mockStore, "dev");
+      check("SDP-7 首次 transport 失败 → timer 到期自动静默重试（恰 2 次尝试）",
+        latestCalls === 2);
+      check("SDP-8 retry 成功 → validated cache 写入 + fresh ok（本 session 无任何 UI 语义）",
+        result && result.ok === true &&
+        cached && cached.manifest && cached.manifest.versionCode === 15);
+      check("SDP-8b 重试后不再继续尝试（成功即终态）",
+        await sleepMs(40).then(() => latestCalls === 2));
     }
   });
 }
@@ -1730,10 +1753,32 @@ section("启动更新即时化：Validated Manifest Cache（SUC20，纯函数 + 
       return (psrc.match(/getJSON\(/g) || []).length === 1 &&
         startSec20.includes("prefetchReady") && !startSec20.includes('"/api/update/"');
     })());
-  check("SUC20-9 展示门解耦：canShowNow 用 modalUiReady；置位于 Modal.init 后、loadBank 注册前",
-    appSrc.includes('return modalUiReady && currentViewId() === "view-menu" && !Modal.isOpen();') &&
+  check("SUC20-9 展示门解耦：cache prompt 用 modalUiReady 门；置位于 Modal.init 后、loadBank 注册前",
+    appSrc.includes('!modalUiReady || currentViewId() !== "view-menu" || Modal.isOpen()') &&
     appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
     appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then("));
+  /* ---- STARTUP_UPDATE_DEFERRED_PROMPT_V1：有限静默 retry（SDP 静态守卫） ---- */
+  {
+    const psrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8");
+    const sucSrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update.js"), "utf8");
+    check("SDP-2 静态：fresh discovery 决策恒 deferred（不再有 fresh prompt 路径）",
+      sucSrc.includes("fresh-discovery-deferred-next-cold-start") &&
+      !sucSrc.includes("io.showPrompt") && !sucSrc.includes("io.canShowNow"));
+    check("SDP-9 静态：MAX_FRESH_ATTEMPTS_PER_SESSION = 2",
+      psrc.includes("MAX_FRESH_ATTEMPTS_PER_SESSION = 2") &&
+      !psrc.includes("MAX_FRESH_ATTEMPTS_PER_SESSION = 3"));
+    check("SDP-10 静态：无轮询（无 setInterval；恰一个 retry setTimeout）",
+      !psrc.includes("setInterval") && (psrc.match(/setTimeout\(/g) || []).length === 1);
+    check("SDP-11 静态：timer 与 resume 共享同一 runFreshAttempt/预算（resume 先清 timer）",
+      (psrc.match(/runFreshAttempt\(/g) || []).length >= 4 &&
+      psrc.indexOf('App.addListener("resume"') > 0 &&
+      /addListener\("resume"[\s\S]{0,400}clearTimeout\(freshRetryTimer\)/.test(psrc));
+    check("SDP-13 retry 仅限 transport 类失败（4xx/解析失败不重试）",
+      psrc.includes("isTransportRetryable") &&
+      psrc.includes("e.status >= 500 || e.status === 429") &&
+      psrc.includes("unexpected token"));
+  }
+
   check("SUC20-10 cache 快路径尊重安全门（dismissed/在首页/无弹窗才弹，busy 不抢）",
     appSrc.includes("startupUpdateCtrl.flags().dismissed") &&
     appSrc.includes("startupCachePromptShown") &&
@@ -1894,13 +1939,15 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     check("UI16-4b Modal 绝不含 apkUrl/fallback/域名/SHA/size/诊断字段",
       !/apkUrl|fallbackApkUrl|sha256|shiinalab|versionCode/.test(modalFn.replace(/[^;]*notes[^;]*;/g, "")) &&
       !modalFn.includes("manifest.size") && !modalFn.includes("manifest.sha256"));
-    check("UI16-5 启动不再自动导航（showPrompt 只调 Modal；Modal 内无页面跳转）",
+    check("UI16-5 启动不再自动导航（controller 无 fresh showPrompt；cache 块防重入且只调 Modal）",
+      !appSrc.includes("showPrompt: function (info, manifest) {") &&
+      appSrc.includes("startupCachePromptShown") &&
       (() => {
-        const spIdx = appSrc.indexOf("showPrompt: function (info, manifest) {");
-        const body = spIdx < 0 ? "" : appSrc.slice(spIdx, appSrc.indexOf("},", spIdx));
-        return body.includes("showStartupUpdateModal(info, manifest);") &&
-          !body.includes('show("') && !body.includes("renderMenu") &&
-          body.includes("startupCachePromptShown");
+        const cpIdx = appSrc.indexOf("startupCachePromptShown = true;");
+        if (cpIdx < 0) { return false; }
+        const body = appSrc.slice(cpIdx, cpIdx + 400);
+        return body.includes("showStartupUpdateModal(r.info, r.cached.manifest);") &&
+          !body.includes('show("') && !body.includes("renderMenu");
       })() &&
       !modalFn.includes('show("') && !modalFn.includes("renderMenu"));
     check("UI16-6 稍后 = 仅关闭 Modal 留在当前页（不导航）",
@@ -1914,8 +1961,8 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
       modalFn.includes("openUpdateView(true)") &&
       appSrc.includes("if (autostart === true) { checkForUpdate(); }") &&
       appSrc.includes('$("btn-update").addEventListener("click", function () { openUpdateView(); });'));
-    check("UI16-13 抢操作守卫：canShowNow 仍是「首屏 + 无弹窗」",
-      appSrc.includes("currentViewId() === \"view-menu\" && !Modal.isOpen()"));
+    check("UI16-13 抢操作守卫：cache prompt 门仍是「首屏 + 无弹窗」（fresh 路径已静默）",
+      appSrc.includes('currentViewId() !== "view-menu" || Modal.isOpen()'));
     check("UI16 遮罩不关闭（modal-root 无点击关闭处理器）",
       !appSrc.includes('this.root.addEventListener("click"') &&
       !/modal-root[\s\S]{0,120}addEventListener\("click"/.test(appSrc));

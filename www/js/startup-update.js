@@ -3,7 +3,9 @@
    updater.js 纯函数 + app.js 既有手动"检查更新"状态机 + 原生 UpdatePlugin。
    本模块只回答两个问题：
      1) 本次 session 是否还允许自动检查（每个 process/WebView 生命周期一次）；
-     2) 检查结果出来后是否弹提示（仅 available 弹，其余一律静默）。
+     2) fresh discovery 结果是否弹提示 —— DEFERRED_PROMPT_V1 起恒为「不弹」：
+        fresh available 只写 validated cache（由 prefetch 完成），提示延迟到
+        下次冷启动由 cache 快路径给出；页面位置与 fresh 路径完全解耦。
    Node 自检可 require。 */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) { module.exports = factory(); }
@@ -14,16 +16,16 @@
   /* 纯决策矩阵（SUC-2~6/9 的判定核心）。
      check  = { ok:true, state } （state = MSQUpdater.checkUpdateState 结果：
               "available"|"latest"|"downgrade"）或 { ok:false }（fetch/校验失败）
-     flags  = { dismissed: 本次 session 用户已关闭过自动提示,
-                canShowNow: 当前在主菜单且无弹窗（不抢用户正在进行的操作） }
+     flags  = { dismissed: 本次 session 用户已关闭过自动提示 }（保留兼容）
+     STARTUP_UPDATE_DEFERRED_PROMPT_V1：fresh discovery 一律不在本 session 弹提示——
+     available 只代表「发现完成」，validated cache 已由 prefetch 写入，提示延迟到
+     下次冷启动由 cache 快路径给出（cache newer → immediate prompt）。
+     canShowNow/页面位置不再参与 fresh 路径决策。
      返回 { prompt, reason }；reason 仅供非敏感 debug 日志，绝不进 UI。 */
   function decideStartupPrompt(check, flags) {
-    var f = flags || {};
     if (!check || !check.ok) { return { prompt: false, reason: "check-failed" }; }
     if (check.state !== "available") { return { prompt: false, reason: "not-newer:" + check.state }; }
-    if (f.dismissed) { return { prompt: false, reason: "dismissed-this-session" }; }
-    if (!f.canShowNow) { return { prompt: false, reason: "ui-busy" }; }
-    return { prompt: true, reason: "newer-version" };
+    return { prompt: false, reason: "fresh-discovery-deferred-next-cold-start" };
   }
 
   /* 编排器：io 由 app.js 注入（全部复用手动检查的同一条路径）。
@@ -32,31 +34,16 @@
      io.fetchLatest(channel) -> Promise<manifest>                       （MSQSample.getJSON 同一 endpoint，失败即 reject）
      io.validate(manifest, expected) -> {ok,error}                      （MSQUpdater.validateManifest）
      io.compare(currentVersionCode, manifest) -> state                  （MSQUpdater.checkUpdateState）
-     io.canShowNow() -> bool                                            （主菜单可见且无 Modal）
-     io.showPrompt(info, manifest) -> void                              （把既有更新页切到 available 态）
-     io.debug(msg) -> void                                              （非敏感 debug 日志出口） */
+     io.debug(msg) -> void                                              （非敏感 debug 日志出口）
+     DEFERRED_PROMPT_V1：io 不再有 canShowNow/showPrompt —— fresh 结果只用于
+     discovery 记录，提示统一由 cache 快路径在下次冷启动给出。 */
   function createController(io) {
     var started = false;    /* 每个 App process / WebView 生命周期只自动检查一次（纯内存） */
     var dismissed = false;  /* 用户关闭启动提示后，本次 session 不再自动弹 */
-    var uiReady = false;    /* VC17：主菜单就绪（由 app 在首屏渲染完成后 markUiReady） */
-    var deferred = null;    /* 已发现新版但 UI 未就绪：{ info, manifest }，就绪后立即弹 */
-
-    /* 展示尝试：仅 available 且未 dismissed。canShowNow=false 时区分两种情况——
-       UI 尚未就绪（!uiReady）→ 暂存等 markUiReady；UI 已就绪但用户在别处 → 放弃。 */
+    /* DEFERRED_PROMPT_V1：fresh 结果不触发任何 UI（discovery 静默完成）。
+       decideStartupPrompt 现恒返回 prompt:false；本函数只记录非敏感 debug。 */
     function tryShow(info, manifest) {
-      var decision = decideStartupPrompt(
-        { ok: true, state: "available" },
-        { dismissed: dismissed, canShowNow: !!io.canShowNow() });
-      if (decision.prompt) {
-        deferred = null;
-        io.showPrompt(info, manifest); /* 既有更新提示 UI，manifest 原样传递 */
-        return true;
-      }
-      if (!uiReady && decision.reason === "ui-busy") {
-        deferred = { info: info, manifest: manifest };
-        io.debug("startup update check: newer version deferred until ui ready");
-        return false;
-      }
+      var decision = decideStartupPrompt({ ok: true, state: "available" }, { dismissed: dismissed });
       io.debug("startup update check skipped: " + decision.reason);
       return false;
     }
@@ -98,19 +85,12 @@
 
     return {
       trigger: trigger,
-      markDismissed: function () { dismissed = true; deferred = null; },
-      /* VC17：主菜单就绪后调用；若检查已完成且暂存了新版提示，立即展示 */
-      markUiReady: function () {
-        uiReady = true;
-        if (deferred) {
-          var d = deferred;
-          deferred = null;
-          tryShow(d.info, d.manifest);
-        }
-      },
+      markDismissed: function () { dismissed = true; },
+      /* 兼容保留：cache 快路径就绪时机由 app.js 的 modalUiReady 直接管理；
+         fresh discovery 已与 UI 门完全解耦（DEFERRED_PROMPT_V1）。 */
+      markUiReady: function () { },
       flags: function () {
-        return { started: started, dismissed: dismissed, uiReady: uiReady,
-          pendingPrompt: !!deferred };
+        return { started: started, dismissed: dismissed };
       }
     };
   }

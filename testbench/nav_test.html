@@ -239,7 +239,10 @@
         window.__order.push("getInfo");   /* SUC17-1：trigger 在 bootstrap 期即调用 */
         return { id: "com.jty.safetyquiz.dev", version: "1.0.15-dev", build: "15" };
       },
-      addListener: () => ({ remove: () => {} }),
+      addListener: (ev, cb) => {
+        if (ev === "resume") { window.__appResumeCb = cb; }   /* SDP-11：可驱动 resume retry */
+        return { remove: () => {} };
+      },
       exitApp: () => {}
     },
     Camera: { getPhoto: async () => {
@@ -260,8 +263,13 @@
           const vc = parseInt(Q.get("latestvc") || "15", 10);
           const delay = parseInt(Q.get("updatedelay") || "0", 10) || 0;
           const fail = Q.get("updatefail") === "1";
-          await new Promise((r) => setTimeout(r, delay));
+          /* 后台 tab timer 节流防护：delay=0 时不经 setTimeout（否则响应被冻结到分钟级） */
+          if (delay > 0) { await new Promise((r) => setTimeout(r, delay)); }
           if (fail) { throw new Error("simulated dns failure"); }
+          if (window.__latestFailLeft > 0) {               /* SDP-7/8：仅首次失败 */
+            window.__latestFailLeft -= 1;
+            throw new Error("simulated connect timeout");
+          }
           return { status: 200, data: {
             schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
             versionCode: vc, versionName: "1.0." + vc + "-dev",
@@ -316,14 +324,27 @@
     }
   } };
 
+  window.__unhandled = [];
+  window.addEventListener("unhandledrejection", function (e) {
+    window.__unhandled.push("REJ:" + String((e.reason && e.reason.message) || e.reason));
+  });
+  window.addEventListener("error", function (e) {
+    window.__unhandled.push("ERR:" + String(e.message));
+  });
   /* SUC20：Validated Manifest Cache 夹具（?cachevc=N 种子；每次冷载先清缓存）。
      每个 variant 自清自种，避免 localStorage 跨变体污染。 */
   (function () {
+    const qs0 = new URLSearchParams(location.search);
+    if (qs0.get("retrydelay")) {
+      window.__MSQStartupPrefetchRetryDelayMs = parseInt(qs0.get("retrydelay"), 10);
+    }
+    if (qs0.get("updatefailfirst") === "1") { window.__latestFailLeft = 1; }
+    if (qs0.get("keepcache") === "1") { return; }   /* SDP-5：保留上一冷启动写入的 cache */
     try {
       localStorage.removeItem("msq.update.latestCache.v1.dev");
       localStorage.removeItem("msq.update.latestCache.v1.stable");
     } catch (e) { }
-    const qs = new URLSearchParams(location.search);
+    const qs = qs0;
     const cvc = qs.get("cachevc");
     if (!cvc) { return; }
     if (qs.get("cachemode") === "corrupt") {
@@ -380,8 +401,14 @@
 
   const Q = new URLSearchParams(location.search);
   const isFailRun = Q.get("updatefail") === "1";
-  const isLateRun = !isFailRun && Q.get("latestvc") === "16" && !!Q.get("updatedelay");
-  const isModalRun = !isFailRun && !isLateRun && Q.get("latestvc") === "16";
+  const isRetryFirst = Q.get("updatefailfirst") === "1";
+  const isResumeRetry = Q.get("resumeretry") === "1";
+  const isRetryAlwaysFail = isFailRun && !!Q.get("retrydelay") && !isResumeRetry;
+  const isKeepCache = Q.get("keepcache") === "1";
+  const isLateRun = !isFailRun && !isRetryFirst && !isRetryAlwaysFail && !isResumeRetry &&
+    !isKeepCache && Q.get("latestvc") === "16" && !!Q.get("updatedelay");
+  const isModalRun = !isFailRun && !isRetryFirst && !isRetryAlwaysFail && !isResumeRetry &&
+    !isKeepCache && !isLateRun && Q.get("latestvc") === "16";
   let batchPhotoEverVisible = false;
   setInterval(() => { if (vis("view-batch-photo")) { batchPhotoEverVisible = true; } }, 30);
 
@@ -407,6 +434,7 @@
           JSON.stringify({ p: T.promptShown, n: T.networkLatestReady }));
         check("SUC20-6 cache hit 仍完成后台 fresh revalidate（恰一次主请求）",
           window.__updateFetches === 1);
+        if (Q.get("keepmodal") === "1") { return; }   /* 截图模式：保留 Modal */
         /* SUC20-7：点「立即更新」仍 fresh-check（fake 网络 vc15 ≤ 当前 15 → 已是最新版） */
         const go = Array.from(document.querySelectorAll("#modal-root .barbtn"))
           .find((b) => b.textContent === "立即更新");
@@ -431,6 +459,77 @@
         check(id, !modalVisible() && vis("view-menu") && !vis("view-update"));
         check("SUC20-4b 网络重验证仍执行（恰一次主请求）", window.__updateFetches === 1);
       }
+    }
+    /* ============ SDP-7/8：首次 transport 失败 → 预算内一次静默重试 ============ */
+    /* （浏览器后台页 timer 被 Chrome 冻结，30s 自动重试的「延时自动性」由
+       test_core SDP-7/8 node 真定时器测试证明；此处用 resume 机会驱动同一
+       重试路径（共享同一 attempt budget），验证重试行为与静默语义。） */
+    else if (isRetryFirst) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-7a 首次失败 → 立即无 UI、无 Modal（discovery 静默）",
+        !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
+      check("SDP-7b 重试机会可用（resume 与 timer 共享同一预算）",
+        typeof window.__appResumeCb === "function");
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      const cacheOk = await poll(() => {
+        try {
+          const e = JSON.parse(localStorage.getItem("msq.update.latestCache.v1.dev"));
+          return !!(e && e.manifest && e.manifest.versionCode === 15);
+        } catch (e) { return false; }
+      }, 4000);
+      check("SDP-8 retry 成功 → cache 写入 + 本 session 仍不弹",
+        !!cacheOk && !modalVisible() && vis("view-menu"));
+      check("SDP-8b 恰两次主请求（预算内，无双请求）", window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-8c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+    }
+    /* ============ SDP-9：永久失败 → 预算尽后停（无轮询；resume 消费预算） ============ */
+    else if (isRetryAlwaysFail) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-9a 首次失败恰一次请求", window.__updateFetches === 1);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-9 预算尽（MAX=2）：resume 重试后恰两次请求", window.__updateFetches === 2);
+      await sleep(1500);
+      check("SDP-9b 无轮询：再等 1.5s 仍无第三次请求", window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-9c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+      check("SDP-9d 全程无 UI", !modalVisible() && vis("view-menu"));
+    }
+    /* ============ SDP-11：resume 与 timer 共享一次重试预算 ============ */
+    else if (isResumeRetry) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-11a 首次失败后 resume 回调可用", typeof window.__appResumeCb === "function");
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await poll(() => window.__updateFetches === 2, 3000);
+      check("SDP-11b resume 消费剩余预算（第二次请求发生，timer 未到也不双发）",
+        window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(800);
+      check("SDP-11c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+      check("SDP-11d 全程无 UI", !modalVisible() && vis("view-menu"));
+    }
+    /* ============ SDP-5b：上一冷启动 fresh 写入的 cache → 立即提示 ============ */
+    else if (isKeepCache) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      const modal = await poll(modalVisible, 4000);
+      check("SDP-5 restart 后 cached newer → 立即提示", !!modal);
+      const mt5 = modalText();
+      check("SDP-5b 提示来自上一 session fresh 写入的 vc16", mt5.indexOf("1.0.16-dev") >= 0);
+      const T5 = window.__MSQStartupTiming || {};
+      check("SDP-5c 提示先于本次 fresh 网络结果",
+        T5.promptShown != null &&
+        (T5.networkLatestReady == null || T5.promptShown < T5.networkLatestReady));
+      const later5 = Array.from(document.querySelectorAll("#modal-root .barbtn"))
+        .find((b) => b.textContent === "稍后");
+      if (later5) { later5.click(); }
+      await sleep(120);
+      check("SDP-5d 稍后 → 关闭且留在首页", !modalVisible() && vis("view-menu"));
     }
     /* ============ UI16-12：网络失败 → 完全静默 ============ */
     else if (isFailRun) {
@@ -457,39 +556,38 @@
       check("UI16-13d 回首页后也不补弹（one-shot 已消耗）",
         vis("view-menu") && !modalVisible() && window.__updateFetches === 1);
     }
-    /* ============ UI16-4~9：有新版 → Modal ============ */
+    /* ============ SDP-2/3/4：fresh newer → 本 session 不弹，cache 照写（与页面解耦） ============ */
+    /* （DEFERRED_PROMPT_V1：fresh discovery 不再弹提示；「发现新版本 Modal」的
+       完整交互由 SUC20-1（cachevc=99）承载。） */
     else if (isModalRun) {
       await poll(() => document.querySelector("#menu-buttons button"));
-      const modal = await poll(modalVisible, 4000);
-      check("UI16-4 启动检查到新版 → 首页弹出更新 Modal", !!modal);
-      const mt = modalText();
-      check("UI16-4b Modal 内容：最新/当前版本 + 稍后/立即更新",
-        mt.indexOf("发现新版本") >= 0 && mt.indexOf("1.0.16-dev") >= 0 &&
-        mt.indexOf("1.0.15-dev") >= 0 && mt.indexOf("稍后") >= 0 &&
-        mt.indexOf("立即更新") >= 0, mt.slice(0, 80));
-      check("UI16-4c Modal 无任何技术信息（URL/SHA/大小/渠道）",
-        mt.indexOf("apk") < 0 && mt.indexOf("http") < 0 && mt.indexOf("SHA") < 0 &&
-        mt.indexOf("shiinalab") < 0 && mt.indexOf("17209403") < 0);
-      check("UI16-5 不再自动导航到更新页（留在首页）",
-        !vis("view-update") && vis("view-menu"));
-      /* 稍后（keepmodal=1 为截图模式：保留 Modal 供人工/截图核对，跳过关闭类断言） */
-      if (Q.get("keepmodal") !== "1") {
-        Array.from(document.querySelectorAll("#modal-root .barbtn"))
-          .find((b) => b.textContent === "稍后").click();
-        await sleep(120);
-        check("UI16-6 稍后 → Modal 消失且留在首页",
-          !modalVisible() && vis("view-menu") && !vis("view-update"));
-        /* 本 session 不再弹 */
+      const waitpage = Q.get("waitpage");
+      if (waitpage === "search") {
         document.getElementById("btn-search-entry").click();
         await sleep(100);
-        window.handleBack();
-        await sleep(100);
-        await sleep(700);
-        check("UI16-7 本 session 不重复弹（导航一圈后仍无 Modal，检查仅 1 次）",
-          !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
-        check("UI16-7b Modal 仍可用 Back 关闭 = 稍后（onClose 标记 dismissed 已生效）",
-          window.__updateFetches === 1);
+      } else if (waitpage === "batch") {
+        document.getElementById("btn-search-entry").click();
+        await sleep(80);
+        document.getElementById("btn-batch-photo").click();
+        await poll(() => document.querySelector("#batch-list .batch-row"));
       }
+      /* 等 fresh discovery 完成（validated cache 写入 vc16） */
+      const cacheWritten = await poll(() => {
+        try {
+          const e = JSON.parse(localStorage.getItem("msq.update.latestCache.v1.dev"));
+          return !!(e && e.manifest && e.manifest.versionCode === 16);
+        } catch (e) { return false; }
+      }, 4000);
+      check("SDP-2/3/4 fresh newer → 本 session 不弹更新 Modal（任意页面）", !modalVisible());
+      check("SDP-2b validated cache 已写入（vc16，run 安全链不变）", !!cacheWritten);
+      const onSearch = vis("view-search");
+      const onBatch = vis("view-batch-results");
+      check("SDP-3/4 fresh 完成时用户仍停留在离开后的页面（未被打断/拉回首页）",
+        waitpage === "search" ? (onSearch && !vis("view-menu")) :
+        waitpage === "batch" ? (onBatch && !vis("view-menu")) :
+        vis("view-menu"));
+      check("SDP-2c 恰一次主请求（无重试、无轮询）", window.__updateFetches === 1);
+      check("UI16-5 不自动导航到更新页", !vis("view-update"));
     }
     /* ============ 基础套件：NAV/FB/CAP/UI16-1/2/3/10/11 + DIAG ============ */
     else {

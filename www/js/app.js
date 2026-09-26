@@ -2375,21 +2375,10 @@
         compare: function (currentVersionCode, manifest) {
           return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
         },
-        /* modalUiReady：Modal.init 完成 + 当前处于启动首页 shell + 无其他 Modal。
-           不再等待题库/searchIndex/batchIndex —— 更新 Modal 不依赖它们。 */
-        canShowNow: function () {
-          return modalUiReady && currentViewId() === "view-menu" && !Modal.isOpen();
-        },
-        /* VC16：不再自动跳转更新页，改为首页上的轻量 Modal。
-           稍后/立即更新/系统 Back 都经 Modal.close → onClose 标记 dismissed，
-           本次 session 不再自动弹；真正 cold start 才会重新提醒。 */
-        showPrompt: function (info, manifest) {
-          if (startupCachePromptShown) { return; }   /* cache 快路径已弹过，绝不重复 */
-          startupTimingMark("promptShown");
-          window.__MSQStartupTiming.startupManifestSource = "network";
-          if (window.__MSQStartupTimingReport) { window.__MSQStartupTimingReport(); }
-          showStartupUpdateModal(info, manifest);
-        },
+        /* STARTUP_UPDATE_DEFERRED_PROMPT_V1：io 不再有 canShowNow/showPrompt ——
+           fresh discovery 一律静默（只写 validated cache，由 prefetch 完成），
+           提示统一由下方 cache 快路径在冷启动给出，与页面位置完全解耦。
+           controller 保留一次性 trigger 与 dismissed 语义（cache 快路径尊重它）。 */
         debug: function (msg) { console.log("[startup-update] " + msg); }
       })
     : null;
