@@ -47,7 +47,7 @@ const LATEST_JSON = path.join(UPDATES_DIR, "latest.json");
 const DEV_APK = path.join(ROOT, "release", "营销安规刷题-DEV.apk");
 
 const EXPECTED_PACKAGE = "com.jty.safetyquiz.dev";
-const EXPECTED_LABEL = "营销安规刷题 DEV";
+const EXPECTED_LABEL = "营销安规搜题 DEV";
 
 /* STABLE_RELEASE_PIPELINE_V1：channel 配置 —— 发布行为只由本配置与命令行参数决定，
    绝不读取 git branch 名。DEV 路径/文件名/默认行为与历史版本逐字节兼容；
@@ -76,7 +76,7 @@ const CHANNELS = {
     id: "stable",
     title: "STABLE",
     packageName: "com.jty.safetyquiz",
-    label: "营销安规刷题",
+    label: "营销安规搜题",
     gradleTask: ":app:assembleDebug",
     versionProps: { code: "STABLE_VERSION_CODE", name: "STABLE_VERSION_NAME" },
     versionNameSuffix: "",

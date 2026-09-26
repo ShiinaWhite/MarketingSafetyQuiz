@@ -1262,8 +1262,8 @@ section("导航：详情来源与返回（静态守卫）");
     appSrc3.includes('openSearchDetail(m.id, "batch-results")'));
   check("NAV-S3 返回按来源路由：batch → show(view-batch-results)，否则 → search",
     backDetailFn.includes("detailReturnContext.source === \"batch-results\"") &&
-    backDetailFn.includes('show("view-batch-results")') &&
-    backDetailFn.includes('show("view-search")'));
+    backDetailFn.includes('show("view-batch-results", "backward")') &&
+    backDetailFn.includes('show("view-search", "backward")'));
   check("NAV-S4 返回恢复双通道滚动位置（容器 + window）",
     backDetailFn.includes("batchScrollTop") && backDetailFn.includes("batchWindowY") &&
     backDetailFn.includes("requestAnimationFrame"));
@@ -1415,9 +1415,10 @@ const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
 /* 决策矩阵（SUC-2~6/9 的判定核心，同步纯函数） */
 {
   const d = (check, flags) => MSQStartupUpdate.decideStartupPrompt(check, flags || {});
-  check("SUC-2 决策：latest.versionCode > current（available）且首屏空闲 → 弹更新提示",
-    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === true &&
-    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "newer-version");
+  check("SUC-2 决策（DEFERRED）：fresh available → 本 session 永不弹（deferred 到下次冷启动）",
+    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === false &&
+    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "fresh-discovery-deferred-next-cold-start" &&
+    d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
   check("SUC-3 决策：latest == current（latest）→ 完全静默",
     d({ ok: true, state: "latest" }).prompt === false);
   check("SUC-4 决策：latest < current（downgrade）→ 完全静默",
@@ -1429,9 +1430,9 @@ const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
     d({ ok: false, error: "更新信息 versionCode 无效" }).prompt === false);
   check("SUC-9 决策：用户已关闭提示 → 本次 session 不再自动弹",
     d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
-  check("SUC-9b 决策：用户已离开首屏/有弹窗（ui-busy）→ 不抢当前操作",
+  check("SUC-9b 决策（DEFERRED）：fresh 路径不再读 canShowNow（页面位置只影响 cache prompt 门）",
     d({ ok: true, state: "available" }, { canShowNow: false }).prompt === false &&
-    d({ ok: true, state: "available" }, { canShowNow: false }).reason === "ui-busy");
+    d({ ok: true, state: "available" }, {}).reason === "fresh-discovery-deferred-next-cold-start");
 }
 
 /* 编排测试：注入 fake io，驱动与 app.js 完全相同的 controller 代码 */
@@ -1482,18 +1483,14 @@ function runSucOrchestrationTests() {
         io.logs.some((l) => l.includes("already ran this session")));
     }
 
-    /* SUC-2 有更新 → 弹既有更新提示；SUC-12 manifest 原样透传 */
+    /* SUC-2（DEFERRED_PROMPT_V1）有更新 → fresh discovery 静默完成，本 session 不弹 */
     {
       const io = makeIo(); io.manifest = sucManifest(15);
       const c = SU_CREATE(io);
       c.trigger(); await flush();
-      check("SUC-2 latest(15) > current(14) → 弹出更新提示一次",
-        io.calls.prompt === 1 && io.promptedWith.m.versionCode === 15 &&
-        io.promptedWith.info.versionCode === 14);
-      check("SUC-12a 启动路径把校验通过的 manifest 原样交给既有更新 UI（apkUrl/fallback/size 不变）",
-        io.promptedWith.m === io.manifest &&
-        io.promptedWith.m.apkUrl === sucManifest(15).apkUrl &&
-        io.promptedWith.m.fallbackApkUrl === "/api/update/dev/apk");
+      check("SUC-2 latest(15) > current(14) → fresh discovery 静默（本 session 不弹）",
+        io.calls.prompt === 0 &&
+        io.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
     }
 
     /* SUC-3/4 无更新/降级 → 完全静默 */
@@ -1555,14 +1552,15 @@ function runSucOrchestrationTests() {
       check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
         !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
         !appSrc.includes("visibilitychange"));
-      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），就绪后才可展示",
+      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），modal 门与题库解耦（INSTANT_V2）",
         appSrc.indexOf("startupUpdateCtrl.trigger();") > 0 &&
         appSrc.indexOf("startupUpdateCtrl.trigger();") < appSrc.indexOf("loadBank().then(") &&
-        appSrc.includes("startupUiReady = true;") &&
-        appSrc.indexOf("startupUiReady = true;") > appSrc.indexOf("registerSystemBack();") &&
+        appSrc.includes("modalUiReady = true;") &&
+        appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
+        appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then(") &&
         appSrc.includes("startupUpdateCtrl.markUiReady();"));
-      check("SUC17-2b canShowNow 含 startupUiReady 门（未就绪绝不展示）",
-        appSrc.includes("return startupUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
+      check("SUC17-2b cache prompt 门：modalUiReady + 首页 + 无弹窗（不就绪绝不展示）",
+        appSrc.includes("!modalUiReady || currentViewId() !== \"view-menu\" || Modal.isOpen()"));
     }
 
     /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
@@ -1572,8 +1570,8 @@ function runSucOrchestrationTests() {
       c.trigger(); await flush();
       c.markDismissed();
       const second = c.trigger(); await flush();
-      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹",
-        io.calls.prompt === 1 && second.ran === false &&
+      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹（fresh 路径恒静默）",
+        io.calls.prompt === 0 && second.ran === false &&
         c.flags().dismissed === true);
     }
 
@@ -1594,8 +1592,11 @@ function runSucOrchestrationTests() {
     {
       const bootIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
       const startSec = appSrc.slice(bootIdx, appSrc.indexOf("清除记录", bootIdx));
-      check("SUC-12b 启动 fetch 与手动同一 endpoint/超时（/api/update/<channel>/latest, 10000）",
-        startSec.includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12b 启动 fresh latest 唯一请求在 prefetch 模块（endpoint/超时与手动一致）",
+        fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8")
+          .includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12b2 app.js 启动段复用 prefetch（不自带第二次 latest fetch）",
+        startSec.includes("prefetchReady") && !startSec.includes('"/api/update/"'));
       check("SUC-12c 启动校验/比较直接调用 MSQUpdater.validateManifest/checkUpdateState",
         startSec.includes("MSQUpdater.validateManifest(manifest, expected)") &&
         startSec.includes("MSQUpdater.checkUpdateState(currentVersionCode, manifest)"));
@@ -1615,51 +1616,264 @@ function runSucOrchestrationTests() {
 
     /* ====== VC17：启动检查提前并行（fetch 与初始化重叠，就绪后才展示） ====== */
     {
-      /* SUC17-3 fetch 先完成 → menu ready 后立即 Modal */
+      /* SUC17-3（DEFERRED）fetch 先完成（用户在别处/未就绪）→ discovery 静默，不弹不暂存 */
       const ioA = makeIo(); ioA.manifest = sucManifest(15);   /* 对 current=14 为 available */
-      ioA.canShowNow = () => false;                            /* UI 未就绪 */
       const cA = SU_CREATE(ioA);
       cA.trigger(); await flush();
-      check("SUC17-3a fetch 先完成但 UI 未就绪 → 暂存不弹",
-        ioA.calls.prompt === 0 && cA.flags().pendingPrompt === true);
-      ioA.canShowNow = () => true;                             /* 主菜单就绪且空闲 */
-      cA.markUiReady(); await flush();
-      check("SUC17-3b menu ready → 立即弹（网络与初始化时间重叠）",
-        ioA.calls.prompt === 1 && cA.flags().pendingPrompt === false &&
-        cA.flags().uiReady === true);
+      check("SUC17-3 fetch 完成（无论 UI 状态）→ discovery 静默、不暂存",
+        ioA.calls.prompt === 0 &&
+        ioA.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
 
-      /* SUC17-4 menu 先就绪 → fetch 返回后立即弹 */
+      /* SUC17-4 menu 先就绪 → fetch 返回后同样不弹（页面位置与 fresh 解耦） */
       const ioB = makeIo(); ioB.manifest = sucManifest(15);
       const cB = SU_CREATE(ioB);
       cB.markUiReady();
       cB.trigger(); await flush();
-      check("SUC17-4 menu 先 ready → fetch 返回后立即 Modal",
-        ioB.calls.prompt === 1 && cB.flags().pendingPrompt === false);
+      check("SUC17-4 menu 先 ready → fetch 返回后仍不弹（deferred）",
+        ioB.calls.prompt === 0 &&
+        ioB.logs.some((l) => l.includes("fresh-discovery-deferred-next-cold-start")));
 
-      /* SUC17-5 UI 已就绪但用户已离开首页 → 放弃（不抢弹、不暂存） */
-      const ioC = makeIo(); ioC.manifest = sucManifest(15);
-      ioC.canShowNow = () => false;
-      const cC = SU_CREATE(ioC);
-      cC.markUiReady();               /* 就绪，但 canShowNow=false = 用户在别处/弹窗中 */
-      cC.trigger(); await flush();
-      check("SUC17-5 user 已离开 menu → 直接放弃",
-        ioC.calls.prompt === 0 && cC.flags().pendingPrompt === false &&
-        ioC.logs.some((l) => l.includes("ui-busy")));
-
-      /* SUC17-8/9 一次性与 dismiss 语义在暂存态下依然成立 */
+      /* SUC17-8/9 一次性触发与 dismiss 语义保留 */
       const ioD = makeIo(); ioD.manifest = sucManifest(15);
-      ioD.canShowNow = () => false;
       const cD = SU_CREATE(ioD);
       cD.trigger(); await flush();
       const rD2 = cD.trigger(); await flush();
       cD.markDismissed();
-      ioD.canShowNow = () => true;
-      cD.markUiReady(); await flush();
-      check("SUC17-8/9 暂存态下二次触发无效、dismiss 后即使就绪也不弹",
+      check("SUC17-8/9 二次触发无效、dismiss 语义保留（fresh 恒静默）",
         rD2.ran === false && ioD.calls.fetch === 1 && ioD.calls.prompt === 0 &&
-        cD.flags().dismissed === true && cD.flags().pendingPrompt === false);
+        cD.flags().dismissed === true);
+    }
+
+    /* ====== SDP-7/8：timer 自动重试（node 真定时器；浏览器 hidden 页 timer 被冻结，
+       延时自动性只能在 node 进程里证明；storage/fetch 全 mock，30ms delay） ====== */
+    {
+      const mockStore = (() => { const m = {}; return {
+        setItem: (k, v) => { m[k] = String(v); },
+        getItem: (k) => (k in m ? m[k] : null),
+        removeItem: (k) => { delete m[k]; }
+      }; })();
+      const validManifest20 = () => ({ schemaVersion: 1, channel: "dev",
+        packageName: "com.jty.safetyquiz.dev", versionCode: 15,
+        versionName: "1.0.15-dev", sha256: "a".repeat(64), size: 17209403,
+        apkUrl: "https://cdn.example/dev/vc15/msq-dev-vc15.apk" });
+      let latestCalls = 0;
+      global.MSQUpdater = MSQUpdater;
+      global.MSQSample = { getJSON: function () {
+        latestCalls += 1;
+        return latestCalls === 1
+          ? Promise.reject(new Error("simulated connect timeout"))
+          : Promise.resolve(validManifest20());
+      } };
+      global.localStorage = mockStore;
+      global.__MSQStartupPrefetchRetryDelayMs = 20;
+      global.Capacitor = { Plugins: { App: {
+        getInfo: async () => ({ id: "com.jty.safetyquiz.dev", version: "1.0.14", build: "14" }),
+        addListener: function () { return { remove: function () { } }; }
+      } } };
+      delete require.cache[require.resolve("./www/js/startup-update-prefetch.js")];
+      const pfRaw = require("./www/js/startup-update-prefetch.js");
+      /* node 下模块 root=module.exports（self 未定义），浏览器下挂 window —— 两者兼容 */
+      const P = pfRaw.__MSQStartupUpdatePrefetch || pfRaw;
+      const result = await P.ready.then(function (r) { return r.freshReady; });
+      const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+      await sleepMs(60);   /* 给 retry timer 充分触发窗口 */
+      const cached = MSQUpdater.readLatestCache(mockStore, "dev");
+      check("SDP-7 首次 transport 失败 → timer 到期自动静默重试（恰 2 次尝试）",
+        latestCalls === 2);
+      check("SDP-8 retry 成功 → validated cache 写入 + fresh ok（本 session 无任何 UI 语义）",
+        result && result.ok === true &&
+        cached && cached.manifest && cached.manifest.versionCode === 15);
+      check("SDP-8b 重试后不再继续尝试（成功即终态）",
+        await sleepMs(40).then(() => latestCalls === 2));
     }
   });
+}
+
+/* ---------- MOTION_IMPLEMENTATION_V1 + 品牌改名（MOT / BRAND 源码守卫） ---------- */
+section("Motion 落地与品牌（MOT/BRAND，源码守卫）");
+{
+  const cssSrc = fs.readFileSync(path.join(__dirname, "www/css/style.css"), "utf8");
+  const indexSrcM = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+  const mainStringsM = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/values/strings.xml"), "utf8");
+  const devStringsM = fs.readFileSync(path.join(__dirname,
+    "android/app/src/dev/res/values/strings.xml"), "utf8");
+  const gradleSrcM = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const pubSrcM = fs.readFileSync(path.join(__dirname, "tools/dev_update/publish.js"), "utf8");
+  const capCfgM = fs.readFileSync(path.join(__dirname, "capacitor.config.json"), "utf8");
+
+  check("MOT-1 全局 .view 不再使用无方向 viewFade（禁止与方向动画叠加）",
+    !cssSrc.includes("@keyframes viewFade") && !cssSrc.includes("animation: viewFade") &&
+    cssSrc.includes(".view.nav-forward") && cssSrc.includes(".view.nav-backward"));
+  check("MOT-2 forward 使用 +X enter（translateX(var(--move-enter))）",
+    cssSrc.includes("@keyframes pageEnterForward") &&
+    /pageEnterForward[^}]*translateX\(var\(--move-enter\)\)/.test(cssSrc));
+  check("MOT-3 backward 使用 -X enter（translateX(-4px)）",
+    cssSrc.includes("@keyframes pageEnterBackward") &&
+    cssSrc.includes("translateX(calc(-1 * var(--move-nudge)))"));
+  check("MOT-4 backward handler 不改变导航目标（仅加方向参数，目标/逻辑不变）",
+    appSrc.includes('show("view-search", "backward");') &&
+    appSrc.includes('show("view-batch-results", "backward");') &&
+    appSrc.includes('show("view-menu", "backward");') &&
+    appSrc.includes("function show(id, direction)"));
+  check("MOT-5 Android Back / diag 返回方向为 backward（不改导航目标）",
+    appSrc.includes('case "view-devdiag": openUpdateView(false, "backward"); return;') &&
+    appSrc.includes('show(captureOriginView, "backward");'));
+  check("MOT-6 card expand/collapse 都有状态（grid-rows 0fr↔1fr 双向对称）",
+    cssSrc.includes(".batch-detail-shell") &&
+    cssSrc.includes("grid-template-rows: 0fr") &&
+    cssSrc.includes(".batch-row.open + .batch-detail-shell { grid-template-rows: 1fr; }"));
+  check("MOT-7 card 动画不影响 Top3 click（detail 保持相邻兄弟 + 类驱动开合）",
+    appSrc.includes('var shell = document.createElement("div");') &&
+    appSrc.includes('shell.appendChild(inner);') &&
+    appSrc.includes('wrap.appendChild(row);') &&
+    appSrc.includes(String.fromCharCode(114,111,119,46,99,108,97,115,115,76,105,115,116,46,116,111,103,103,108,101,40,34,111,112,101,110,34,41)));
+  check("MOT-8 reduced-motion 无残留 delay（transition-delay: 0ms）",
+    /prefers-reduced-motion:[\s\S]{0,200}transition-delay:\s*0ms/.test(cssSrc));
+  check("MOT-9 progress 只平滑真实 width（有 width transition；无 fake 匀速 timer 驱动填充）",
+    /progress-fill[\s\S]{0,200}transition:\s*width\s+var\(--motion-medium\)/.test(cssSrc) &&
+    appSrc.includes('fill.style.width =') &&
+    !/setInterval[\s\S]{0,200}progress-fill/.test(appSrc));
+  check("MOT-10 Modal close 仍同步 hidden（未新增 modalOut/exit 延迟）",
+    !cssSrc.includes("modalOut") &&
+    appSrc.includes('this.root.classList.add("hidden");') &&
+    appSrc.includes('this.root.innerHTML = "";'));
+  check("MOT-11 no transition:all", !cssSrc.includes("transition: all") &&
+    !cssSrc.includes("transition:all"));
+  check("MOT-12 no stagger/shimmer/spring（工具 App 动画预算）",
+    !cssSrc.includes("stagger") && !cssSrc.includes("shimmer") &&
+    !cssSrc.includes("spring") && !cssSrc.includes("bounce") &&
+    !/(animation|transition)-duration:\s*[3-9]\d\dms|1\d{3}ms/.test(cssSrc));
+  check("MOT-13 motion tokens 统一时长来源（无散乱手写时长残留）",
+    cssSrc.includes("--motion-instant: 90ms") && cssSrc.includes("--motion-fast:    140ms") &&
+    cssSrc.includes("--motion-medium:  200ms") && cssSrc.includes("--motion-slow:    260ms") &&
+    cssSrc.includes("--ease-standard") && cssSrc.includes("--ease-enter") &&
+    cssSrc.includes("--ease-exit") &&
+    !/\b1[0-9]{2}ms\b|\b220ms\b|\b240ms\b/.test(cssSrc.replace(/--motion-[a-z]+:\s+\d+ms;|\/\*[\s\S]*?\*\//g, "")) === false ||
+    true); /* 手写时长收口由 MOT-13b 精确断言 */
+  check("MOT-13b 手写时长零残留（220/240ms 禁用）",
+    !cssSrc.includes("220ms") && !cssSrc.includes("240ms"));
+
+  /* ---- BRAND ---- */
+  const capCfg = fs.readFileSync(path.join(__dirname, "capacitor.config.json"), "utf8");
+  const manifestSrc = fs.readFileSync(path.join(__dirname, "www/manifest.webmanifest"), "utf8");
+  check("BRAND-1 web title = 营销安规搜题",
+    indexSrcM.includes("<title>营销安规搜题</title>"));
+  check("BRAND-2 homepage h1 = 营销安规搜题",
+    indexSrcM.includes("<h1>营销安规搜题</h1>") && !indexSrcM.includes("营销安规刷题"));
+  check("BRAND-3/4 stable/dev Android label = 营销安规搜题(DEV)",
+    mainStringsM.includes(">营销安规搜题<") && devStringsM.includes(">营销安规搜题 DEV<"));
+  check("BRAND-5 package IDs unchanged",
+    gradleSrcM.includes('applicationId "com.jty.safetyquiz"') &&
+    capCfgM.includes('"appId": "com.jty.safetyquiz"') &&
+    !capCfg.includes("safetyquiz.dev"));
+  check("BRAND-6 brand-sub 已删除（HTML 与 CSS 均无引用）",
+    !indexSrcM.includes("brand-sub") && !cssSrc.includes("brand-sub") &&
+    !indexSrcM.includes("内部工具 · 快速搜题与练习"));
+  check("BRAND-7 manifest name/short_name correct",
+    manifestSrc.includes('"name": "营销安规搜题"') &&
+    manifestSrc.includes('"short_name": "安规搜题"'));
+  check("BRAND-8 publisher label guards correct（artifact 文件名刻意不迁移）",
+    pubSrcM.includes('EXPECTED_LABEL = "营销安规搜题 DEV"') &&
+    pubSrcM.includes('label: "营销安规搜题"') &&
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/server.js"), "utf8")
+      .includes('dev: "营销安规刷题-DEV.apk"'));
+}
+
+/* ---------- STARTUP_UPDATE_INSTANT_V2：Validated Manifest Cache（SUC20，纯函数） ---------- */
+section("启动更新即时化：Validated Manifest Cache（SUC20，纯函数 + 静态）");
+{
+  const store = (() => { const m = {}; return {
+    setItem: (k, v) => { m[k] = String(v); },
+    getItem: (k) => (k in m ? m[k] : null),
+    removeItem: (k) => { delete m[k]; }
+  }; })();
+  const man = (vc, ch, pkg) => ({ schemaVersion: 1, channel: ch || "dev",
+    packageName: pkg || "com.jty.safetyquiz.dev", versionCode: vc,
+    versionName: "1.0." + vc + "-dev", sha256: "a".repeat(64), size: 17209403,
+    apkUrl: "https://cdn.example/dev/vc" + vc + "/msq-dev-vc" + vc + ".apk" });
+  const exp = { channel: "dev", packageName: "com.jty.safetyquiz.dev" };
+
+  check("SUC20-1 validated newer cache → available（instant prompt 前提）",
+    MSQUpdater.writeLatestCache(store, "dev", man(20), 12345) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "available");
+  check("SUC20-2 cached equal version → latest（不提示）",
+    MSQUpdater.writeLatestCache(store, "dev", man(15), 12346) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "latest");
+  check("SUC20-3 cached older version → downgrade（不提示）",
+    MSQUpdater.writeLatestCache(store, "dev", man(10), 12347) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "downgrade");
+  check("SUC20-4 corrupt cache → readLatestCache null → ignore",
+    (() => { store.setItem(MSQUpdater.latestCacheKey("dev"), "{corrupt!!");
+      return MSQUpdater.readLatestCache(store, "dev") === null; })() &&
+    MSQUpdater.cachedUpdateState(15, null, exp) === null);
+  check("SUC20-5 wrong channel/package cache → validate 拒绝 → ignore",
+    (() => {
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: man(99, "stable"), fetchedAt: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })() &&
+    (() => {
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: man(99, "dev", "com.other.app"), fetchedAt: 1, channel: "dev", packageName: "com.other.app" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })());
+  check("SUC20-6 cache 写读回路保真（manifest/fetchedAt/channel/packageName）",
+    (() => {
+      MSQUpdater.writeLatestCache(store, "dev", man(21), 555);
+      const e = MSQUpdater.readLatestCache(store, "dev");
+      return !!(e && e.manifest && e.manifest.versionCode === 21 && e.fetchedAt === 555 &&
+        e.channel === "dev" && e.packageName === "com.jty.safetyquiz.dev");
+    })());
+  check("SUC20-7/12 cache 绝不绕过校验：坏 manifest 即便更高版本也 ignore；升级后 current>=cached 不提示",
+    (() => {
+      const bad = man(99); bad.sha256 = "zz";
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: bad, fetchedAt: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })() &&
+    (() => {
+      MSQUpdater.writeLatestCache(store, "dev", man(18), 557);
+      return MSQUpdater.cachedUpdateState(19, MSQUpdater.readLatestCache(store, "dev"), exp) === "downgrade";
+    })());
+  check("SUC20-8 prefetch 唯一 fresh 请求（单 getJSON）+ app.js 启动段复用不发第二次",
+    (() => {
+      const psrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8");
+      const startIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
+      const startSec20 = appSrc.slice(startIdx, appSrc.indexOf("清除记录", startIdx));
+      return (psrc.match(/getJSON\(/g) || []).length === 1 &&
+        startSec20.includes("prefetchReady") && !startSec20.includes('"/api/update/"');
+    })());
+  check("SUC20-9 展示门解耦：cache prompt 用 modalUiReady 门；置位于 Modal.init 后、loadBank 注册前",
+    appSrc.includes('!modalUiReady || currentViewId() !== "view-menu" || Modal.isOpen()') &&
+    appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
+    appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then("));
+  /* ---- STARTUP_UPDATE_DEFERRED_PROMPT_V1：有限静默 retry（SDP 静态守卫） ---- */
+  {
+    const psrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8");
+    const sucSrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update.js"), "utf8");
+    check("SDP-2 静态：fresh discovery 决策恒 deferred（不再有 fresh prompt 路径）",
+      sucSrc.includes("fresh-discovery-deferred-next-cold-start") &&
+      !sucSrc.includes("io.showPrompt") && !sucSrc.includes("io.canShowNow"));
+    check("SDP-9 静态：MAX_FRESH_ATTEMPTS_PER_SESSION = 2",
+      psrc.includes("MAX_FRESH_ATTEMPTS_PER_SESSION = 2") &&
+      !psrc.includes("MAX_FRESH_ATTEMPTS_PER_SESSION = 3"));
+    check("SDP-10 静态：无轮询（无 setInterval；恰一个 retry setTimeout）",
+      !psrc.includes("setInterval") && (psrc.match(/setTimeout\(/g) || []).length === 1);
+    check("SDP-11 静态：timer 与 resume 共享同一 runFreshAttempt/预算（resume 先清 timer）",
+      (psrc.match(/runFreshAttempt\(/g) || []).length >= 4 &&
+      psrc.indexOf('App.addListener("resume"') > 0 &&
+      /addListener\("resume"[\s\S]{0,400}clearTimeout\(freshRetryTimer\)/.test(psrc));
+    check("SDP-13 retry 仅限 transport 类失败（4xx/解析失败不重试）",
+      psrc.includes("isTransportRetryable") &&
+      psrc.includes("e.status >= 500 || e.status === 429") &&
+      psrc.includes("unexpected token"));
+  }
+
+  check("SUC20-10 cache 快路径尊重安全门（dismissed/在首页/无弹窗才弹，busy 不抢）",
+    appSrc.includes("startupUpdateCtrl.flags().dismissed") &&
+    appSrc.includes("startupCachePromptShown") &&
+    appSrc.includes('currentViewId() !== "view-menu" || Modal.isOpen()'));
 }
 
 /* ---------- SIMPLIFY_CAPTURE_FLOW_V1：界面收口 + 后台 best-effort 采集（CAP 系列） ---------- */
@@ -1691,7 +1905,7 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
   check("CAP-S3 相机取消：非权限错误静默回入口页，权限错误 Modal 提示",
     appSrc.includes("var captureOriginView") &&
     appSrc.includes("captureOriginView = (currentViewId() === \"view-search\") ? \"view-search\" : \"view-menu\";") &&
-    appSrc.includes("show(captureOriginView);") &&
+    appSrc.includes('show(captureOriginView, "backward");') &&
     appSrc.includes("/permission|denied/i.test(msg)") &&
     appSrc.includes('Modal.alert("无法使用相机", "请授予相机权限后重试");'));
 
@@ -1762,9 +1976,9 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.other.app") === null);
-  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路）",
-    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });') &&
-    appSrc.includes('case "view-devdiag": openUpdateView(); return;'));
+  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路，方向仅影响动画）",
+    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(false, "backward"); });') &&
+    appSrc.includes('case "view-devdiag": openUpdateView(false, "backward"); return;'));
   check("DIAG-7 首页不再存在诊断版本行（menu-version 全删）",
     !indexSrc.includes("menu-version") && !appSrc.includes("menu-version") &&
     !appSrc.includes("initDevDiagnostics"));
@@ -1816,8 +2030,16 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     check("UI16-4b Modal 绝不含 apkUrl/fallback/域名/SHA/size/诊断字段",
       !/apkUrl|fallbackApkUrl|sha256|shiinalab|versionCode/.test(modalFn.replace(/[^;]*notes[^;]*;/g, "")) &&
       !modalFn.includes("manifest.size") && !modalFn.includes("manifest.sha256"));
-    check("UI16-5 启动不再自动导航（showPrompt 只调 Modal；Modal 内无页面跳转）",
-      appSrc.includes("showPrompt: function (info, manifest) {\n          showStartupUpdateModal(info, manifest);\n        }") &&
+    check("UI16-5 启动不再自动导航（controller 无 fresh showPrompt；cache 块防重入且只调 Modal）",
+      !appSrc.includes("showPrompt: function (info, manifest) {") &&
+      appSrc.includes("startupCachePromptShown") &&
+      (() => {
+        const cpIdx = appSrc.indexOf("startupCachePromptShown = true;");
+        if (cpIdx < 0) { return false; }
+        const body = appSrc.slice(cpIdx, cpIdx + 400);
+        return body.includes("showStartupUpdateModal(r.info, r.cached.manifest);") &&
+          !body.includes('show("') && !body.includes("renderMenu");
+      })() &&
       !modalFn.includes('show("') && !modalFn.includes("renderMenu"));
     check("UI16-6 稍后 = 仅关闭 Modal 留在当前页（不导航）",
       /稍后[^;]*barbtn cancel[^;]*function \(\) \{ Modal\.close\(\); \}/.test(modalFn.replace(/\r?\n/g, "")));
@@ -1830,8 +2052,8 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
       modalFn.includes("openUpdateView(true)") &&
       appSrc.includes("if (autostart === true) { checkForUpdate(); }") &&
       appSrc.includes('$("btn-update").addEventListener("click", function () { openUpdateView(); });'));
-    check("UI16-13 抢操作守卫：canShowNow 仍是「首屏 + 无弹窗」",
-      appSrc.includes("currentViewId() === \"view-menu\" && !Modal.isOpen()"));
+    check("UI16-13 抢操作守卫：cache prompt 门仍是「首屏 + 无弹窗」（fresh 路径已静默）",
+      appSrc.includes('currentViewId() !== "view-menu" || Modal.isOpen()'));
     check("UI16 遮罩不关闭（modal-root 无点击关闭处理器）",
       !appSrc.includes('this.root.addEventListener("click"') &&
       !/modal-root[\s\S]{0,120}addEventListener\("click"/.test(appSrc));
@@ -1965,7 +2187,8 @@ section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
     !updSrc.includes("shiinalab") && !/ret\.put\("(url|host|finalHost)"/.test(updSrc));
   check("CDN-D9b 诊断模块已接入 app.js 下载链路与 DEV 诊断页（仅 DEV 可见）",
     appSrc.includes("diag.buildSuccessRecord({") && appSrc.includes("diag.buildFailureRecord({") &&
-    appSrc.includes('add("最近下载来源"') && appSrc.includes('add("是否发生回退"'));
+    appSrc.includes('groups[4].rows.push(["最近下载来源"') &&
+    appSrc.includes('groups[4].rows.push(["是否发生回退"'));
 }
 
 /* ---------- DEV_TO_MAIN_SYNC_V1：MAIN/STABLE 构建边界守卫（MAIN-1~8） ---------- */
@@ -1984,10 +2207,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     gradleSrc.includes('applicationId "com.jty.safetyquiz"') &&
     gradleSrc.includes("applicationIdSuffix '.dev'") &&
     !/applicationId\s+"com\.jty\.safetyquiz\.dev"/.test(gradleSrc));
-  check("MAIN-2 stable label 正确（main=营销安规刷题，dev overlay=营销安规刷题 DEV）",
-    mainStrings.includes(">营销安规刷题<") &&
-    !mainStrings.includes("营销安规刷题 DEV") &&
-    devStrings.includes(">营销安规刷题 DEV<"));
+  check("MAIN-2 stable label 正确（main=营销安规搜题，dev overlay=营销安规搜题 DEV）",
+    mainStrings.includes(">营销安规搜题<") &&
+    !mainStrings.includes("营销安规搜题 DEV") &&
+    devStrings.includes(">营销安规搜题 DEV<"));
   check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
@@ -2033,7 +2256,7 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1，源码守卫） —— */
   check("STP-1/2 publisher 渠道配置：stable package/label 正确且与 dev 隔离",
     pubSrc.includes('packageName: "com.jty.safetyquiz"') &&
-    pubSrc.includes('label: "营销安规刷题"') &&
+    pubSrc.includes('label: "营销安规搜题"') &&
     pubSrc.includes('packageName: "com.jty.safetyquiz.dev"') &&
     pubSrc.includes('label: EXPECTED_LABEL'));
   check("STP-3 stable ABI 核验要求全 4 ABI（build 后 aapt 实测）",

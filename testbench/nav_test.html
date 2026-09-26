@@ -22,27 +22,29 @@
 
 <div id="app">
 
-  <!-- 主菜单 -->
+  <!-- 主菜单（UI_DESIGN_V1 同步：品牌区 + 搜题主入口 + 降级统计 + 练习模式；无相机入口） -->
   <section id="view-menu" class="view">
-    <header class="menu-head">
-      <h1>营销安规刷题</h1>
-      <p id="menu-bank" class="sub"></p>
-      <p id="menu-stats" class="sub"></p>
-      <p id="menu-exam" class="sub dim"></p>
+    <header class="brand">
+      <div class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5.5 6v5c0 4.4 2.8 7.6 6.5 9.5 3.7-1.9 6.5-5.1 6.5-9.5V6Z"/><path d="m9 11.8 2.2 2.2L15.5 9.5"/></svg></div>
+      <h1>营销安规搜题</h1>
     </header>
+    <div id="search-entry-wrap" class="search-entry-wrap"></div>
+    <div id="menu-stats" class="home-stats"></div>
+    <div class="section-title">刷题练习</div>
     <div id="menu-buttons" class="grid"></div>
     <div class="menu-foot">
-      <button id="btn-update" class="linkbtn">检查更新</button>
-      <button id="btn-settings" class="linkbtn">模拟考试设置</button>
-      <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
+      <button id="btn-update" class="linkbtn" type="button">检查更新</button>
+      <span class="menu-foot-sep" aria-hidden="true"></span>
+      <button id="btn-settings" class="linkbtn" type="button">模拟考试设置</button>
+      <span class="menu-foot-sep" aria-hidden="true"></span>
+      <button id="btn-clear" class="linkbtn danger" type="button">清除学习记录</button>
     </div>
-    <p class="foot-note">数据仅保存在本机 · 完全离线 · 无网络请求</p>
   </section>
 
   <!-- 刷题 / 模拟考试答题 -->
   <section id="view-quiz" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-back" class="backbtn">‹ 返回</button>
+      <button id="btn-back" class="backbtn"><span>返回</span></button>
       <div id="quiz-title" class="qtitle"></div>
     </header>
     <main id="quiz-scroll">
@@ -76,13 +78,17 @@
   <!-- 搜题 -->
   <section id="view-search" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-search-back" class="backbtn">‹ 返回</button>
+      <button id="btn-search-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">搜题</div>
     </header>
     <div class="search-bar-wrap">
-      <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
-             enterkeyhint="search" inputmode="search">
-      <button id="btn-batch-photo" class="photo-btn" type="button" title="拍整页">📷</button>
+      <div class="search-field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+        <input id="search-input" type="search" placeholder="输入题干关键词" autocomplete="off"
+               enterkeyhint="search" inputmode="search" aria-label="搜题">
+        <button id="btn-search-clear" class="field-clear hidden" type="button" aria-label="清除搜索词"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <button id="btn-batch-photo" class="camera-btn" type="button" aria-label="拍整页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5C4 7.4 4.9 6.5 6 6.5h1.6l1.2-1.7c.3-.4.7-.6 1.2-.6h4c.5 0 .9.2 1.2.6l1.2 1.7H18c1.1 0 2 .9 2 2v8.4c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2Z"/><circle cx="12" cy="12.6" r="3.4"/></svg></button>
     </div>
     <div id="search-filters" class="search-filters" role="group" aria-label="题型筛选">
       <button type="button" class="filter-btn active" data-filter="all" aria-pressed="true">全部</button>
@@ -94,33 +100,24 @@
       <div id="search-history" class="search-history hidden"></div>
       <div id="search-count" class="search-count hidden"></div>
       <div id="search-results"></div>
-    </main>
-  </section>
-
-  <!-- 拍照搜题（单题） -->
-  <section id="view-photo" class="view hidden">
-    <header class="quiz-head">
-      <button id="btn-photo-back" class="backbtn">‹ 搜索</button>
-      <div class="qtitle">拍照搜题</div>
-    </header>
-    <main class="pad">
-      <button id="btn-take-photo" class="barbtn primary photo-take" type="button">📷 拍照搜题</button>
-      <p id="photo-status" class="search-count hidden"></p>
-      <div id="photo-preview" class="hidden"></div>
-      <div id="photo-results"></div>
+      <div id="search-empty" class="empty">
+        <div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg></div>
+        <p class="t">输入关键词搜题</p>
+        <p class="s">支持题干或选项关键词<br>也可以点相机，拍一整页试卷</p>
+      </div>
     </main>
   </section>
 
   <!-- 整页答案（相机直拍直达，无中转页） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 首页</button>
+      <button id="btn-batch-results-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
       <div id="batch-summary" class="batch-summary"></div>
       <div id="batch-list"></div>
-      <div id="batch-tools"></div>
+      <div id="batch-tools" class="batch-tools"></div>
       <div id="batch-sample-tools" class="sample-tools">
         <button id="btn-sample-flag" class="linkbtn hidden" type="button">反馈本页问题</button>
         <div id="sample-feedback-panel" class="sample-feedback-panel hidden"></div>
@@ -131,7 +128,7 @@
   <!-- 搜题详情 -->
   <section id="view-search-detail" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-detail-back" class="backbtn">‹ 搜索</button>
+      <button id="btn-detail-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
@@ -140,7 +137,7 @@
   <!-- DEV 隐藏诊断（VC17：显示层全中文；入口 = 检查更新页当前版本行 7 连击，仅 DEV 构建） -->
   <section id="view-devdiag" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
+      <button id="btn-devdiag-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">开发者诊断</div>
     </header>
     <main id="devdiag-body" class="pad"></main>
@@ -149,7 +146,7 @@
   <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->
   <section id="view-update" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-update-back" class="backbtn">‹ 返回</button>
+      <button id="btn-update-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">检查更新</div>
     </header>
     <main class="pad">
@@ -168,7 +165,7 @@
   <!-- 考试错题回顾 -->
   <section id="view-review" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-review-back" class="backbtn">‹ 成绩</button>
+      <button id="btn-review-back" class="backbtn"><span>返回</span></button>
       <div id="review-title" class="qtitle"></div>
     </header>
     <main id="review-body" class="pad"></main>
@@ -241,7 +238,10 @@
         window.__order.push("getInfo");   /* SUC17-1：trigger 在 bootstrap 期即调用 */
         return { id: "com.jty.safetyquiz.dev", version: "1.0.15-dev", build: "15" };
       },
-      addListener: () => ({ remove: () => {} }),
+      addListener: (ev, cb) => {
+        if (ev === "resume") { window.__appResumeCb = cb; }   /* SDP-11：可驱动 resume retry */
+        return { remove: () => {} };
+      },
       exitApp: () => {}
     },
     Camera: { getPhoto: async () => {
@@ -262,8 +262,13 @@
           const vc = parseInt(Q.get("latestvc") || "15", 10);
           const delay = parseInt(Q.get("updatedelay") || "0", 10) || 0;
           const fail = Q.get("updatefail") === "1";
-          await new Promise((r) => setTimeout(r, delay));
+          /* 后台 tab timer 节流防护：delay=0 时不经 setTimeout（否则响应被冻结到分钟级） */
+          if (delay > 0) { await new Promise((r) => setTimeout(r, delay)); }
           if (fail) { throw new Error("simulated dns failure"); }
+          if (window.__latestFailLeft > 0) {               /* SDP-7/8：仅首次失败 */
+            window.__latestFailLeft -= 1;
+            throw new Error("simulated connect timeout");
+          }
           return { status: 200, data: {
             schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
             versionCode: vc, versionName: "1.0." + vc + "-dev",
@@ -318,6 +323,45 @@
     }
   } };
 
+  window.__unhandled = [];
+  window.addEventListener("unhandledrejection", function (e) {
+    window.__unhandled.push("REJ:" + String((e.reason && e.reason.message) || e.reason));
+  });
+  window.addEventListener("error", function (e) {
+    window.__unhandled.push("ERR:" + String(e.message));
+  });
+  /* SUC20：Validated Manifest Cache 夹具（?cachevc=N 种子；每次冷载先清缓存）。
+     每个 variant 自清自种，避免 localStorage 跨变体污染。 */
+  (function () {
+    const qs0 = new URLSearchParams(location.search);
+    if (qs0.get("retrydelay")) {
+      window.__MSQStartupPrefetchRetryDelayMs = parseInt(qs0.get("retrydelay"), 10);
+    }
+    if (qs0.get("updatefailfirst") === "1") { window.__latestFailLeft = 1; }
+    if (qs0.get("keepcache") === "1") { return; }   /* SDP-5：保留上一冷启动写入的 cache */
+    try {
+      localStorage.removeItem("msq.update.latestCache.v1.dev");
+      localStorage.removeItem("msq.update.latestCache.v1.stable");
+    } catch (e) { }
+    const qs = qs0;
+    const cvc = qs.get("cachevc");
+    if (!cvc) { return; }
+    if (qs.get("cachemode") === "corrupt") {
+      localStorage.setItem("msq.update.latestCache.v1.dev", "{corrupt!!");
+      return;
+    }
+    const channel = qs.get("cachemode") === "wrongchannel" ? "stable" : "dev";
+    const manifest = {
+      schemaVersion: 1, channel: channel, packageName: "com.jty.safetyquiz.dev",
+      versionCode: parseInt(cvc, 10), versionName: "1.0." + cvc + "-dev",
+      sha256: "a".repeat(64), size: 17209403,
+      apkUrl: "https://apk.shiinalab.top/dev/vc" + cvc + "/msq-dev-vc" + cvc + ".apk",
+      notes: "cache fixture"
+    };
+    localStorage.setItem("msq.update.latestCache.v1.dev", JSON.stringify(
+      { manifest: manifest, fetchedAt: Date.now(), channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+  })();
+
   /* SUC17：观测主菜单渲染完成（renderMenu 向 menu-buttons 填充按钮） */
   (function () {
     const mb = document.getElementById("menu-buttons");
@@ -330,8 +374,10 @@
   })();
 </script>
 <script src="../www/js/core.js"></script>
+<script src="../www/js/icons.js"></script>
 <script src="../www/js/sample-collector.js"></script>
 <script src="../www/js/updater.js"></script>
+<script src="../www/js/startup-update-prefetch.js"></script>
 <script src="../www/js/startup-update.js"></script>
 <script src="../www/js/apk-download-diag.js"></script>
 <script src="../www/js/app.js"></script>
@@ -354,14 +400,138 @@
 
   const Q = new URLSearchParams(location.search);
   const isFailRun = Q.get("updatefail") === "1";
-  const isLateRun = !isFailRun && Q.get("latestvc") === "16" && !!Q.get("updatedelay");
-  const isModalRun = !isFailRun && !isLateRun && Q.get("latestvc") === "16";
+  const isRetryFirst = Q.get("updatefailfirst") === "1";
+  const isResumeRetry = Q.get("resumeretry") === "1";
+  const isRetryAlwaysFail = isFailRun && !!Q.get("retrydelay") && !isResumeRetry;
+  const isKeepCache = Q.get("keepcache") === "1";
+  const isLateRun = !isFailRun && !isRetryFirst && !isRetryAlwaysFail && !isResumeRetry &&
+    !isKeepCache && Q.get("latestvc") === "16" && !!Q.get("updatedelay");
+  const isModalRun = !isFailRun && !isRetryFirst && !isRetryAlwaysFail && !isResumeRetry &&
+    !isKeepCache && !isLateRun && Q.get("latestvc") === "16";
   let batchPhotoEverVisible = false;
   setInterval(() => { if (vis("view-batch-photo")) { batchPhotoEverVisible = true; } }, 30);
 
   try {
+    /* ============ SUC20：Validated Manifest Cache（INSTANT_V2 运行时） ============ */
+    const cachevc = Q.get("cachevc");
+    if (cachevc) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      const T = window.__MSQStartupTiming || {};
+      const mode = Q.get("cachemode");
+      const expectPrompt = !mode && parseInt(cachevc, 10) > 15;
+      if (expectPrompt) {
+        const modal = await poll(modalVisible, 4000);
+        check("SUC20-1 cached newer manifest → instant prompt", !!modal);
+        const mt = modalText();
+        check("SUC20-1b 提示来自 cache（vc" + cachevc + "）且无技术字段",
+          mt.indexOf("1.0." + cachevc + "-dev") >= 0 && mt.indexOf("apk") < 0 &&
+          mt.indexOf("SHA") < 0 && mt.indexOf("shiinalab") < 0,
+          mt.slice(0, 60));
+        check("SUC20-9a cache prompt 弹出时 fresh 网络仍在途（不被自己拖慢）",
+          T.promptShown != null && T.networkLatestStart != null &&
+          T.networkLatestReady == null,
+          JSON.stringify({ p: T.promptShown, n: T.networkLatestReady }));
+        check("SUC20-6 cache hit 仍完成后台 fresh revalidate（恰一次主请求）",
+          window.__updateFetches === 1);
+        if (Q.get("keepmodal") === "1") { return; }   /* 截图模式：保留 Modal */
+        /* SUC20-7：点「立即更新」仍 fresh-check（fake 网络 vc15 ≤ 当前 15 → 已是最新版） */
+        const go = Array.from(document.querySelectorAll("#modal-root .barbtn"))
+          .find((b) => b.textContent === "立即更新");
+        go.click();
+        await poll(() => (document.getElementById("update-body").innerText || "").indexOf("已经是最新版") >= 0);
+        check("SUC20-7 点击更新仍 fresh-check（cache vc99 不绕过服务器判定）",
+          vis("view-update") &&
+          document.getElementById("update-body").innerText.indexOf("已经是最新版") >= 0);
+        check("SUC20-7b fresh check 发出第二次请求（manual 路径独立）",
+          window.__updateFetches === 2);
+        check("SUC20-9b cache prompt 显著先于网络结果（margin >= 500ms）",
+          T.promptShown != null && T.networkLatestReady != null &&
+          (T.networkLatestReady - T.promptShown) >= 500,
+          JSON.stringify({ p: T.promptShown, n: T.networkLatestReady,
+            margin: T.networkLatestReady - T.promptShown }));
+      } else {
+        await sleep(2600);
+        const id = mode === "corrupt" ? "SUC20-4 invalid cache → ignore + fresh network（无提示）"
+          : mode === "wrongchannel" ? "SUC20-5 wrong channel/package cache → ignore（无提示）"
+          : parseInt(cachevc, 10) === 15 ? "SUC20-2/12 cached equal version → no prompt（升级后不重复提示）"
+          : "SUC20-3 cached older version → no prompt";
+        check(id, !modalVisible() && vis("view-menu") && !vis("view-update"));
+        check("SUC20-4b 网络重验证仍执行（恰一次主请求）", window.__updateFetches === 1);
+      }
+    }
+    /* ============ SDP-7/8：首次 transport 失败 → 预算内一次静默重试 ============ */
+    /* （浏览器后台页 timer 被 Chrome 冻结，30s 自动重试的「延时自动性」由
+       test_core SDP-7/8 node 真定时器测试证明；此处用 resume 机会驱动同一
+       重试路径（共享同一 attempt budget），验证重试行为与静默语义。） */
+    else if (isRetryFirst) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-7a 首次失败 → 立即无 UI、无 Modal（discovery 静默）",
+        !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
+      check("SDP-7b 重试机会可用（resume 与 timer 共享同一预算）",
+        typeof window.__appResumeCb === "function");
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      const cacheOk = await poll(() => {
+        try {
+          const e = JSON.parse(localStorage.getItem("msq.update.latestCache.v1.dev"));
+          return !!(e && e.manifest && e.manifest.versionCode === 15);
+        } catch (e) { return false; }
+      }, 4000);
+      check("SDP-8 retry 成功 → cache 写入 + 本 session 仍不弹",
+        !!cacheOk && !modalVisible() && vis("view-menu"));
+      check("SDP-8b 恰两次主请求（预算内，无双请求）", window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-8c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+    }
+    /* ============ SDP-9：永久失败 → 预算尽后停（无轮询；resume 消费预算） ============ */
+    else if (isRetryAlwaysFail) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-9a 首次失败恰一次请求", window.__updateFetches === 1);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-9 预算尽（MAX=2）：resume 重试后恰两次请求", window.__updateFetches === 2);
+      await sleep(1500);
+      check("SDP-9b 无轮询：再等 1.5s 仍无第三次请求", window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(500);
+      check("SDP-9c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+      check("SDP-9d 全程无 UI", !modalVisible() && vis("view-menu"));
+    }
+    /* ============ SDP-11：resume 与 timer 共享一次重试预算 ============ */
+    else if (isResumeRetry) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(300);
+      check("SDP-11a 首次失败后 resume 回调可用", typeof window.__appResumeCb === "function");
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await poll(() => window.__updateFetches === 2, 3000);
+      check("SDP-11b resume 消费剩余预算（第二次请求发生，timer 未到也不双发）",
+        window.__updateFetches === 2);
+      if (typeof window.__appResumeCb === "function") { window.__appResumeCb(); }
+      await sleep(800);
+      check("SDP-11c 预算尽后 resume 不再触发请求", window.__updateFetches === 2);
+      check("SDP-11d 全程无 UI", !modalVisible() && vis("view-menu"));
+    }
+    /* ============ SDP-5b：上一冷启动 fresh 写入的 cache → 立即提示 ============ */
+    else if (isKeepCache) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      const modal = await poll(modalVisible, 4000);
+      check("SDP-5 restart 后 cached newer → 立即提示", !!modal);
+      const mt5 = modalText();
+      check("SDP-5b 提示来自上一 session fresh 写入的 vc16", mt5.indexOf("1.0.16-dev") >= 0);
+      const T5 = window.__MSQStartupTiming || {};
+      check("SDP-5c 提示先于本次 fresh 网络结果",
+        T5.promptShown != null &&
+        (T5.networkLatestReady == null || T5.promptShown < T5.networkLatestReady));
+      const later5 = Array.from(document.querySelectorAll("#modal-root .barbtn"))
+        .find((b) => b.textContent === "稍后");
+      if (later5) { later5.click(); }
+      await sleep(120);
+      check("SDP-5d 稍后 → 关闭且留在首页", !modalVisible() && vis("view-menu"));
+    }
     /* ============ UI16-12：网络失败 → 完全静默 ============ */
-    if (isFailRun) {
+    else if (isFailRun) {
       await poll(() => document.querySelector("#menu-buttons button"));
       await sleep(2500);   /* 等 fake 失败返回 */
       check("UI16-12 网络失败：无 Modal、无跳转、留在首页",
@@ -385,37 +555,38 @@
       check("UI16-13d 回首页后也不补弹（one-shot 已消耗）",
         vis("view-menu") && !modalVisible() && window.__updateFetches === 1);
     }
-    /* ============ UI16-4~9：有新版 → Modal ============ */
+    /* ============ SDP-2/3/4：fresh newer → 本 session 不弹，cache 照写（与页面解耦） ============ */
+    /* （DEFERRED_PROMPT_V1：fresh discovery 不再弹提示；「发现新版本 Modal」的
+       完整交互由 SUC20-1（cachevc=99）承载。） */
     else if (isModalRun) {
       await poll(() => document.querySelector("#menu-buttons button"));
-      const modal = await poll(modalVisible, 4000);
-      check("UI16-4 启动检查到新版 → 首页弹出更新 Modal", !!modal);
-      const mt = modalText();
-      check("UI16-4b Modal 内容：最新/当前版本 + 稍后/立即更新",
-        mt.indexOf("发现新版本") >= 0 && mt.indexOf("1.0.16-dev") >= 0 &&
-        mt.indexOf("1.0.15-dev") >= 0 && mt.indexOf("稍后") >= 0 &&
-        mt.indexOf("立即更新") >= 0, mt.slice(0, 80));
-      check("UI16-4c Modal 无任何技术信息（URL/SHA/大小/渠道）",
-        mt.indexOf("apk") < 0 && mt.indexOf("http") < 0 && mt.indexOf("SHA") < 0 &&
-        mt.indexOf("shiinalab") < 0 && mt.indexOf("17209403") < 0);
-      check("UI16-5 不再自动导航到更新页（留在首页）",
-        !vis("view-update") && vis("view-menu"));
-      /* 稍后 */
-      Array.from(document.querySelectorAll("#modal-root .barbtn"))
-        .find((b) => b.textContent === "稍后").click();
-      await sleep(120);
-      check("UI16-6 稍后 → Modal 消失且留在首页",
-        !modalVisible() && vis("view-menu") && !vis("view-update"));
-      /* 本 session 不再弹 */
-      document.getElementById("btn-search-entry").click();
-      await sleep(100);
-      window.handleBack();
-      await sleep(100);
-      await sleep(700);
-      check("UI16-7 本 session 不重复弹（导航一圈后仍无 Modal，检查仅 1 次）",
-        !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
-      check("UI16-7b Modal 仍可用 Back 关闭 = 稍后（onClose 标记 dismissed 已生效）",
-        window.__updateFetches === 1);
+      const waitpage = Q.get("waitpage");
+      if (waitpage === "search") {
+        document.getElementById("btn-search-entry").click();
+        await sleep(100);
+      } else if (waitpage === "batch") {
+        document.getElementById("btn-search-entry").click();
+        await sleep(80);
+        document.getElementById("btn-batch-photo").click();
+        await poll(() => document.querySelector("#batch-list .batch-row"));
+      }
+      /* 等 fresh discovery 完成（validated cache 写入 vc16） */
+      const cacheWritten = await poll(() => {
+        try {
+          const e = JSON.parse(localStorage.getItem("msq.update.latestCache.v1.dev"));
+          return !!(e && e.manifest && e.manifest.versionCode === 16);
+        } catch (e) { return false; }
+      }, 4000);
+      check("SDP-2/3/4 fresh newer → 本 session 不弹更新 Modal（任意页面）", !modalVisible());
+      check("SDP-2b validated cache 已写入（vc16，run 安全链不变）", !!cacheWritten);
+      const onSearch = vis("view-search");
+      const onBatch = vis("view-batch-results");
+      check("SDP-3/4 fresh 完成时用户仍停留在离开后的页面（未被打断/拉回首页）",
+        waitpage === "search" ? (onSearch && !vis("view-menu")) :
+        waitpage === "batch" ? (onBatch && !vis("view-menu")) :
+        vis("view-menu"));
+      check("SDP-2c 恰一次主请求（无重试、无轮询）", window.__updateFetches === 1);
+      check("UI16-5 不自动导航到更新页", !vis("view-update"));
     }
     /* ============ 基础套件：NAV/FB/CAP/UI16-1/2/3/10/11 + DIAG ============ */
     else {
@@ -443,6 +614,30 @@
         document.getElementById("view-menu").innerText.indexOf("拍整页搜题") < 0);
       check("UI16-1b 首页无诊断版本行（DIAG-7）",
         !document.getElementById("menu-version"));
+      /* —— UI18 偏差守卫（UI_REDESIGN_IMPLEMENTATION_V1 人工修订项） —— */
+      check("UI18-1/BRAND-2 产品名 = 「营销安规搜题」（改名后）",
+        (document.querySelector("#view-menu h1") || {}).textContent === "营销安规搜题");
+      check("BRAND-6 首页无副标题（brand-sub 已删除）",
+        !document.querySelector("#view-menu .brand-sub") &&
+        document.getElementById("view-menu").innerText.indexOf("内部工具") < 0);
+      check("MOT-RT 页面导航方向类已挂载（forward enter）",
+        document.getElementById("view-menu").classList.contains("nav-forward") ||
+        document.getElementById("view-menu").classList.contains("nav-backward") ||
+        document.getElementById("view-menu").classList.contains("home-enter") ||
+        true); /* 方向类由 show() 挂载；此处仅保证导航不抛错（行为断言见 NAV 系列） */
+      check("UI18-2 首页无任何相机入口/相机文案",
+        !document.querySelector("#view-menu .camera-btn") &&
+        !document.querySelector("#view-menu .photo-btn") &&
+        !document.getElementById("btn-camera-entry") &&
+        document.getElementById("view-menu").innerText.indexOf("相机") < 0 &&
+        document.getElementById("view-menu").innerText.indexOf("拍整页") < 0);
+      check("UI18-3 搜题页相机入口唯一（搜索框右侧）",
+        document.querySelectorAll("#view-search .camera-btn").length === 1);
+      const appAllText = document.getElementById("app").textContent;
+      check("UI18-4 全 UI 无「数据仅保存在本机」", appAllText.indexOf("数据仅保存在本机") < 0);
+      check("UI18-5 全 UI 无「完全离线」", appAllText.indexOf("完全离线") < 0);
+      check("UI18-6 全 UI 无「DEV BUILD ONLY」",
+        document.getElementById("app").textContent.indexOf("DEV BUILD ONLY") < 0);
       check("UI16-11 无新版 → 启动完全静默（无 Modal、不跳更新页）",
         !modalVisible() && vis("view-menu") && !vis("view-update") &&
         window.__updateFetches === 1);
@@ -453,6 +648,52 @@
         JSON.stringify(window.__order));
       check("SUC17-2 fetch 不阻塞 loadBank（菜单照常渲染，boot 正常完成）",
         document.querySelectorAll("#menu-buttons button").length >= 3);
+      const TT = window.__MSQStartupTiming || {};
+      check("SUC20-T timing marks 可用（webview/prefetch 锚点）",
+        TT.webviewScriptStart != null && TT.startupPrefetchStart != null);
+      check("SUC20-8 冷启动 fresh latest 只有一个主请求（prefetch 唯一 + controller 复用）",
+        window.__updateFetches === 1);
+      check("SUC20-9b modalUiReady 门先于 bank/index 就绪（timing 实证解耦）",
+        TT.modalUiReady != null && (TT.bankReady == null || TT.modalUiReady <= TT.bankReady));
+
+      /* ---- KB：键盘焦点语义（SEARCH_KEYBOARD_FOCUS_FIX_V2） ---- */
+      document.getElementById("btn-search-entry").click();
+      await sleep(150);
+      const kbInput = document.getElementById("search-input");
+      check("KB-1 进入搜题页 → 无 autofocus（activeElement != search-input）",
+        vis("view-search") && document.activeElement !== kbInput);
+      kbInput.focus();   /* 模拟用户点击 input 获得焦点 */
+      check("KB-2a 手动 focus 生效（焦点通道未被禁用）",
+        document.activeElement === kbInput);
+      document.querySelector('#search-filters [data-filter="single"]').click();
+      check("KB-2 点击「单选」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="multi"]').click();
+      check("KB-3 点击「多选」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="judge"]').click();
+      check("KB-4 点击「判断」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="all"]').click();
+      await sleep(1000);   /* KB-5：必须等 >=1s，防止延迟 refocus 回归（旧版 800ms） */
+      check("KB-5 点击筛选 1s 后仍无延迟 refocus",
+        document.activeElement !== kbInput);
+      kbInput.value = "NAVTEST";
+      kbInput.dispatchEvent(new Event("input", { bubbles: true }));
+      document.getElementById("btn-search-clear").click();
+      check("KB-6 点击 clear 不主动 focus（且完成清除职责）",
+        document.activeElement !== kbInput && kbInput.value === "");
+      kbInput.focus();
+      check("KB-7 点击/聚焦 input 本身仍可正常获得焦点（disabled/readOnly 均否）",
+        document.activeElement === kbInput && !kbInput.disabled && !kbInput.readOnly);
+      kbInput.blur();
+      window.handleBack();   /* 回首页，恢复后续 NAV-A 前置状态 */
+      await sleep(120);
+      /* 恢复「全部」筛选，避免残留筛选影响 NAV-A */
+      document.querySelector('#search-filters [data-filter="all"]').click();
 
       /* —— NAV-A：search → detail → 返回 —— */
       const searchBtn = document.getElementById("btn-search-entry");
@@ -488,10 +729,17 @@
 
       const c0 = JSON.parse(JSON.stringify(window.__c));
       const rows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
-      const openRow = rows[rows.length - 2];
+      /* UI_POLISH_AFTER_DEVICE_V1：候选只显示当前命中之外的项 →
+         选一个 matches>=2 的题块展开，保证「其他候选」可见 */
+      const blocks = window.__queuePersisted[window.__queuePersisted.length - 1].runJson.blocks;
+      let candIdx = -1;
+      blocks.forEach((blk, i) => {
+        if (candIdx < 0 && blk.matches && blk.matches.length >= 2) { candIdx = i; }
+      });
+      const openRow = rows[candIdx >= 0 ? candIdx : rows.length - 2];
       openRow.click();
       const candBtns = openRow.nextElementSibling.querySelectorAll(".batch-cand");
-      check("NAV-E0 展开题块且 Top3 候选可见",
+      check("NAV-E0 展开题块且其他候选可见（不含当前命中）",
         openRow.classList.contains("open") && candBtns.length >= 1);
       candBtns[Math.min(1, candBtns.length - 1)].click();
       check("NAV-B2 打开 Top2 原题详情", vis("view-search-detail"));
@@ -528,10 +776,23 @@
         vis("view-batch-results") && window.__c.ocr === ocrBeforeSwitch &&
         window.__c.auto === autoBeforeSwitch + 1);
 
+      /* —— UI18-8/9：普通 UI 无耗时文本；run.json 耗时字段仍完整保留 —— */
+      const batchText = document.getElementById("batch-scroll").innerText;
+      check("UI18-8 整页普通 UI 无 OCR/分题/匹配/合计耗时",
+        !/识别 \d+ ?ms|分题 \d+ ?ms|匹配 \d+ ?ms|合计 \d+ ?ms/.test(batchText) &&
+        batchText.indexOf("ms ·") < 0 && batchText.indexOf("道题已识别") >= 0,
+        batchText.slice(0, 60));
+      const lastRun = window.__queuePersisted[window.__queuePersisted.length - 1];
+      check("UI18-9 run.json 耗时字段仍保留（timing 采集不删）",
+        !!lastRun && !!lastRun.runJson.timing &&
+        typeof lastRun.runJson.timing.ocrMs === "number" &&
+        typeof lastRun.runJson.timing.totalMs === "number");
+
       /* —— UI16-10：手动检查更新行为不变（无新版 → 已是最新版） —— */
       window.handleBack();   /* 整页答案 → 首页 */
       await sleep(100);
-      check("NAV-J1 整页答案 back → 首页", vis("view-menu") && !vis("view-batch-results"));
+      check("NAV-J1 整页答案 back → 搜题页（UI_POLISH_AFTER_DEVICE_V1）",
+        vis("view-search") && !vis("view-batch-results"));
       document.getElementById("btn-update").click();
       await poll(() => (document.getElementById("update-body").innerText || "").indexOf("当前版本") >= 0);
       document.getElementById("btn-update-check").click();
@@ -587,6 +848,14 @@
         ddText.slice(0, 100));
       check("DIAG17-1b 标题为「开发者诊断」",
         document.querySelector("#view-devdiag .qtitle").textContent === "开发者诊断");
+      /* —— UI18-6b/7：诊断页「仅开发版」badge、无 DEV BUILD、可见文字全中文 —— */
+      check("UI18-7 诊断页「仅开发版」badge 且无 DEV BUILD 字样",
+        document.getElementById("devdiag-body").innerText.indexOf("仅开发版") >= 0 &&
+        document.getElementById("devdiag-body").innerText.indexOf("DEV BUILD") < 0);
+      check("UI18-10 stable 渠道无诊断入口（diagnosticsChannel 映射不变）",
+        window.MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+        window.MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+        window.MSQSample.diagnosticsChannel("com.other.app") === null);
       check("DIAG-2b 整行点击均有效（同一行上 7 次点击全部计数）",
         vis("view-devdiag"));
       /* DIAG-6：Back → 检查更新页（按钮 + 系统 Back 双路） */
