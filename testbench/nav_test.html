@@ -656,6 +656,45 @@
       check("SUC20-9b modalUiReady 门先于 bank/index 就绪（timing 实证解耦）",
         TT.modalUiReady != null && (TT.bankReady == null || TT.modalUiReady <= TT.bankReady));
 
+      /* ---- KB：键盘焦点语义（SEARCH_KEYBOARD_FOCUS_FIX_V2） ---- */
+      document.getElementById("btn-search-entry").click();
+      await sleep(150);
+      const kbInput = document.getElementById("search-input");
+      check("KB-1 进入搜题页 → 无 autofocus（activeElement != search-input）",
+        vis("view-search") && document.activeElement !== kbInput);
+      kbInput.focus();   /* 模拟用户点击 input 获得焦点 */
+      check("KB-2a 手动 focus 生效（焦点通道未被禁用）",
+        document.activeElement === kbInput);
+      document.querySelector('#search-filters [data-filter="single"]').click();
+      check("KB-2 点击「单选」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="multi"]').click();
+      check("KB-3 点击「多选」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="judge"]').click();
+      check("KB-4 点击「判断」→ activeElement != search-input",
+        document.activeElement !== kbInput);
+      kbInput.focus();
+      document.querySelector('#search-filters [data-filter="all"]').click();
+      await sleep(1000);   /* KB-5：必须等 >=1s，防止延迟 refocus 回归（旧版 800ms） */
+      check("KB-5 点击筛选 1s 后仍无延迟 refocus",
+        document.activeElement !== kbInput);
+      kbInput.value = "NAVTEST";
+      kbInput.dispatchEvent(new Event("input", { bubbles: true }));
+      document.getElementById("btn-search-clear").click();
+      check("KB-6 点击 clear 不主动 focus（且完成清除职责）",
+        document.activeElement !== kbInput && kbInput.value === "");
+      kbInput.focus();
+      check("KB-7 点击/聚焦 input 本身仍可正常获得焦点（disabled/readOnly 均否）",
+        document.activeElement === kbInput && !kbInput.disabled && !kbInput.readOnly);
+      kbInput.blur();
+      window.handleBack();   /* 回首页，恢复后续 NAV-A 前置状态 */
+      await sleep(120);
+      /* 恢复「全部」筛选，避免残留筛选影响 NAV-A */
+      document.querySelector('#search-filters [data-filter="all"]').click();
+
       /* —— NAV-A：search → detail → 返回 —— */
       const searchBtn = document.getElementById("btn-search-entry");
       searchBtn.click();

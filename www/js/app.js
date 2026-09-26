@@ -926,6 +926,13 @@
       var el = e.target;
       while (el && el !== box && !el.classList.contains("filter-btn")) { el = el.parentNode; }
       if (!el || el === box) { return; }
+      /* SEARCH_KEYBOARD_FOCUS_FIX_V2：任意筛选点击都显式解除搜索框焦点 ——
+         Android 触摸点击不保证夺焦/blur，显式 blur 确保软键盘不出现、不残留，
+         且在 applyFilter 之前执行（KB-2~5）。桌面 mousedown preventDefault 保留。 */
+      var input = $("search-input");
+      if (input) {
+        try { input.blur(); } catch (err) { }
+      }
       applyFilter(el.getAttribute("data-filter"));
     });
   }
@@ -933,9 +940,8 @@
   function openSearch() {
     show("view-search", "forward");
     renderHistory();
-    setTimeout(function () {
-      try { $("search-input").focus(); } catch (e) { }
-    }, 60);
+    /* SEARCH_KEYBOARD_FOCUS_FIX_V2：进入搜题页不做 autofocus —— 键盘只在
+       用户直接点击搜索框时出现（KB-1）。不新增替代 autofocus。 */
   }
 
   /* 搜题详情：只显示 题型/原始题干/原始选项（原序）/正确答案，不含解析与记忆技巧 */
@@ -2623,12 +2629,12 @@
     var searchClear = $("btn-search-clear");
     if (searchClear) {
       searchClear.addEventListener("click", function () {
+        /* SEARCH_KEYBOARD_FOCUS_FIX_V2：清除只做数据/可见状态更新，
+           不主动 focus（KB-6）；用户想继续输入会自己再点搜索框 */
         searchInput.value = "";
         doSearch("");
         renderHistory();
         searchClear.classList.remove("show");
-        try { searchInput.focus({ preventScroll: true }); }
-        catch (e) { try { searchInput.focus(); } catch (e2) { } }
       });
     }
     searchInput.addEventListener("input", function () {
