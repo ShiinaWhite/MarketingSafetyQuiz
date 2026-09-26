@@ -63,6 +63,8 @@ public class SampleQueuePlugin extends Plugin {
     private static final String RUN_NAME = "run.json";
     private static final String FEEDBACK_NAME = "feedback.json";
     private static final String STATE_NAME = "state.json";
+    /** janitor 诊断记录（非敏感：时间戳与字节数，SIMPLIFY_CAPTURE_FLOW_V1） */
+    private static final String JANITOR_NAME = "janitor.json";
     private static final String CAPTURE_CONTENT_TYPE = "image/jpeg";
     private static final long HTTP_TIMEOUT_MS = 60_000;
     private static final int HTTP_READ_TIMEOUT_MS = 60_000;
@@ -205,6 +207,13 @@ public class SampleQueuePlugin extends Plugin {
                 ret.put("recovered", recovered);
                 ret.put("removed", removed);
                 call.resolve(ret);
+                /* SIMPLIFY_CAPTURE_FLOW_V1：冷启动是 janitor 的合法时机之一；
+                   24h 节流在 runJanitor 内部判定。单线程 workerExecutor 保证与
+                   上传 worker 串行（active/uploading/committing 样本天然受保护）。 */
+                workerExecutor.execute(new Runnable() {
+                    @Override
+                    public void run() { runJanitor(false); }
+                });
                 startWorker();
             }
         });
@@ -359,7 +368,7 @@ public class SampleQueuePlugin extends Plugin {
                 File[] dirs = queueDir().listFiles();
                 if (dirs != null) {
                     for (File dir : dirs) {
-                        if (!dir.isDirectory()) { continue; }
+                        if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
                         JSONObject st = readState(dir, dir.getName());
                         String cleanupStatus = st.optString("status", "");
                         boolean cleanupEligible =
@@ -396,13 +405,249 @@ public class SampleQueuePlugin extends Plugin {
         });
     }
 
+    /* ---------------- 自动 Janitor（SIMPLIFY_CAPTURE_FLOW_V1） ----------------
+       用户不再有「清理失败样本」按钮，队列完全自维护：
+         synced → 及时删除；failed/auth_failed → 7 天；pending/retry_wait → 14 天；
+         256 MiB 硬限内先删最老 failed/auth_failed，再删长期滞留 pending/retry_wait。
+       完整扫描 24h 最多一次（runJanitorNow 可强制）。删除判定在 SampleQueueModel
+       纯函数（JVM 单测 CAP-S12~16），本类只负责 IO 与调度。
+       调用约定：必须在 workerExecutor 线程执行 —— 与 processSample 串行，
+       active/uploading/committing 样本天然不会被并发删除。 */
+
+    private File janitorFile() {
+        return new File(queueDir(), JANITOR_NAME);
+    }
+
+    private synchronized JSONObject readJanitorRecord() {
+        try {
+            return SampleQueueModel.fromJson(
+                    new String(readFile(janitorFile()), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return new JSONObject();
+        }
+    }
+
+    private static long dirSize(File dir) {
+        long total = 0;
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) { total += f.length(); }
+        }
+        return total;
+    }
+
+    private long sampleAgeMs(File dir, JSONObject st, long now) {
+        long createdAt = st.optLong("createdAt", 0L);
+        if (createdAt <= 0L) { createdAt = dir.lastModified(); }
+        long age = now - createdAt;
+        return age > 0L ? age : 0L;
+    }
+
+    /** 删除整个 sample 目录：先原子改名隔离（.del），再递归删除；
+     *  改名失败 = 目录正被并发占用，本轮跳过；残留 .del 由下次 init/janitor 兜底。 */
+    private boolean deleteSampleDirWhole(File dir) {
+        File tomb = new File(dir.getParentFile(), dir.getName() + ".del");
+        if (tomb.exists() && !deleteRecursively(tomb)) { return false; }
+        if (!dir.renameTo(tomb)) { return false; }
+        return deleteRecursively(tomb);
+    }
+
+    private static boolean deleteRecursively(File f) {
+        if (f == null || !f.exists()) { return true; }
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            boolean ok = true;
+            if (children != null) {
+                for (File c : children) { ok = deleteRecursively(c) && ok; }
+            }
+            return ok && f.delete();
+        }
+        return f.delete();
+    }
+
+    /** 完整 janitor 扫描。force=true 绕过 24h 节流（仅 DEV 诊断入口使用）。 */
+    private void runJanitor(boolean force) {
+        try {
+            long now = System.currentTimeMillis();
+            JSONObject rec = readJanitorRecord();
+            if (!force && !SampleQueueModel.janitorDue(rec.optLong("lastJanitorAt", 0L), now)) {
+                return;
+            }
+            File[] dirs = queueDir().listFiles();
+            long bytesBefore = 0;
+            List<File> toDelete = new ArrayList<File>();
+            long bytesToDelete = 0;
+            if (dirs != null) {
+                for (File dir : dirs) {
+                    if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
+                    bytesBefore += dirSize(dir);
+                    JSONObject st = readState(dir, dir.getName());
+                    String reason = SampleQueueModel.janitorDeleteReason(
+                            st.optString("status", SampleQueueModel.STATUS_PENDING),
+                            st.optBoolean("sampleUploaded", false),
+                            st.optBoolean("feedbackUploaded", true),
+                            st.optBoolean("sealed", false),
+                            sampleAgeMs(dir, st, now));
+                    if (reason != null) {
+                        toDelete.add(dir);
+                        bytesToDelete += dirSize(dir);
+                    }
+                }
+            }
+            long bytesAfterRetention = bytesBefore - bytesToDelete;
+            /* 硬限：retention 后仍超 256 MiB → 最老 failed/auth_failed 优先，
+               再删长期滞留（≥24h）pending/retry_wait（CAP-S14/15） */
+            if (bytesAfterRetention > SampleQueueModel.QUEUE_HARD_LIMIT_BYTES && dirs != null) {
+                List<File> rest = new ArrayList<File>();
+                for (File dir : dirs) {
+                    if (dir.isDirectory() && validSampleId(dir.getName()) && !toDelete.contains(dir)) {
+                        rest.add(dir);
+                    }
+                }
+                rest.sort(new Comparator<File>() {
+                    @Override
+                    public int compare(File a, File b) {
+                        return Long.compare(sampleCreatedAt(a), sampleCreatedAt(b));
+                    }
+                });
+                JSONArray candidates = new JSONArray();
+                for (File d : rest) {
+                    JSONObject st = readState(d, d.getName());
+                    JSONObject c = new JSONObject();
+                    c.put("sampleId", d.getName());
+                    c.put("rank", SampleQueueModel.janitorHardLimitRank(
+                            st.optString("status", SampleQueueModel.STATUS_PENDING),
+                            sampleAgeMs(d, st, now)));
+                    c.put("bytes", dirSize(d));
+                    candidates.put(c);
+                }
+                java.util.Set<String> plan = SampleQueueModel.janitorHardLimitPlan(candidates,
+                        bytesAfterRetention, SampleQueueModel.QUEUE_HARD_LIMIT_BYTES);
+                for (File d : rest) {
+                    if (plan.contains(d.getName())) {
+                        toDelete.add(d);
+                        bytesToDelete += dirSize(d);
+                    }
+                }
+            }
+            int deleted = 0;
+            long freed = 0;
+            for (File d : toDelete) {
+                long sz = dirSize(d);
+                if (deleteSampleDirWhole(d)) {
+                    deleted++;
+                    freed += sz;
+                }
+            }
+            /* 诊断记录（非敏感）：只有时间戳与字节数，绝不进入普通 UI */
+            JSONObject next = new JSONObject();
+            next.put("lastJanitorAt", now);
+            next.put("deletedSamples", deleted);
+            next.put("deletedBytes", freed);
+            next.put("queueBytesBefore", bytesBefore);
+            File[] after = queueDir().listFiles();
+            next.put("queueBytesAfter", after == null ? 0L : totalQueueBytes(after));
+            writeFileAtomic(janitorFile(), next.toString().getBytes(StandardCharsets.UTF_8));
+            if (deleted > 0) { notifyChanged(); }
+        } catch (Exception e) {
+            /* janitor 失败完全静默（best-effort），只留非敏感 logcat 诊断 */
+            android.util.Log.i("MSQSampleQueue", "janitor skipped: " + e.getClass().getSimpleName());
+        }
+    }
+
+    private static long sampleCreatedAt(File dir) {
+        try {
+            JSONObject st = SampleQueueModel.fromJson(
+                    new String(readFile(new File(dir, STATE_NAME)), StandardCharsets.UTF_8));
+            long createdAt = st.optLong("createdAt", 0L);
+            if (createdAt > 0L) { return createdAt; }
+        } catch (Exception e) { /* 状态缺失：退回目录时间 */ }
+        return dir.lastModified();
+    }
+
+    private static long totalQueueBytes(File[] dirs) {
+        long total = 0;
+        if (dirs != null) {
+            for (File dir : dirs) {
+                if (!dir.isDirectory() || dir.getName().endsWith(".del")) { continue; }
+                total += dirSize(dir);
+            }
+        }
+        return total;
+    }
+
+    /** DEV 隐藏诊断（SIMPLIFY_CAPTURE_FLOW_V1）：全部为非敏感聚合数字；
+     *  绝不含 token / SecretKey / presigned URL / Authorization / 服务器域名。 */
+    @PluginMethod
+    public void getDiagnostics(PluginCall call) {
+        ioExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    long now = System.currentTimeMillis();
+                    File[] dirs = queueDir().listFiles();
+                    long oldestAgeMs = -1;
+                    long lastUploadBytesPerSec = 0;
+                    long lastUploadAt = -1;
+                    int feedbackPending = 0;
+                    if (dirs != null) {
+                        for (File dir : dirs) {
+                            if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
+                            JSONObject st = readState(dir, dir.getName());
+                            long age = sampleAgeMs(dir, st, now);
+                            if (age > oldestAgeMs) { oldestAgeMs = age; }
+                            long speed = st.optLong("captureBytesPerSec", 0L);
+                            long at = st.optLong("createdAt", 0L);
+                            if (speed > 0 && at >= lastUploadAt) {
+                                lastUploadAt = at;
+                                lastUploadBytesPerSec = speed;
+                            }
+                            if (new File(dir, FEEDBACK_NAME).exists()
+                                    && !st.optBoolean("feedbackUploaded", true)) {
+                                feedbackPending++;
+                            }
+                        }
+                    }
+                    JSONObject rec = readJanitorRecord();
+                    JSObject ret = new JSObject();
+                    ret.put("ok", true);
+                    ret.put("oldestSampleAgeMs", oldestAgeMs);
+                    ret.put("lastUploadBytesPerSec", lastUploadBytesPerSec);
+                    ret.put("feedbackPendingCount", feedbackPending);
+                    ret.put("lastJanitorAt", rec.optLong("lastJanitorAt", 0L));
+                    ret.put("deletedSamples", rec.optInt("deletedSamples", 0));
+                    ret.put("deletedBytes", rec.optLong("deletedBytes", 0L));
+                    ret.put("queueBytesBefore", rec.optLong("queueBytesBefore", 0L));
+                    ret.put("queueBytesAfter", rec.optLong("queueBytesAfter", 0L));
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    call.reject("诊断读取失败", "IO_ERROR");
+                }
+            }
+        });
+    }
+
+    /** DEV 诊断入口「Run janitor now」：绕过 24h 节流立即扫描一次。 */
+    @PluginMethod
+    public void runJanitorNow(final PluginCall call) {
+        workerExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                runJanitor(true);
+                JSObject ret = new JSObject();
+                ret.put("ok", true);
+                call.resolve(ret);
+            }
+        });
+    }
+
     @PluginMethod
     public void retryFailed(PluginCall call) {
         int count = 0;
         File[] dirs = queueDir().listFiles();
         if (dirs != null) {
             for (File dir : dirs) {
-                if (!dir.isDirectory()) { continue; }
+                if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
                 synchronized (stateLock) {
                     try {
                         JSONObject st = readState(dir, dir.getName());
@@ -430,7 +675,7 @@ public class SampleQueuePlugin extends Plugin {
         File[] dirs = queueDir().listFiles();
         if (dirs != null) {
             for (File dir : dirs) {
-                if (!dir.isDirectory()) { continue; }
+                if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
                 JSONObject st = readState(dir, dir.getName());
                 String status = st.optString("status", SampleQueueModel.STATUS_PENDING);
                 boolean sampleDone = st.optBoolean("sampleUploaded", false);
@@ -485,7 +730,12 @@ public class SampleQueuePlugin extends Plugin {
     private void runQueueLoop() {
         while (true) {
             File next = pickNextDue();
-            if (next == null) { return; }
+            if (next == null) {
+                /* 无待处理样本：顺路做一次 24h 节流的 janitor 扫描
+                   （SIMPLIFY_CAPTURE_FLOW_V1：sample sync success 后的时机之一） */
+                runJanitor(false);
+                return;
+            }
             try {
                 processSample(next);
             } catch (Exception e) {
@@ -510,7 +760,7 @@ public class SampleQueuePlugin extends Plugin {
         if (dirs == null) { return null; }
         List<File> due = new ArrayList<File>();
         for (File dir : dirs) {
-            if (!dir.isDirectory()) { continue; }
+            if (!dir.isDirectory() || !validSampleId(dir.getName())) { continue; }
             JSONObject st = readState(dir, dir.getName());
             boolean sampleDone = st.optBoolean("sampleUploaded", false);
             boolean feedbackPending = new File(dir, FEEDBACK_NAME).exists()

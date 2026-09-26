@@ -61,9 +61,23 @@
     } catch (e) { return false; }
   }
 
-  /* 自动上传总开关：默认 ON，用户可主动关闭（持久保留） */
-  function shouldCollect(settings) {
-    return normalizeSettings(settings).autoUpload === true;
+  /* 自动采集总开关（SIMPLIFY_CAPTURE_FLOW_V1）：样本采集彻底后台 best-effort，
+     用户无 opt-out——无论历史设置如何，恒为 ON；设置持久化仅为兼容保留，
+     不再驱动任何行为，也不再有对应 UI。 */
+  function shouldCollect() {
+    return true;
+  }
+
+  /* 渠道判定（SIMPLIFY_CAPTURE_FLOW_V1）：仅 DEV 构建显示隐藏诊断入口。
+     与 updater.js 的 updateChannelFor 同源包名表；放在本模块是因为诊断面板
+     展示的是样本队列状态（不改动冻结的 updater/SELF_UPDATE）。 */
+  var DEV_PACKAGE = "com.jty.safetyquiz.dev";
+  var STABLE_PACKAGE = "com.jty.safetyquiz";
+
+  function diagnosticsChannel(applicationId) {
+    if (applicationId === DEV_PACKAGE) { return "dev"; }
+    if (applicationId === STABLE_PACKAGE) { return "stable"; }
+    return null;
   }
 
   /* ---------------- sampleId：YYYYMMDD_HHMMSS_xxxxxx（6 位小写 hex） ---------------- */
@@ -432,6 +446,7 @@
     loadSettings: loadSettings,
     saveSettings: saveSettings,
     shouldCollect: shouldCollect,
+    diagnosticsChannel: diagnosticsChannel,
     makeSampleId: makeSampleId,
     joinUrl: joinUrl,
     buildRunManifest: buildRunManifest,

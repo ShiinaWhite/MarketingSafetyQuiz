@@ -28,6 +28,7 @@
       <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
     </div>
     <p class="foot-note">数据仅保存在本机 · 完全离线 · 无网络请求</p>
+    <p id="menu-version" class="foot-note hidden"></p>
   </section>
 
   <!-- 刷题 / 模拟考试答题 -->
@@ -102,54 +103,17 @@
     </main>
   </section>
 
-  <!-- 整页拍照搜题（选题型 → 拍整页 → 自动拆题 → 本页答案） -->
-  <section id="view-batch-photo" class="view hidden">
-    <header class="quiz-head">
-      <button id="btn-batch-back" class="backbtn">‹ 搜索</button>
-      <div class="qtitle">整页拍照搜题</div>
-    </header>
-    <main class="pad">
-      <div id="batch-type-row" class="batch-type-row" role="group" aria-label="本页题型">
-        <button type="button" class="batch-type-btn active" data-type="auto" aria-pressed="true">自动</button>
-        <button type="button" class="batch-type-btn" data-type="single" aria-pressed="false">单选</button>
-        <button type="button" class="batch-type-btn" data-type="multi" aria-pressed="false">多选</button>
-        <button type="button" class="batch-type-btn" data-type="judge" aria-pressed="false">判断</button>
-      </div>
-      <p class="batch-tip">默认自动识别题型：章节标题优先，识别不到时三种题型在本地各试跑一遍取最优。整页答案页可一键切换题型立即重算（不重拍）。手动锁定只在当前会话有效。</p>
-      <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
-      <p id="batch-status" class="search-count hidden"></p>
-      <details id="sample-panel" class="sample-panel">
-        <summary>测试样本采集</summary>
-        <label class="sample-row">
-          <input type="checkbox" id="sample-enabled">
-          <span>自动上传测试样本</span>
-        </label>
-        <p class="sample-note">服务器：update.shiinalab.top</p>
-        <p class="sample-note">同步状态：<span id="sample-queue-status">未知</span></p>
-        <div class="sample-row">
-          <button id="btn-sample-retry" class="barbtn" type="button">立即重试</button>
-          <button id="btn-sample-cleanup" class="barbtn hidden" type="button">清理失败样本</button>
-          <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
-        </div>
-        <p id="sample-test-status" class="sample-note hidden"></p>
-      </details>
-    </main>
-  </section>
-
-  <!-- 整页答案 -->
+  <!-- 整页答案（首页相机按钮 → 直接拍摄 → AUTO → 本页答案） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 重拍</button>
+      <button id="btn-batch-results-back" class="backbtn">‹ 首页</button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
       <div id="batch-summary" class="batch-summary"></div>
       <div id="batch-list"></div>
       <div id="batch-tools"></div>
-      <div id="batch-sample-tools" class="sample-tools hidden">
-        <p class="sample-line">
-          <span id="batch-sample-status" class="sample-note hidden"></span>
-        </p>
+      <div id="batch-sample-tools" class="sample-tools">
         <button id="btn-sample-flag" class="linkbtn hidden" type="button">反馈本页问题</button>
         <div id="sample-feedback-panel" class="sample-feedback-panel hidden"></div>
       </div>
@@ -163,6 +127,16 @@
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
+  </section>
+
+  <!-- DEV 隐藏诊断（SIMPLIFY_CAPTURE_FLOW_V1：仅 DEV 构建，版本号 7 连击进入；
+       不含 token/presigned URL/域名，普通用户不可见） -->
+  <section id="view-devdiag" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">Developer Diagnostics</div>
+    </header>
+    <main id="devdiag-body" class="pad"></main>
   </section>
 
   <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->

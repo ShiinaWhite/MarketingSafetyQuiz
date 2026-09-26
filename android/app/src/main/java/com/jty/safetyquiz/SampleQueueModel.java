@@ -253,6 +253,99 @@ public final class SampleQueueModel {
         return state;
     }
 
+    /* ---------------- 自动 Janitor（SIMPLIFY_CAPTURE_FLOW_V1） ----------------
+       用户不再有「清理失败样本」入口，队列必须完全自维护。删除判定全部收口为
+       纯函数（JVM 单测 = CAP-S12~16）：
+         synced（已全部同步）            → 及时删除（worker 既有 canCleanup 之外兜底）
+         failed / auth_failed           → 超 7 天删除
+         pending / retry_wait           → 超 14 天删除
+         uploading/uploading_capture/
+         capture_uploaded               → 永不删（active/uploading/committing）
+       256 MiB 硬限：retention 后仍超限 → 从最老开始删 failed/auth_failed，
+       再删长期滞留（≥24h）pending/retry_wait，直到 ≤ 上限。
+       完整扫描由 24h 节流（janitorDue）约束。 */
+
+    public static final long JANITOR_FAILED_RETENTION_MS = 7L * 24 * 3600 * 1000;
+    public static final long JANITOR_PENDING_RETENTION_MS = 14L * 24 * 3600 * 1000;
+    /** 硬限路径与未 sealed 已同步样本的最小年龄：保护「刚产生的新 sample」与
+     *  「当前结果页关联 sample」（结果页会话不可能超过该时长仍有效） */
+    public static final long JANITOR_MIN_SAMPLE_AGE_MS = 24L * 3600 * 1000;
+    public static final long QUEUE_HARD_LIMIT_BYTES = 256L * 1024 * 1024;
+    /** 完整扫描节流：24 小时最多一次（Run janitor now 可强制绕过） */
+    public static final long JANITOR_MIN_INTERVAL_MS = 24L * 3600 * 1000;
+
+    /** 是否该跑完整扫描：从未跑过或距上次 ≥ 24h。 */
+    public static boolean janitorDue(long lastJanitorAt, long now) {
+        return lastJanitorAt <= 0L || now - lastJanitorAt >= JANITOR_MIN_INTERVAL_MS;
+    }
+
+    /**
+     * retention 判定：null = 不可删；否则返回非敏感删除原因。
+     * ageMs = now - createdAt。任何 uploading/commit 中间态与未到期的样本都返回 null。
+     */
+    public static String janitorDeleteReason(String status, boolean sampleUploaded,
+                                             boolean feedbackUploaded, boolean sealed,
+                                             long ageMs) {
+        /* 已全部同步（sample+feedback 均成功）：worker 的 canCleanup 需要 sealed，
+           这里对漏网（crash 后未再拍新页）的旧样本兜底，仍受 24h 最小年龄保护。
+           必须先于进行中状态判定：commit 成功后 status 可能仍是 capture_uploaded
+           （或 boot 恢复后的 pending），真正的事实来源是 uploaded 标志。 */
+        if (sampleUploaded && feedbackUploaded && ageMs >= JANITOR_MIN_SAMPLE_AGE_MS) {
+            return "synced";
+        }
+        if (STATUS_UPLOADING.equals(status) || STATUS_UPLOADING_CAPTURE.equals(status)
+                || STATUS_CAPTURE_UPLOADED.equals(status)) {
+            return null;   // active / uploading / commit 中：CAP-S15 绝不删
+        }
+        if (STATUS_FAILED.equals(status) || STATUS_AUTH_FAILED.equals(status)) {
+            return ageMs >= JANITOR_FAILED_RETENTION_MS ? "retention-failed" : null;
+        }
+        if (STATUS_PENDING.equals(status) || STATUS_RETRY_WAIT.equals(status)) {
+            return ageMs >= JANITOR_PENDING_RETENTION_MS ? "retention-pending" : null;
+        }
+        return null;
+    }
+
+    /**
+     * 硬限删除类别：0 = failed/auth_failed（最老优先），1 = 长期滞留（≥24h）
+     * pending/retry_wait，-1 = 不可作为硬限候选（受保护状态/新样本/已同步）。
+     */
+    public static int janitorHardLimitRank(String status, long ageMs) {
+        if (STATUS_FAILED.equals(status) || STATUS_AUTH_FAILED.equals(status)) {
+            return ageMs >= JANITOR_MIN_SAMPLE_AGE_MS ? 0 : -1;
+        }
+        if (STATUS_PENDING.equals(status) || STATUS_RETRY_WAIT.equals(status)) {
+            return ageMs >= JANITOR_MIN_SAMPLE_AGE_MS ? 1 : -1;
+        }
+        return -1;
+    }
+
+    /**
+     * 硬限删除计划（纯函数，CAP-S14）：候选按 createdAt 升序给出
+     * [{"sampleId": s, "rank": r, "bytes": b}]（rank 由 janitorHardLimitRank 计算，
+     * -1 表示受保护）。先删 rank 0（最老优先）再删 rank 1，直到剩余总字节 ≤ 上限。
+     * 返回应删除的 sampleId 集合；候选之外的字节不计入剩余。
+     */
+    public static java.util.Set<String> janitorHardLimitPlan(org.json.JSONArray candidatesAsc,
+                                                             long bytesAfterRetention,
+                                                             long hardLimitBytes)
+            throws JSONException {
+        java.util.Set<String> plan = new java.util.LinkedHashSet<String>();
+        long remaining = bytesAfterRetention;
+        if (remaining <= hardLimitBytes) { return plan; }
+        for (int pass = 0; pass <= 1 && remaining > hardLimitBytes; pass++) {
+            for (int i = 0; i < candidatesAsc.length() && remaining > hardLimitBytes; i++) {
+                org.json.JSONObject c = candidatesAsc.getJSONObject(i);
+                if (c.optInt("rank", -1) != pass) { continue; }
+                String id = c.optString("sampleId", "");
+                if (id.isEmpty() || plan.contains(id)) { continue; }
+                plan.add(id);
+                remaining -= Math.max(0L, c.optLong("bytes", 0L));
+            }
+        }
+        return plan;
+    }
+
     public static JSONObject fromJson(String json) throws JSONException {
         return new JSONObject(json);
     }

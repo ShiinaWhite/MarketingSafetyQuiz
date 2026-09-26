@@ -935,19 +935,14 @@ check("默认设置 = 自动上传 ON（fresh config，loadSettings 迁移层生
     const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
     return fresh.migrationVersion === 2 && fresh.autoUpload === true;
   })());
-check("shouldCollect：fresh 默认 ON", (() => {
+check("shouldCollect：强制 ON（SIMPLIFY_CAPTURE_FLOW_V1，用户无 opt-out）", (() => {
   const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
-  return MSQSample.shouldCollect(fresh) === true;
+  return MSQSample.shouldCollect(fresh) === true && MSQSample.shouldCollect() === true;
 })());
-check("用户主动关闭 → OFF", (() => {
+check("历史 opt-out 设置不再生效（恒 ON）", (() => {
   const st = memStore();
   MSQSample.saveSettings(st, { autoUpload: false });
-  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === false;
-})());
-check("用户关闭后重新 load 仍 OFF（opt-out 持久）", (() => {
-  const st = memStore();
-  MSQSample.saveSettings(st, { autoUpload: false });
-  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === false;
+  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === true;
 })());
 check("v1 配置迁移：无法区分主动关闭与默认 OFF → 统一 ON", (() => {
   const st = memStore();
@@ -1602,6 +1597,126 @@ function runSucOrchestrationTests() {
         dl.includes("expectedPackageName: updateInfo.id"));
     }
   });
+}
+
+/* ---------- SIMPLIFY_CAPTURE_FLOW_V1：界面收口 + 后台 best-effort 采集（CAP 系列） ---------- */
+section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯函数）");
+{
+  const indexSrc = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  /* —— CAP-S1 首页相机直接启动现有拍摄流程 —— */
+  check("CAP-S1a 首页新增相机入口按钮，点击直接调用 startBatchPageSearch",
+    appSrc.includes('cameraBtn.id = "btn-camera-entry";') &&
+    appSrc.includes('cameraBtn.addEventListener("click", function () { startBatchPageSearch(); });'));
+  check("CAP-S1b 搜题页相机按钮保留且同样直拍",
+    indexSrc.includes('id="btn-batch-photo"') &&
+    appSrc.includes('$("btn-batch-photo").addEventListener("click", startBatchPageSearch);'));
+
+  /* —— CAP-S2 不再导航到旧整页拍照页面 —— */
+  check("CAP-S2a index.html 已删除 view-batch-photo 中转页",
+    !indexSrc.includes("view-batch-photo") && !indexSrc.includes("btn-take-page") &&
+    !indexSrc.includes("batch-type-row"));
+  check("CAP-S2b app.js 不再出现旧页面导航/选择器代码",
+    !appSrc.includes('show("view-batch-photo")') && !appSrc.includes("openBatchPhoto") &&
+    !appSrc.includes("initBatchTypes") && !appSrc.includes("handleBatchBack") &&
+    !appSrc.includes("batchPageType"));
+
+  /* —— CAP-S3 相机取消回入口页（menu 入口 = 首页） —— */
+  check("CAP-S3 相机取消：非权限错误静默回入口页，权限错误 Modal 提示",
+    appSrc.includes("var captureOriginView") &&
+    appSrc.includes("captureOriginView = (currentViewId() === \"view-search\") ? \"view-search\" : \"view-menu\";") &&
+    appSrc.includes("show(captureOriginView);") &&
+    appSrc.includes("/permission|denied/i.test(msg)") &&
+    appSrc.includes('Modal.alert("无法使用相机", "请授予相机权限后重试");'));
+
+  /* —— CAP-S4 AUTO_PAGE_TYPE 固定生效 —— */
+  check("CAP-S4 拍摄固定 AUTO（recompute 传 \"auto\"，pageTypeMode 恒 auto，无拍摄前选择）",
+    appSrc.includes('MSQ.recomputePageFromLines(batchIndex, lines, "auto",') &&
+    appSrc.includes('pageTypeMode: "auto"') && !appSrc.includes("batch-type-row"));
+
+  /* —— CAP-S5 结果页题型人工纠错保留 —— */
+  check("CAP-S5 结果页仍可切题型重算（switchBatchPageType/buildBatchTypeLine 完整，零重新 OCR）",
+    appSrc.includes("function switchBatchPageType(mode)") &&
+    appSrc.includes("function buildBatchTypeLine(state)") &&
+    appSrc.includes('["auto", "single", "multi", "judge"].forEach'));
+
+  /* —— CAP-S6 sample 仍后台自动 persist（无 opt-out） —— */
+  check("CAP-S6 collectAndUploadSample 无条件持久化（无 shouldCollect 分支）",
+    appSrc.includes("Queue.persistSample({") &&
+    !/shouldCollect\(/.test(appSrc) &&
+    appSrc.indexOf("lastSampleUpload = {") < appSrc.indexOf("Queue.persistSample({"));
+
+  /* —— CAP-S7 COS queue 仍自动处理（worker 链路零改动） —— */
+  check("CAP-S7 原生 worker 链路未动（init 恢复 + startWorker + processSample 三步直传）",
+    pluginSrc.includes("SampleQueueModel.normalizeStatusOnBoot") &&
+    pluginSrc.includes("private void startWorker()") &&
+    pluginSrc.includes('serverUrl + "/api/sample/init"') &&
+    pluginSrc.includes('serverUrl + "/api/sample/commit"'));
+
+  /* —— CAP-S8/9/10 样本失败完全静默且不影响拍题主链 —— */
+  check("CAP-S8 collectAndUploadSample 整体 try/catch 兜底（样本异常不可能打断拍题）",
+    appSrc.indexOf("function collectAndUploadSample(state)") > 0 &&
+    /function collectAndUploadSample\(state\) \{\s*\n\s*renderSampleFeedbackVisibility\(\);\s*\n\s*try \{/.test(appSrc));
+  check("CAP-S9 持久化失败无任何 UI 提示（仅 console 诊断）",
+    !appSrc.includes("本页样本未能保存") &&
+    !/persistSample[\s\S]{0,600}showFeedbackToast/.test(appSrc) &&
+    appSrc.includes('sampleDebug("persist failed (silent): "'));
+  check("CAP-S9b 旧状态行/清理按钮/测试连接/采集面板代码已全部移除",
+    !appSrc.includes("renderQueueStatus") && !appSrc.includes("cleanupFailedSamples") &&
+    !appSrc.includes("btn-sample-cleanup") && !appSrc.includes("btn-sample-test") &&
+    !appSrc.includes("sample-queue-status") && !appSrc.includes("setBatchStatus"));
+  check("CAP-S10 原生侧无 Toast/通知（上传失败只改状态后台重试）",
+    !pluginSrc.includes("android.widget.Toast") && !pluginSrc.includes("NotificationManager"));
+
+  /* —— CAP-S11 feedback 持久化协议不退化 —— */
+  check("CAP-S11 persistFeedback 仍走本地队列补传，失败仅 console（提交动作 UI 不变）",
+    appSrc.includes("Queue.persistFeedback({") &&
+    appSrc.includes('sampleDebug("feedback persist failed (silent): "') &&
+    !/persistFeedback[\s\S]{0,600}showFeedbackToast\("反馈保存失败/.test(appSrc));
+
+  /* —— CAP-S17/18 普通 UI 无任何 sample 配置与域名 —— */
+  check("CAP-S17 index.html 无样本采集配置区",
+    !indexSrc.includes("sample-panel") && !indexSrc.includes("sample-enabled") &&
+    !indexSrc.includes("测试样本采集") && !indexSrc.includes("自动上传测试样本") &&
+    !indexSrc.includes("同步状态"));
+  check("CAP-S18 UI 不含服务器/CDN/COS 域名",
+    !indexSrc.includes("shiinalab") && !appSrc.includes("shiinalab") &&
+    !indexSrc.includes("apk.shiinalab") && !indexSrc.includes("update.shiinalab"));
+
+  /* —— CAP-S19/S20 DEV 隐藏诊断 —— */
+  check("CAP-S19a diagnosticsChannel 纯函数：dev/stable/其他",
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+    MSQSample.diagnosticsChannel("com.other.app") === null &&
+    MSQSample.diagnosticsChannel(undefined) === null);
+  check("CAP-S19b DEV 诊断入口：版本行仅 dev 渲染，7 连击进入 view-devdiag",
+    appSrc.includes('MSQSample.diagnosticsChannel(info.id) !== "dev"') &&
+    appSrc.includes("devDiagTaps.count >= 7") &&
+    appSrc.includes('show("view-devdiag");') &&
+    indexSrc.includes('id="view-devdiag"') && indexSrc.includes('id="menu-version"'));
+  check("CAP-S20 MAIN 无诊断入口（stable 早退，不渲染版本行不绑点击）",
+    appSrc.includes("return;   /* MAIN：不渲染版本行，不存在入口 */") &&
+    appSrc.includes("openDevDiagnostics") &&
+    /diagnosticsChannel\(info\.id\) !== "dev"[\s\S]{0,120}return;/.test(
+      appSrc.replace(/\r?\n/g, "\n")));
+  check("CAP-S20b 诊断内容守卫：无 token/URL/Authorization 字段",
+    !appSrc.includes("presignedPutUrl") && !appSrc.includes("Authorization") &&
+    !appSrc.includes("MSQ_SAMPLE_WRITE_TOKEN") &&
+    pluginSrc.includes("public void getDiagnostics"));
+
+  /* —— Janitor 调度守卫（逻辑在 JVM：SampleQueueJanitorTest） —— */
+  check("CAP-JAN 调度三时机：cold init / worker 空转 / runJanitorNow（均串行于 worker 线程）",
+    /workerExecutor\.execute[\s\S]{0,120}runJanitor\(false\)/.test(pluginSrc) &&
+    pluginSrc.includes("runJanitor(false);\n                return;") &&
+    pluginSrc.includes("public void runJanitorNow") &&
+    modelSrc.includes("JANITOR_MIN_INTERVAL_MS") &&
+    modelSrc.includes("QUEUE_HARD_LIMIT_BYTES = 256L * 1024 * 1024") &&
+    modelSrc.includes("JANITOR_FAILED_RETENTION_MS = 7L * 24 * 3600 * 1000") &&
+    modelSrc.includes("JANITOR_PENDING_RETENTION_MS = 14L * 24 * 3600 * 1000"));
 }
 
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */

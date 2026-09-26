@@ -239,7 +239,8 @@
 
     var box = $("menu-buttons");
     box.innerHTML = "";
-    // 搜题入口（独立于刷题模式的常驻功能）
+    // 搜题 + 拍题入口（SIMPLIFY_CAPTURE_FLOW_V1：两大主流程直接收口在首页，
+    // 相机按钮跳过一切中转页，直接进入拍摄 → OCR → AUTO → 结果主链）
     if (!$("btn-search-entry")) {
       var searchWrap = document.createElement("div");
       searchWrap.className = "search-entry-wrap";
@@ -250,6 +251,13 @@
       searchBtn.textContent = "🔍 搜题";
       searchBtn.addEventListener("click", openSearch);
       searchWrap.appendChild(searchBtn);
+      var cameraBtn = document.createElement("button");
+      cameraBtn.type = "button";
+      cameraBtn.id = "btn-camera-entry";
+      cameraBtn.className = "search-entry camera-entry";
+      cameraBtn.textContent = "📷 拍整页搜题";
+      cameraBtn.addEventListener("click", function () { startBatchPageSearch(); });
+      searchWrap.appendChild(cameraBtn);
       box.parentNode.insertBefore(searchWrap, box);
     }
     MODE_TITLES && Object.keys(MODE_TITLES).forEach(function (key) {
@@ -992,8 +1000,8 @@
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
       case "view-update": handleUpdateBack(); return;
+      case "view-devdiag": renderMenu(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
-      case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
@@ -1172,50 +1180,16 @@
       totalMs: Math.round(performance.now() - totalStart) });
   }
 
-  /* ---------------- 整页拍照搜题（分题 + 题型强约束批量匹配） ----------------
-     与单题拍照完全独立：单题路径 searchQuestionsByOcr 保持原样，这里走
-     searchPageQuestionsByOcr（先分题，再只在所选题型的子集里匹配）。 */
+  /* ---------------- 整页拍照搜题（SIMPLIFY_CAPTURE_FLOW_V1 收口后的唯一相机主链） ----------------
+     首页相机按钮 / 搜题页 📷 → Camera.getPhoto → OCR → AUTO_PAGE_TYPE →
+     splitter / matcher → 结果页。无中转页、无拍摄前题型选择（固定 AUTO，
+     判错后可在结果页人工切换重算）。与单题路径 searchQuestionsByOcr 仍完全独立。 */
   var batchIndex = null;
   var batchIndexById = null;      /* 采集诊断用：id -> batchIndex 项（只读） */
-  var batchPageType = "auto";     /* 默认 AUTO；冷启动回到 auto，手动选择只是会话内有意识的 override */
   var lastBatch = null;
   var lastResolvedPageType = null; /* 会话内弱先验：上一页最终采用的题型（不跨重启） */
-  var lastSampleUpload = null;    /* 采集旁路：结果页打开期间保留当次 dataUrl 供重试 */
-
-  function setBatchStatus(text) {
-    var el = $("batch-status");
-    if (el) { el.textContent = text; el.classList.remove("hidden"); }
-  }
-
-  function renderBatchTypes() {
-    var box = $("batch-type-row");
-    if (!box) { return; }
-    var btns = box.getElementsByClassName("batch-type-btn");
-    for (var i = 0; i < btns.length; i++) {
-      var on = btns[i].getAttribute("data-type") === batchPageType;
-      btns[i].classList.toggle("active", on);
-      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
-    }
-  }
-
-  function initBatchTypes() {
-    var box = $("batch-type-row");
-    if (!box) { return; }
-    box.addEventListener("mousedown", function (e) { e.preventDefault(); });
-    box.addEventListener("click", function (e) {
-      var el = e.target;
-      while (el && el !== box && !el.classList.contains("batch-type-btn")) { el = el.parentNode; }
-      if (!el || el === box) { return; }
-      batchPageType = el.getAttribute("data-type") || "single";
-      renderBatchTypes();
-    });
-  }
-
-  function openBatchPhoto() {
-    show("view-batch-photo");
-    renderBatchTypes();
-    setBatchStatus("默认自动识别题型，直接拍整页即可；也可手动锁定单选/多选/判断，结果页可一键换题型重算");
-  }
+  var lastSampleUpload = null;    /* 反馈上下文：结果页打开期间绑定当次 sampleId */
+  var captureOriginView = "view-menu"; /* 相机取消时返回的入口页（menu 或 search） */
 
   /* OCR 返回：优先用带坐标的 lines；旧版本插件只返回 text 时按行退化，仍可分题。 */
   function normalizeOcrLines(res) {
@@ -1392,13 +1366,12 @@
        但仍完整保存在 run.json（ocr.text/ocr.lines/blocks/Top3/scores）。 */
   }
 
-  /* 结果页切题型：只用已保存的 OCR lines 重跑 split + match，绝不重新拍照、
-     绝不调用 Ocr.recognizeText（TYPE_SWITCH_OCR_CALLS = 0，test_core 有静态守卫）。
-     mode 可为 "auto"（重新三题型试跑）或具体题型；这是用户的有意识选择，
-     会话内更新 batchPageType 与弱先验。 */
+  /* 结果页题型人工纠错（保留能力，CAP-S5）：只用已保存的 OCR lines 重跑 split +
+     match，绝不重新拍照、绝不调用 Ocr.recognizeText（TYPE_SWITCH_OCR_CALLS = 0，
+     test_core 有静态守卫）。mode 可为 "auto"（重新三题型试跑）或具体题型；
+     拍摄本身永远固定 AUTO（CAP-S4），这里是拍后用户的有意识纠正。 */
   function switchBatchPageType(mode) {
     if (!lastBatch || !lastBatch.lines) { return; }
-    batchPageType = mode;
     var lines = lastBatch.lines;
     var tSplit = performance.now();
     MSQ.splitPageOcrLines(lines, mode === "auto" ? "single" : mode);
@@ -1520,11 +1493,11 @@
     var Camera = getPlugin("Camera");
     var Ocr = getPlugin("Ocr");
     if (!Camera || !Ocr) {
-      show("view-batch-photo");
-      setBatchStatus(photoPluginMissingMessage(Camera, Ocr));
+      Modal.alert("无法拍照", photoPluginMissingMessage(Camera, Ocr));
       return;
     }
-    setBatchStatus("正在打开相机…");
+    /* 相机取消时回到拍摄入口页（menu 入口 → 首页；搜题页 📷 → 搜题页） */
+    captureOriginView = (currentViewId() === "view-search") ? "view-search" : "view-menu";
     var photo;
     try {
       photo = await Camera.getPhoto({
@@ -1537,12 +1510,13 @@
       });
     } catch (e) {
       var msg = String((e && e.message) || e);
-      setBatchStatus(/permission|denied/i.test(msg)
-        ? "无法使用相机，请授予相机权限后重试"
-        : "未拍摄照片（" + msg.slice(0, 40) + "）");
+      if (/permission|denied/i.test(msg)) {
+        Modal.alert("无法使用相机", "请授予相机权限后重试");
+      }
+      /* 用户取消：静默回到入口页，绝不进入任何中间页 */
+      show(captureOriginView);
       return;
     }
-    setBatchStatus("正在识别整页文字…");
     var totalStart = performance.now();
     var ocrMs = 0, text = "", lines = [];
     var ocrWidth = 0, ocrHeight = 0;
@@ -1556,172 +1530,62 @@
       ocrHeight = (res && res.height) || 0;
       lines = normalizeOcrLines(res);
     } catch (e) {
-      setBatchStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
+      Modal.alert("识别失败", "请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
       return;
     }
     if (!lines.length) {
-      setBatchStatus("未识别到清晰文字，请重新拍摄（尽量拍全、拍正、光线均匀）");
+      Modal.alert("未识别到清晰文字", "请重新拍摄（尽量拍全、拍正、光线均匀）");
       return;
     }
     var tSplit = performance.now();
-    /* 独立 split 只用于计时展示；AUTO 时以 single 作为计时占位默认值，正式分题在 recompute 内按判定题型进行 */
-    MSQ.splitPageOcrLines(lines, batchPageType === "auto" ? "single" : batchPageType);
+    /* 独立 split 只用于计时展示；AUTO 以 single 作为计时占位默认值，正式分题在 recompute 内按判定题型进行 */
+    MSQ.splitPageOcrLines(lines, "single");
     var splitMs = Math.round(performance.now() - tSplit);
     var tMatch = performance.now();
-    /* AUTO_PAGE_TYPE 统一入口：auto 在内存中三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
-    var r = MSQ.recomputePageFromLines(batchIndex, lines, batchPageType,
+    /* AUTO_PAGE_TYPE 固定生效（CAP-S4）：拍摄前没有任何题型选择，auto 在内存中
+       三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
+    var r = MSQ.recomputePageFromLines(batchIndex, lines, "auto",
       { limit: 3, previousType: lastResolvedPageType });
     var matchMs = Math.round(performance.now() - tMatch);
     var out = r.out;
     var resolved = r.resolved;
-    lastResolvedPageType = resolved.type;   /* 会话内弱先验；AUTO 结论与手动选择都算当前章节信号 */
-    /* 手动锁定但结果明显异常（无高/中置信）时才多花一步试跑，给"更像X题"建议 */
-    var suggestion = null;
-    if (resolved.method === "manual") {
-      var curQ = MSQ.autoTypeScore(out);
-      if (curQ.counts.high + curQ.counts.medium === 0) {
-        var runsX = {};
-        ["single", "multi", "judge"].forEach(function (t) {
-          runsX[t] = (t === batchPageType) ? out
-            : MSQ.searchPageQuestionsByOcr(batchIndex, lines, t, { limit: 3 });
-        });
-        suggestion = MSQ.suggestBetterPageType(batchPageType, out, runsX);
-      }
-    }
-    var collecting = typeof MSQSample !== "undefined" && MSQSample &&
-      MSQSample.shouldCollect(sampleSettings());
-    setBatchStatus(collecting ? "识别完成" : "识别完成（全程本地，图片不保存不上传）");
+    lastResolvedPageType = resolved.type;   /* 会话内弱先验：AUTO 结论作为下一页信号 */
     var state = {
       lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
       totalMs: Math.round(performance.now() - totalStart), out: out,
-      pageType: resolved.type, pageTypeMode: batchPageType, resolved: resolved,
-      suggestion: suggestion, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight,
+      pageType: resolved.type, pageTypeMode: "auto", resolved: resolved,
+      suggestion: null, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight,
       sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
     };
     renderBatchResults(state);
     collectAndUploadSample(state);
   }
 
-  /* 整页结果 → 整页拍照 → 搜题 → 首页 */
+  /* 整页结果 Back → 首页（SIMPLIFY_CAPTURE_FLOW_V1：旧整页拍照中转页已删除，
+     不得再回到已不存在的页面，也不留空 history entry） */
   function handleBatchResultsBack() {
-    show("view-batch-photo");
-    renderBatchTypes();
+    renderMenu();
   }
 
-  function handleBatchBack() {
-    show("view-search");
-  }
-
-  /* ---------------- 真实样本采集旁路（仅开发调试，默认 OFF） ----------------
-     整条链路是非阻塞旁路：构造/上传的任何失败都只体现在状态条上，
-     绝不影响 OCR、结果展示、返回、再次拍摄。
-     photo.dataUrl 由 lastSampleUpload 持有（内存，不进 localStorage），
-     结果页打开期间可手动重试；App 重启后不做离线补传（V1 约定）。 */
-  function sampleSettings() {
-    return (typeof MSQSample !== "undefined" && MSQSample)
-      ? MSQSample.loadSettings() : { enabled: false, serverUrl: "" };
-  }
-
-  function initSamplePanel() {
-    var box = $("sample-panel");
-    if (!box || typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var s = sampleSettings();
-    $("sample-enabled").checked = s.autoUpload;
-    var save = function () {
-      MSQSample.saveSettings(null, { autoUpload: $("sample-enabled").checked });
-      updateSampleToolsVisibility();
-    };
-    $("sample-enabled").addEventListener("change", save);
-    $("btn-sample-test").addEventListener("click", function () {
-      var status = $("sample-test-status");
-      status.textContent = "正在连接…";
-      status.classList.remove("hidden");
-      MSQSample.getJSON(MSQSample.joinUrl(MSQSample.PUBLIC_BASE_URL, "/health"), 8000)
-        .then(function (data) {
-          status.textContent = (data && data.ok === true) ? "已连接到更新服务器" : "服务器响应异常";
-        }, function () {
-          status.textContent = "无法连接到更新服务器，请检查网络";
-        });
-    });
-  }
-
-  function initSampleResultTools() {
-    var retry = $("btn-sample-retry");
-    var flag = $("btn-sample-flag");
-    if (retry) {
-      retry.addEventListener("click", function () {
-        var Queue = sampleQueuePlugin();
-        if (Queue && typeof Queue.retryFailed === "function") { Queue.retryFailed(); }
-      });
-    }
-    if (flag) {
-      flag.addEventListener("click", toggleFeedbackPanel);
-    }
-  }
-
-  /* ---------------- 反馈（REAL_SAMPLE_FEEDBACK_V2） ----------------
-     页面级 = 结构性问题（分类多选，可修改/清除）；题目级 = 长按标错/再长按撤销。
-     反馈状态绑定 sampleId（存于 lastSampleUpload.feedback，新 sample 自动重置）。
-     服务器要求 sample 目录存在：sample 未上传成功期间反馈保存在内存并标记
-     feedbackDirty，上传/重试成功后全量补传；Collector 离线绝不影响答案展示。 */
+  /* ---------------- 样本采集旁路（SIMPLIFY_CAPTURE_FLOW_V1：纯后台 best-effort） ----------------
+     普通用户不可见、不可配置、不可关闭（AUTO_SAMPLE_UPLOAD 恒 ON，无 opt-out）。
+     persist → persistent queue → COS PUT → commit → PC mirror 全部在原生后台进行；
+     本函数任何失败只写非敏感 console 诊断，绝不 toast/modal/banner/status，
+     绝不影响 OCR、splitter、matcher、答案展示（CAP-S8/9/10）。 */
   function sampleQueuePlugin() { return getPlugin("SampleQueue"); }
 
-  /* 队列状态轻量展示（结果页状态行 + 设置面板同步状态） */
-  function renderQueueStatus(stats) {
-    if (!stats || typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var todo = (stats.pending || 0) + (stats.uploading || 0) + (stats.retryWait || 0) +
-      (stats.failed || 0) + (stats.authFailed || 0);
-    var sizeText = "";
-    if (stats.pendingBytes > 0 && typeof MSQUpdater !== "undefined" && MSQUpdater.formatBytes) {
-      sizeText = " · " + MSQUpdater.formatBytes(stats.pendingBytes);
-    }
-    var text;
-    if ((stats.authFailed || 0) > 0) {
-      text = "样本同步认证失败 · 待处理 " + todo + " 个（更新版本后自动恢复）";
-    } else if ((stats.failed || 0) > 0) {
-      text = "同步失败 " + stats.failed + " 个 · 待处理 " + todo + " 个" + sizeText;
-    } else if ((stats.uploading || 0) > 0) {
-      text = "正在上传 · 待处理 " + todo + " 个" + sizeText;
-    } else if (todo > 0) {
-      text = "等待网络 · 待处理 " + todo + " 个" + sizeText;
-    } else {
-      text = "所有样本已同步";
-    }
-    var el = $("sample-queue-status");
-    if (el) { el.textContent = text; }
-    var line = $("batch-sample-status");
-    if (line && sampleSettings().autoUpload) {
-      line.textContent = text;
-      line.classList.remove("hidden");
-    }
-    var cleanupBtn = $("btn-sample-cleanup");
-    if (cleanupBtn) {
-      cleanupBtn.classList.toggle("hidden", !((stats.failed || 0) + (stats.authFailed || 0)));
-    }
+  function sampleDebug(msg) { console.log("[sample] " + msg); }
+
+  function initSampleResultTools() {
+    var flag = $("btn-sample-flag");
+    if (flag) { flag.addEventListener("click", toggleFeedbackPanel); }
   }
 
-  /* 清理失败样本：仅删除 failed / auth_failed 目录（原生侧二次过滤），
-     二次确认后执行；成功后状态行由 sampleQueueChanged 自动刷新。 */
-  function cleanupFailedSamples() {
-    var Queue = sampleQueuePlugin();
-    if (!(Queue && typeof Queue.cleanupFailed === "function")) { return; }
-    Queue.cleanupFailed().then(function (r) {
-      if (r && r.ok) {
-        showFeedbackToast("已清理失败样本 " + (r.deleted || 0) + " 个");
-      } else {
-        showFeedbackToast("部分失败样本未能删除（" + ((r && r.failedToDelete) || 0) + " 个）");
-      }
-    }, function () {
-      showFeedbackToast("清理失败，请稍后再试");
-    });
-  }
-
-  function confirmCleanupFailedSamples(failedCount, bytesText) {
-    Modal.confirm("清理失败样本",
-      "将删除 " + failedCount + " 个尚未成功同步的测试样本" +
-      (bytesText ? "（约 " + bytesText + "）" : "") +
-      "。删除后无法恢复，不影响题库、答题记录和已同步样本。",
-      function () { cleanupFailedSamples(); });
+  /* 结果页只保留用户主动反馈入口；队列状态/失败计数一律不上 UI */
+  function renderSampleFeedbackVisibility() {
+    var flag = $("btn-sample-flag");
+    if (flag) { flag.classList.toggle("hidden", !lastSampleUpload); }
+    renderFeedbackButton();
   }
 
   function initSampleQueue() {
@@ -1735,21 +1599,8 @@
     }
     if (typeof Queue.addListener === "function") {
       Queue.addListener("sampleQueueChanged", function (stats) {
+        /* 仅存内存供 DEV 隐藏诊断读取；不驱动任何普通 UI */
         window.__lastQueueStats = stats;
-        renderQueueStatus(stats);
-      });
-    }
-    var cleanupBtn = $("btn-sample-cleanup");
-    if (cleanupBtn) {
-      cleanupBtn.addEventListener("click", function () {
-        var st = window.__lastQueueStats || {};
-        var count = (st.failed || 0) + (st.authFailed || 0);
-        if (!count) { return; }
-        Modal.confirm("清理失败样本",
-          "将删除 " + count + " 个尚未成功同步的测试样本" +
-          (st.pendingBytes ? "（约 " + MSQUpdater.formatBytes(st.pendingBytes) + "）" : "") +
-          "。删除后无法恢复，不影响题库、答题记录和已同步样本。",
-          function () { cleanupFailedSamples(); });
       });
     }
   }
@@ -1759,22 +1610,25 @@
   }
 
   /* 反馈持久化：写本地队列（filesDir/sample_queue/<sampleId>/feedback.json），
-     由原生 worker 在 sample 上传成功后自动补传；不做网络直传。 */
+     由原生 worker 在 sample 上传成功后自动补传；不做网络直传。
+     SIMPLIFY_CAPTURE_FLOW_V1：用户提交动作照常表现为已记录（上方 toast），
+     其后台持久化/上传失败完全静默（仅 console 诊断），不再显示保存失败。 */
   function persistFeedbackNow() {
     if (!lastSampleUpload || typeof MSQSample === "undefined" || !MSQSample) { return; }
     var sid = lastSampleUpload.sampleId;
     if (!sid) { return; }
     var Queue = sampleQueuePlugin();
-    if (!(Queue && typeof Queue.persistFeedback === "function")) { return; }
+    if (!(Queue && typeof Queue.persistFeedback === "function")) {
+      sampleDebug("feedback persist skipped: queue unavailable");
+      return;
+    }
     Queue.persistFeedback({
       sampleId: sid,
       feedbackJson: JSON.stringify(
         MSQSample.buildFeedbackJson(sid, lastSampleUpload.feedback, lastSampleUpload.blockRefs))
     }).then(null, function (e) {
-      /* FEEDBACK_PERSISTENCE_REPAIR_V1：持久化失败不再静默——UI toast 已提示
-         "已记录"，若落盘失败必须让用户知道真实结果 */
-      var msg = String((e && e.message) || e || "error").slice(0, 40);
-      showFeedbackToast("反馈保存失败：" + msg);
+      sampleDebug("feedback persist failed (silent): " +
+        String((e && e.code) || "error"));
     });
   }
 
@@ -1877,78 +1731,173 @@
   }
 
   function setSampleUploadStatus(text) {
-    var el = $("batch-sample-status");
-    if (!el) { return; }
-    el.textContent = text;
-    el.classList.remove("hidden");
-  }
-
-  function updateSampleToolsVisibility() {
-    var box = $("batch-sample-tools");
-    var flag = $("btn-sample-flag");
-    var on = sampleSettings().autoUpload;
-    if (box) { box.classList.toggle("hidden", !on); }
-    if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
-    renderFeedbackButton();
+    /* SIMPLIFY_CAPTURE_FLOW_V1：样本状态对普通用户彻底不可见（占位保留防误用），
+       诊断只走 sampleDebug console 通道 */
+    sampleDebug("status: " + String(text || "").slice(0, 60));
   }
 
   /* 落盘优先（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：样本先持久化到
      filesDir/sample_queue/，持久化成功即 SAFE；后台上传由原生 worker 完成，
-     拍题主链绝不 await 网络。用户主动关闭采集时行为与从前一致（不采集）。 */
+     拍题主链绝不 await 网络。AUTO_SAMPLE_UPLOAD 恒 ON：没有 opt-out 分支。 */
   function collectAndUploadSample(state) {
-    updateSampleToolsVisibility();
-    if (typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var s = sampleSettings();
-    if (!MSQSample.shouldCollect(s)) { return; }   /* 用户 opt-out */
-    var Queue = sampleQueuePlugin();
-    if (!(Queue && typeof Queue.persistSample === "function")) {
-      setSampleUploadStatus("样本队列不可用（需升级安装包）");
-      return;
-    }
-    var runJson;
+    renderSampleFeedbackVisibility();
     try {
-      runJson = JSON.stringify(MSQSample.buildRunManifest({
+      if (typeof MSQSample === "undefined" || !MSQSample || !state.sampleId) { return; }
+      /* 反馈上下文先就位：即使落盘失败，用户仍可对结果页提交反馈（提交本身照常工作） */
+      lastSampleUpload = {
         sampleId: state.sampleId,
-        capturedAt: new Date().toISOString(),
-        pageType: state.pageType,
-        pageTypeMode: state.pageTypeMode,
-        resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
-        pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
-        autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
-          ? state.resolved.confidence : undefined,
-        text: state.text,
-        lines: state.lines,
-        out: state.out,
-        ocrWidth: state.ocrWidth,
-        ocrHeight: state.ocrHeight,
-        timing: {
-          ocrMs: state.ocrMs, splitMs: state.splitMs,
-          matchMs: state.matchMs, totalMs: state.totalMs
-        },
-        bankById: batchIndexById
-      }));
+        feedback: MSQSample.feedbackInitialState(),
+        blockRefs: {}
+      };
+      var panel = $("sample-feedback-panel");
+      if (panel) { panel.classList.add("hidden"); }   /* 新 sample：反馈面板收起并重置 */
+      renderSampleFeedbackVisibility();
+      var Queue = sampleQueuePlugin();
+      if (!(Queue && typeof Queue.persistSample === "function")) {
+        sampleDebug("persist skipped: queue unavailable");
+        return;
+      }
+      var runJson;
+      try {
+        runJson = JSON.stringify(MSQSample.buildRunManifest({
+          sampleId: state.sampleId,
+          capturedAt: new Date().toISOString(),
+          pageType: state.pageType,
+          pageTypeMode: state.pageTypeMode,
+          resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
+          pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
+          autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
+            ? state.resolved.confidence : undefined,
+          text: state.text,
+          lines: state.lines,
+          out: state.out,
+          ocrWidth: state.ocrWidth,
+          ocrHeight: state.ocrHeight,
+          timing: {
+            ocrMs: state.ocrMs, splitMs: state.splitMs,
+            matchMs: state.matchMs, totalMs: state.totalMs
+          },
+          bankById: batchIndexById
+        }));
+      } catch (e) {
+        sampleDebug("run.json build failed (silent): " + String((e && e.name) || "error"));
+        return;
+      }
+      Queue.persistSample({
+        sampleId: state.sampleId,
+        photoDataUrl: state.dataUrl,
+        runJson: runJson
+      }).then(null, function (e) {
+        sampleDebug("persist failed (silent): " + String((e && e.code) || "error"));
+      });
     } catch (e) {
-      setSampleUploadStatus("本页样本未能保存（构造失败）");
-      return;
+      sampleDebug("collect skipped (silent): " + String((e && e.name) || "error"));
     }
-    /* 结果页 UI context：反馈面板仍绑定当前 sampleId */
-    lastSampleUpload = {
-      sampleId: state.sampleId,
-      feedback: MSQSample.feedbackInitialState(),
-      blockRefs: {}
-    };
-    var panel = $("sample-feedback-panel");
-    if (panel) { panel.classList.add("hidden"); }   /* 新 sample：反馈面板收起并重置 */
-    updateSampleToolsVisibility();
-    Queue.persistSample({
-      sampleId: state.sampleId,
-      photoDataUrl: state.dataUrl,
-      runJson: runJson
-    }).then(function () {
-      /* 数据已 SAFE；上传由 worker 自动进行，状态行由 sampleQueueChanged 驱动 */
-    }, function (e) {
-      setSampleUploadStatus("本页样本未能保存（" + String((e && e.message) || e).slice(0, 40) + "）");
-      showFeedbackToast("本页样本未能保存");
+  }
+
+  /* ---------------- DEV 隐藏诊断（SIMPLIFY_CAPTURE_FLOW_V1） ----------------
+     仅 DEV 构建：menu-foot 版本行 3 秒内 7 连击进入；只展示非敏感队列诊断
+     （计数/字节/janitor 记录），提供 Run janitor now / Retry queue now。
+     绝不显示任何凭据、签名下载地址或服务器域名（test_core 有内容守卫）；
+     MAIN（stable）构建无版本行、无入口（CAP-S19/20）。 */
+  var devDiagTaps = { count: 0, firstAt: 0 };
+
+  function initDevDiagnostics() {
+    var App = getPlugin("App");
+    if (!(App && typeof App.getInfo === "function")) { return; }
+    App.getInfo().then(function (info) {
+      var el = $("menu-version");
+      if (!el || typeof MSQSample === "undefined" || !MSQSample ||
+          MSQSample.diagnosticsChannel(info.id) !== "dev") {
+        return;   /* MAIN：不渲染版本行，不存在入口 */
+      }
+      el.textContent = "版本 " + info.version + "（" + info.build + "）";
+      el.classList.remove("hidden");
+      el.addEventListener("click", function () {
+        var now = Date.now();
+        if (now - devDiagTaps.firstAt > 3000) { devDiagTaps.count = 0; }
+        if (devDiagTaps.count === 0) { devDiagTaps.firstAt = now; }
+        devDiagTaps.count += 1;
+        if (devDiagTaps.count >= 7) {
+          devDiagTaps.count = 0;
+          openDevDiagnostics();
+        }
+      });
+    }, function () { /* 读不到应用信息：无入口 */ });
+  }
+
+  function openDevDiagnostics() {
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.stats === "function")) { return; }
+    renderDevDiagnostics();
+    show("view-devdiag");
+  }
+
+  function renderDevDiagnostics() {
+    var box = $("devdiag-body");
+    var Queue = sampleQueuePlugin();
+    if (!box || !(Queue && typeof Queue.stats === "function")) { return; }
+    var rows = [];
+    var add = function (k, v) { rows.push(k + "：" + v); };
+    Queue.stats().then(function (st) {
+      var diagPromise = (typeof Queue.getDiagnostics === "function")
+        ? Queue.getDiagnostics() : Promise.resolve(null);
+      return diagPromise.then(function (d) {
+        if (st) {
+          add("pending", st.pending || 0);
+          add("retry_wait", st.retryWait || 0);
+          add("failed", st.failed || 0);
+          add("auth_required", st.authFailed || 0);
+          add("queue total bytes", st.pendingBytes || 0);
+        }
+        if (d) {
+          add("oldest sample age", (d.oldestSampleAgeMs != null)
+            ? Math.round(d.oldestSampleAgeMs / 60000) + " min" : "-");
+          add("last sample upload speed", (d.lastUploadBytesPerSec > 0)
+            ? Math.round(d.lastUploadBytesPerSec / 1024) + " KB/s" : "-");
+          add("last janitor time", (d.lastJanitorAt > 0)
+            ? new Date(d.lastJanitorAt).toISOString().replace("T", " ").slice(0, 16) : "never");
+          add("janitor deleted", (d.deletedSamples || 0) + " / " + (d.deletedBytes || 0) + " B");
+          add("janitor bytes before/after", (d.queueBytesBefore || 0) + " / " + (d.queueBytesAfter || 0));
+          add("last feedback sync", (d.feedbackPendingCount > 0)
+            ? "pending ×" + d.feedbackPendingCount : "synced");
+        } else {
+          add("diagnostics", "需升级安装包以获取 janitor 诊断");
+        }
+        box.innerHTML = "";
+        rows.forEach(function (line) {
+          var p = document.createElement("p");
+          p.className = "sample-note";
+          p.textContent = line;
+          box.appendChild(p);
+        });
+        var bj = document.createElement("button");
+        bj.type = "button";
+        bj.className = "barbtn";
+        bj.style.marginTop = "14px";
+        bj.textContent = "Run janitor now";
+        bj.addEventListener("click", function () {
+          if (typeof Queue.runJanitorNow === "function") {
+            Queue.runJanitorNow().then(renderDevDiagnostics, function () { });
+          }
+        });
+        box.appendChild(bj);
+        var br = document.createElement("button");
+        br.type = "button";
+        br.className = "barbtn";
+        br.style.marginTop = "10px";
+        br.textContent = "Retry queue now";
+        br.addEventListener("click", function () {
+          Queue.retryFailed().then(renderDevDiagnostics, function () { });
+        });
+        box.appendChild(br);
+      });
+    }, function () {
+      box.innerHTML = "";
+      var p = document.createElement("p");
+      p.className = "sample-note";
+      p.textContent = "队列状态不可用";
+      box.appendChild(p);
     });
   }
 
@@ -2341,19 +2290,12 @@
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
     $("btn-take-photo").addEventListener("click", startPhotoSearch);
     $("btn-photo-back").addEventListener("click", handlePhotoBack);
-    $("btn-batch-photo").addEventListener("click", function () {
-      var Camera = getPlugin("Camera");
-      var Ocr = getPlugin("Ocr");
-      openBatchPhoto();
-      if (!Camera || !Ocr) { setBatchStatus(photoPluginMissingMessage(Camera, Ocr)); }
-    });
-    $("btn-batch-back").addEventListener("click", handleBatchBack);
+    $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
-    $("btn-take-page").addEventListener("click", startBatchPageSearch);
-    initBatchTypes();
-    initSamplePanel();
+    $("btn-devdiag-back").addEventListener("click", renderMenu);
     initSampleResultTools();
     initSampleQueue();
+    initDevDiagnostics();
     $("btn-update").addEventListener("click", openUpdateView);
     $("btn-update-back").addEventListener("click", handleUpdateBack);
     /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
