@@ -1555,14 +1555,15 @@ function runSucOrchestrationTests() {
       check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
         !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
         !appSrc.includes("visibilitychange"));
-      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），就绪后才可展示",
+      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），modal 门与题库解耦（INSTANT_V2）",
         appSrc.indexOf("startupUpdateCtrl.trigger();") > 0 &&
         appSrc.indexOf("startupUpdateCtrl.trigger();") < appSrc.indexOf("loadBank().then(") &&
-        appSrc.includes("startupUiReady = true;") &&
-        appSrc.indexOf("startupUiReady = true;") > appSrc.indexOf("registerSystemBack();") &&
+        appSrc.includes("modalUiReady = true;") &&
+        appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
+        appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then(") &&
         appSrc.includes("startupUpdateCtrl.markUiReady();"));
-      check("SUC17-2b canShowNow 含 startupUiReady 门（未就绪绝不展示）",
-        appSrc.includes("return startupUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
+      check("SUC17-2b canShowNow 含 modalUiReady 门（未就绪绝不展示）",
+        appSrc.includes("return modalUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
     }
 
     /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
@@ -1594,8 +1595,11 @@ function runSucOrchestrationTests() {
     {
       const bootIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
       const startSec = appSrc.slice(bootIdx, appSrc.indexOf("清除记录", bootIdx));
-      check("SUC-12b 启动 fetch 与手动同一 endpoint/超时（/api/update/<channel>/latest, 10000）",
-        startSec.includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12b 启动 fresh latest 唯一请求在 prefetch 模块（endpoint/超时与手动一致）",
+        fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8")
+          .includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12b2 app.js 启动段复用 prefetch（不自带第二次 latest fetch）",
+        startSec.includes("prefetchReady") && !startSec.includes('"/api/update/"'));
       check("SUC-12c 启动校验/比较直接调用 MSQUpdater.validateManifest/checkUpdateState",
         startSec.includes("MSQUpdater.validateManifest(manifest, expected)") &&
         startSec.includes("MSQUpdater.checkUpdateState(currentVersionCode, manifest)"));
@@ -1660,6 +1664,80 @@ function runSucOrchestrationTests() {
         cD.flags().dismissed === true && cD.flags().pendingPrompt === false);
     }
   });
+}
+
+/* ---------- STARTUP_UPDATE_INSTANT_V2：Validated Manifest Cache（SUC20，纯函数） ---------- */
+section("启动更新即时化：Validated Manifest Cache（SUC20，纯函数 + 静态）");
+{
+  const store = (() => { const m = {}; return {
+    setItem: (k, v) => { m[k] = String(v); },
+    getItem: (k) => (k in m ? m[k] : null),
+    removeItem: (k) => { delete m[k]; }
+  }; })();
+  const man = (vc, ch, pkg) => ({ schemaVersion: 1, channel: ch || "dev",
+    packageName: pkg || "com.jty.safetyquiz.dev", versionCode: vc,
+    versionName: "1.0." + vc + "-dev", sha256: "a".repeat(64), size: 17209403,
+    apkUrl: "https://cdn.example/dev/vc" + vc + "/msq-dev-vc" + vc + ".apk" });
+  const exp = { channel: "dev", packageName: "com.jty.safetyquiz.dev" };
+
+  check("SUC20-1 validated newer cache → available（instant prompt 前提）",
+    MSQUpdater.writeLatestCache(store, "dev", man(20), 12345) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "available");
+  check("SUC20-2 cached equal version → latest（不提示）",
+    MSQUpdater.writeLatestCache(store, "dev", man(15), 12346) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "latest");
+  check("SUC20-3 cached older version → downgrade（不提示）",
+    MSQUpdater.writeLatestCache(store, "dev", man(10), 12347) === true &&
+    MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === "downgrade");
+  check("SUC20-4 corrupt cache → readLatestCache null → ignore",
+    (() => { store.setItem(MSQUpdater.latestCacheKey("dev"), "{corrupt!!");
+      return MSQUpdater.readLatestCache(store, "dev") === null; })() &&
+    MSQUpdater.cachedUpdateState(15, null, exp) === null);
+  check("SUC20-5 wrong channel/package cache → validate 拒绝 → ignore",
+    (() => {
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: man(99, "stable"), fetchedAt: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })() &&
+    (() => {
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: man(99, "dev", "com.other.app"), fetchedAt: 1, channel: "dev", packageName: "com.other.app" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })());
+  check("SUC20-6 cache 写读回路保真（manifest/fetchedAt/channel/packageName）",
+    (() => {
+      MSQUpdater.writeLatestCache(store, "dev", man(21), 555);
+      const e = MSQUpdater.readLatestCache(store, "dev");
+      return !!(e && e.manifest && e.manifest.versionCode === 21 && e.fetchedAt === 555 &&
+        e.channel === "dev" && e.packageName === "com.jty.safetyquiz.dev");
+    })());
+  check("SUC20-7/12 cache 绝不绕过校验：坏 manifest 即便更高版本也 ignore；升级后 current>=cached 不提示",
+    (() => {
+      const bad = man(99); bad.sha256 = "zz";
+      store.setItem(MSQUpdater.latestCacheKey("dev"), JSON.stringify(
+        { manifest: bad, fetchedAt: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+      return MSQUpdater.cachedUpdateState(15, MSQUpdater.readLatestCache(store, "dev"), exp) === null;
+    })() &&
+    (() => {
+      MSQUpdater.writeLatestCache(store, "dev", man(18), 557);
+      return MSQUpdater.cachedUpdateState(19, MSQUpdater.readLatestCache(store, "dev"), exp) === "downgrade";
+    })());
+  check("SUC20-8 prefetch 唯一 fresh 请求（单 getJSON）+ app.js 启动段复用不发第二次",
+    (() => {
+      const psrc = fs.readFileSync(path.join(__dirname, "www/js/startup-update-prefetch.js"), "utf8");
+      const startIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
+      const startSec20 = appSrc.slice(startIdx, appSrc.indexOf("清除记录", startIdx));
+      return (psrc.match(/getJSON\(/g) || []).length === 1 &&
+        startSec20.includes("prefetchReady") && !startSec20.includes('"/api/update/"');
+    })());
+  check("SUC20-9 展示门解耦：canShowNow 用 modalUiReady；置位于 Modal.init 后、loadBank 注册前",
+    appSrc.includes('return modalUiReady && currentViewId() === "view-menu" && !Modal.isOpen();') &&
+    appSrc.indexOf("modalUiReady = true;") > appSrc.indexOf("Modal.init();") &&
+    appSrc.indexOf("modalUiReady = true;") < appSrc.indexOf("loadBank().then("));
+  check("SUC20-10 cache 快路径尊重安全门（dismissed/在首页/无弹窗才弹，busy 不抢）",
+    appSrc.includes("startupUpdateCtrl.flags().dismissed") &&
+    appSrc.includes("startupCachePromptShown") &&
+    appSrc.includes('currentViewId() !== "view-menu" || Modal.isOpen()'));
 }
 
 /* ---------- SIMPLIFY_CAPTURE_FLOW_V1：界面收口 + 后台 best-effort 采集（CAP 系列） ---------- */
@@ -1817,7 +1895,13 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
       !/apkUrl|fallbackApkUrl|sha256|shiinalab|versionCode/.test(modalFn.replace(/[^;]*notes[^;]*;/g, "")) &&
       !modalFn.includes("manifest.size") && !modalFn.includes("manifest.sha256"));
     check("UI16-5 启动不再自动导航（showPrompt 只调 Modal；Modal 内无页面跳转）",
-      appSrc.includes("showPrompt: function (info, manifest) {\n          showStartupUpdateModal(info, manifest);\n        }") &&
+      (() => {
+        const spIdx = appSrc.indexOf("showPrompt: function (info, manifest) {");
+        const body = spIdx < 0 ? "" : appSrc.slice(spIdx, appSrc.indexOf("},", spIdx));
+        return body.includes("showStartupUpdateModal(info, manifest);") &&
+          !body.includes('show("') && !body.includes("renderMenu") &&
+          body.includes("startupCachePromptShown");
+      })() &&
       !modalFn.includes('show("') && !modalFn.includes("renderMenu"));
     check("UI16-6 稍后 = 仅关闭 Modal 留在当前页（不导航）",
       /稍后[^;]*barbtn cancel[^;]*function \(\) \{ Modal\.close\(\); \}/.test(modalFn.replace(/\r?\n/g, "")));

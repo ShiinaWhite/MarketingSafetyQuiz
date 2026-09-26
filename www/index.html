@@ -103,7 +103,7 @@
   <!-- 整页答案（首页相机按钮 → 直接拍摄 → AUTO → 本页答案） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>首页</span></button>
+      <button id="btn-batch-results-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
@@ -120,7 +120,7 @@
   <!-- 搜题详情 -->
   <section id="view-search-detail" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-detail-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>搜索</span></button>
+      <button id="btn-detail-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
@@ -158,7 +158,7 @@
   <!-- 考试错题回顾 -->
   <section id="view-review" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-review-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>成绩</span></button>
+      <button id="btn-review-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
       <div id="review-title" class="qtitle"></div>
     </header>
     <main id="review-body" class="pad"></main>
@@ -167,13 +167,17 @@
 </div>
 <div id="modal-root" class="hidden"></div>
 
+<!-- STARTUP_UPDATE_INSTANT_V2：最早 timing 锚点（WebView 首脚本） -->
+<script>window.__MSQStartupTiming = { webviewScriptStart: Date.now() };</script>
 <script src="data/config.js"></script>
-<script src="data/questions.js"></script>
-<script src="data/explanations.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/core.js"></script>
 <script src="js/sample-collector.js"></script>
 <script src="js/updater.js"></script>
+<!-- 启动更新早期预取：必须在 questions/explanations 重数据之前发起 latest 请求 -->
+<script src="js/startup-update-prefetch.js"></script>
+<script src="data/questions.js"></script>
+<script src="data/explanations.js"></script>
 <script src="js/startup-update.js"></script>
 <script src="js/apk-download-diag.js"></script>
 <script src="js/app.js"></script>

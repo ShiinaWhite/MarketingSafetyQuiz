@@ -45,7 +45,7 @@
   <!-- 刷题 / 模拟考试答题 -->
   <section id="view-quiz" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-back" class="backbtn">‹ 返回</button>
+      <button id="btn-back" class="backbtn"><span>返回</span></button>
       <div id="quiz-title" class="qtitle"></div>
     </header>
     <main id="quiz-scroll">
@@ -79,7 +79,7 @@
   <!-- 搜题 -->
   <section id="view-search" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-search-back" class="backbtn">‹ 返回</button>
+      <button id="btn-search-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">搜题</div>
     </header>
     <div class="search-bar-wrap">
@@ -112,7 +112,7 @@
   <!-- 整页答案（相机直拍直达，无中转页） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 首页</button>
+      <button id="btn-batch-results-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
@@ -129,7 +129,7 @@
   <!-- 搜题详情 -->
   <section id="view-search-detail" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-detail-back" class="backbtn">‹ 搜索</button>
+      <button id="btn-detail-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
@@ -138,7 +138,7 @@
   <!-- DEV 隐藏诊断（VC17：显示层全中文；入口 = 检查更新页当前版本行 7 连击，仅 DEV 构建） -->
   <section id="view-devdiag" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
+      <button id="btn-devdiag-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">开发者诊断</div>
     </header>
     <main id="devdiag-body" class="pad"></main>
@@ -147,7 +147,7 @@
   <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->
   <section id="view-update" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-update-back" class="backbtn">‹ 返回</button>
+      <button id="btn-update-back" class="backbtn"><span>返回</span></button>
       <div class="qtitle">检查更新</div>
     </header>
     <main class="pad">
@@ -166,7 +166,7 @@
   <!-- 考试错题回顾 -->
   <section id="view-review" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-review-back" class="backbtn">‹ 成绩</button>
+      <button id="btn-review-back" class="backbtn"><span>返回</span></button>
       <div id="review-title" class="qtitle"></div>
     </header>
     <main id="review-body" class="pad"></main>
@@ -316,6 +316,32 @@
     }
   } };
 
+  /* SUC20：Validated Manifest Cache 夹具（?cachevc=N 种子；每次冷载先清缓存）。
+     每个 variant 自清自种，避免 localStorage 跨变体污染。 */
+  (function () {
+    try {
+      localStorage.removeItem("msq.update.latestCache.v1.dev");
+      localStorage.removeItem("msq.update.latestCache.v1.stable");
+    } catch (e) { }
+    const qs = new URLSearchParams(location.search);
+    const cvc = qs.get("cachevc");
+    if (!cvc) { return; }
+    if (qs.get("cachemode") === "corrupt") {
+      localStorage.setItem("msq.update.latestCache.v1.dev", "{corrupt!!");
+      return;
+    }
+    const channel = qs.get("cachemode") === "wrongchannel" ? "stable" : "dev";
+    const manifest = {
+      schemaVersion: 1, channel: channel, packageName: "com.jty.safetyquiz.dev",
+      versionCode: parseInt(cvc, 10), versionName: "1.0." + cvc + "-dev",
+      sha256: "a".repeat(64), size: 17209403,
+      apkUrl: "https://apk.shiinalab.top/dev/vc" + cvc + "/msq-dev-vc" + cvc + ".apk",
+      notes: "cache fixture"
+    };
+    localStorage.setItem("msq.update.latestCache.v1.dev", JSON.stringify(
+      { manifest: manifest, fetchedAt: Date.now(), channel: "dev", packageName: "com.jty.safetyquiz.dev" }));
+  })();
+
   /* SUC17：观测主菜单渲染完成（renderMenu 向 menu-buttons 填充按钮） */
   (function () {
     const mb = document.getElementById("menu-buttons");
@@ -331,6 +357,7 @@
 <script src="../www/js/icons.js"></script>
 <script src="../www/js/sample-collector.js"></script>
 <script src="../www/js/updater.js"></script>
+<script src="../www/js/startup-update-prefetch.js"></script>
 <script src="../www/js/startup-update.js"></script>
 <script src="../www/js/apk-download-diag.js"></script>
 <script src="../www/js/app.js"></script>
@@ -359,8 +386,54 @@
   setInterval(() => { if (vis("view-batch-photo")) { batchPhotoEverVisible = true; } }, 30);
 
   try {
+    /* ============ SUC20：Validated Manifest Cache（INSTANT_V2 运行时） ============ */
+    const cachevc = Q.get("cachevc");
+    if (cachevc) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      const T = window.__MSQStartupTiming || {};
+      const mode = Q.get("cachemode");
+      const expectPrompt = !mode && parseInt(cachevc, 10) > 15;
+      if (expectPrompt) {
+        const modal = await poll(modalVisible, 4000);
+        check("SUC20-1 cached newer manifest → instant prompt", !!modal);
+        const mt = modalText();
+        check("SUC20-1b 提示来自 cache（vc" + cachevc + "）且无技术字段",
+          mt.indexOf("1.0." + cachevc + "-dev") >= 0 && mt.indexOf("apk") < 0 &&
+          mt.indexOf("SHA") < 0 && mt.indexOf("shiinalab") < 0,
+          mt.slice(0, 60));
+        check("SUC20-9a cache prompt 弹出时 fresh 网络仍在途（不被自己拖慢）",
+          T.promptShown != null && T.networkLatestStart != null &&
+          T.networkLatestReady == null,
+          JSON.stringify({ p: T.promptShown, n: T.networkLatestReady }));
+        check("SUC20-6 cache hit 仍完成后台 fresh revalidate（恰一次主请求）",
+          window.__updateFetches === 1);
+        /* SUC20-7：点「立即更新」仍 fresh-check（fake 网络 vc15 ≤ 当前 15 → 已是最新版） */
+        const go = Array.from(document.querySelectorAll("#modal-root .barbtn"))
+          .find((b) => b.textContent === "立即更新");
+        go.click();
+        await poll(() => (document.getElementById("update-body").innerText || "").indexOf("已经是最新版") >= 0);
+        check("SUC20-7 点击更新仍 fresh-check（cache vc99 不绕过服务器判定）",
+          vis("view-update") &&
+          document.getElementById("update-body").innerText.indexOf("已经是最新版") >= 0);
+        check("SUC20-7b fresh check 发出第二次请求（manual 路径独立）",
+          window.__updateFetches === 2);
+        check("SUC20-9b cache prompt 显著先于网络结果（margin >= 500ms）",
+          T.promptShown != null && T.networkLatestReady != null &&
+          (T.networkLatestReady - T.promptShown) >= 500,
+          JSON.stringify({ p: T.promptShown, n: T.networkLatestReady,
+            margin: T.networkLatestReady - T.promptShown }));
+      } else {
+        await sleep(2600);
+        const id = mode === "corrupt" ? "SUC20-4 invalid cache → ignore + fresh network（无提示）"
+          : mode === "wrongchannel" ? "SUC20-5 wrong channel/package cache → ignore（无提示）"
+          : parseInt(cachevc, 10) === 15 ? "SUC20-2/12 cached equal version → no prompt（升级后不重复提示）"
+          : "SUC20-3 cached older version → no prompt";
+        check(id, !modalVisible() && vis("view-menu") && !vis("view-update"));
+        check("SUC20-4b 网络重验证仍执行（恰一次主请求）", window.__updateFetches === 1);
+      }
+    }
     /* ============ UI16-12：网络失败 → 完全静默 ============ */
-    if (isFailRun) {
+    else if (isFailRun) {
       await poll(() => document.querySelector("#menu-buttons button"));
       await sleep(2500);   /* 等 fake 失败返回 */
       check("UI16-12 网络失败：无 Modal、无跳转、留在首页",
@@ -470,6 +543,13 @@
         JSON.stringify(window.__order));
       check("SUC17-2 fetch 不阻塞 loadBank（菜单照常渲染，boot 正常完成）",
         document.querySelectorAll("#menu-buttons button").length >= 3);
+      const TT = window.__MSQStartupTiming || {};
+      check("SUC20-T timing marks 可用（webview/prefetch 锚点）",
+        TT.webviewScriptStart != null && TT.startupPrefetchStart != null);
+      check("SUC20-8 冷启动 fresh latest 只有一个主请求（prefetch 唯一 + controller 复用）",
+        window.__updateFetches === 1);
+      check("SUC20-9b modalUiReady 门先于 bank/index 就绪（timing 实证解耦）",
+        TT.modalUiReady != null && (TT.bankReady == null || TT.modalUiReady <= TT.bankReady));
 
       /* —— NAV-A：search → detail → 返回 —— */
       const searchBtn = document.getElementById("btn-search-entry");

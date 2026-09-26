@@ -111,6 +111,62 @@
     return { ok: true, error: null };
   }
 
+
+  /* ---------------- Validated Manifest Cache（STARTUP_UPDATE_INSTANT_V2） ----------------
+     只允许写入「已通过 validateManifest 的 manifest」；storage 由调用方注入
+     （浏览器 localStorage / 测试 mock），本模块保持纯函数、无全局副作用。
+     Cache 只能决定「是否先弹更新提示」，绝不绕过 fresh check / SHA / size /
+     package / versionCode / signer / CDN verifier —— 下载安装仍走完整链路。 */
+  var LATEST_CACHE_PREFIX = "msq.update.latestCache.v1.";
+
+  function latestCacheKey(channel) {
+    return LATEST_CACHE_PREFIX + String(channel || "");
+  }
+
+  function writeLatestCache(storage, channel, manifest, nowMs) {
+    if (!storage || !channel || !manifest) { return false; }
+    var entry = {
+      manifest: manifest,
+      fetchedAt: (typeof nowMs === "number") ? nowMs : Date.now(),
+      channel: channel,
+      packageName: (manifest && manifest.packageName) || null
+    };
+    try {
+      storage.setItem(latestCacheKey(channel), JSON.stringify(entry));
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function readLatestCache(storage, channel) {
+    if (!storage || !channel) { return null; }
+    try {
+      var raw = storage.getItem(latestCacheKey(channel));
+      if (!raw) { return null; }
+      var entry = JSON.parse(raw);
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) { return null; }
+      if (entry.channel !== channel || !entry.manifest || typeof entry.manifest !== "object") {
+        return null;
+      }
+      if (typeof entry.fetchedAt !== "number") { return null; }
+      return entry;
+    } catch (e) { return null; }
+  }
+
+  function clearLatestCache(storage, channel) {
+    if (!storage || !channel) { return; }
+    try { storage.removeItem(latestCacheKey(channel)); } catch (e) { }
+  }
+
+  /* Cache 快路径判定：entry 必须能通过当前 validateManifest（渠道/包名/schema 全查），
+     且 cached.versionCode > 当前 versionCode 才返回 "available"；否则 null。
+     升级后（current >= cached）天然不再提示（SUC20-12）。 */
+  function cachedUpdateState(currentVersionCode, entry, expected) {
+    if (!entry || !entry.manifest) { return null; }
+    var v = validateManifest(entry.manifest, expected);
+    if (!v.ok) { return null; }
+    return checkUpdateState(currentVersionCode, entry.manifest);
+  }
+
   /* versionCode 整数比较（绝不使用 versionName 字符串比较）：
      available = 发现新版本；latest = 已是最新；downgrade = 服务器版本低于当前 */
   function checkUpdateState(currentVersionCode, manifest) {
@@ -177,6 +233,12 @@
     resolveApkUrl: resolveApkUrl,
     validateManifest: validateManifest,
     checkUpdateState: checkUpdateState,
+    LATEST_CACHE_PREFIX: LATEST_CACHE_PREFIX,
+    latestCacheKey: latestCacheKey,
+    writeLatestCache: writeLatestCache,
+    readLatestCache: readLatestCache,
+    clearLatestCache: clearLatestCache,
+    cachedUpdateState: cachedUpdateState,
     classifyDownloadFailure: classifyDownloadFailure,
     shouldTryFallback: shouldTryFallback,
     fallbackApkUrlFor: fallbackApkUrlFor,

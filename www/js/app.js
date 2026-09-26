@@ -2322,35 +2322,52 @@
     });
   }
 
-  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1 + VC17 提前并行） ----------------
-     编排与决策在 startup-update.js（可测纯逻辑）；manifest 获取/校验/版本比较/
+  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1 + STARTUP_UPDATE_INSTANT_V2） ----------------
+     编排与决策在 startup-update.js（可测纯逻辑）；manifest 校验/版本比较/
      更新提示 UI/下载/校验/安装全部复用手动"检查更新"的同一条路径，无第二套 updater。
      每个 App process / WebView 生命周期只自动检查一次；任何失败完全静默。
-     VC17：trigger 在 bootstrap 期立即执行（与 loadBank 并行）；startupUiReady 在
-     主菜单渲染完成后置位，此前检查结果暂存在 controller 内，就绪后立即展示。 */
-  var startupUiReady = false;
+     INSTANT_V2：fresh latest 请求由 startup-update-prefetch.js 在 WebView 脚本期
+     （questions/explanations 重数据之前）发起，本 controller 只复用该唯一请求
+     （prefetchReady），绝不二次 fetch；展示门改为 modalUiReady（Modal.init 完成
+     + 首页 shell + 无其他 Modal 即可），题库/index 继续后台初始化。
+     Validated Manifest Cache 快路径：验证过且比当前版新的 cache 允许先弹提示
+     （cachePromptShown 防止与网络路径双重弹窗），网络 revalidate 始终继续。 */
+  var modalUiReady = false;
+  var startupCachePromptShown = false;
+  var startupPrefetch = (typeof window.__MSQStartupUpdatePrefetch !== "undefined")
+    ? window.__MSQStartupUpdatePrefetch : null;
+  var prefetchReady = startupPrefetch
+    ? startupPrefetch.ready
+    : Promise.resolve({ ok: false, reason: "no-prefetch" });
+
+  function startupTimingMark(name) {
+    var T = window.__MSQStartupTiming;
+    if (T && T[name] == null) { T[name] = Date.now(); }
+  }
+
   var startupUpdateCtrl = (typeof MSQStartupUpdate !== "undefined" && MSQStartupUpdate)
     ? MSQStartupUpdate.createController({
+        /* 复用 prefetch 已完成的 App.getInfo（不重复调用） */
         getAppInfo: function () {
-          var App = getPlugin("App");
-          if (!(App && typeof App.getInfo === "function")) { return Promise.resolve(null); }
-          return App.getInfo().then(function (info) {
-            return {
-              id: info.id,
-              versionName: info.version,
-              versionCode: parseInt(info.build, 10) || 0
-            };
+          return prefetchReady.then(function (r) {
+            return (r && r.info) ? r.info : null;
           }, function () { return null; });
         },
         channelFor: function (id) {
           return MSQUpdater.updateChannelFor(id);
         },
-        /* 与手动 checkForUpdate() 完全相同的服务器解析、endpoint 与超时 */
+        /* 复用 prefetch 的唯一 fresh latest 请求；prefetch 缺席/失败时按
+           网络失败静默处理（与旧离线语义一致） */
         fetchLatest: function (channel) {
-          var server = updateResolvedServer();
-          return (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
-            ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
-            : Promise.reject(new Error("无传输层"));
+          return prefetchReady.then(function (r) {
+            if (!(r && r.ok && r.channel === channel && r.freshReady)) {
+              return Promise.reject(new Error("prefetch-unavailable"));
+            }
+            return r.freshReady.then(function (fresh) {
+              return (fresh && fresh.ok) ? fresh.manifest
+                : Promise.reject(new Error("prefetch-unavailable"));
+            });
+          });
         },
         validate: function (manifest, expected) {
           return MSQUpdater.validateManifest(manifest, expected);
@@ -2358,23 +2375,40 @@
         compare: function (currentVersionCode, manifest) {
           return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
         },
-        /* 只在主菜单就绪、用户仍停在首屏且无弹窗时提示，绝不抢正在进行的操作 */
+        /* modalUiReady：Modal.init 完成 + 当前处于启动首页 shell + 无其他 Modal。
+           不再等待题库/searchIndex/batchIndex —— 更新 Modal 不依赖它们。 */
         canShowNow: function () {
-          return startupUiReady && currentViewId() === "view-menu" && !Modal.isOpen();
+          return modalUiReady && currentViewId() === "view-menu" && !Modal.isOpen();
         },
         /* VC16：不再自动跳转更新页，改为首页上的轻量 Modal。
            稍后/立即更新/系统 Back 都经 Modal.close → onClose 标记 dismissed，
            本次 session 不再自动弹；真正 cold start 才会重新提醒。 */
         showPrompt: function (info, manifest) {
+          if (startupCachePromptShown) { return; }   /* cache 快路径已弹过，绝不重复 */
+          startupTimingMark("promptShown");
+          window.__MSQStartupTiming.startupManifestSource = "network";
+          if (window.__MSQStartupTimingReport) { window.__MSQStartupTimingReport(); }
           showStartupUpdateModal(info, manifest);
         },
         debug: function (msg) { console.log("[startup-update] " + msg); }
       })
     : null;
 
-  /* VC17_STARTUP_SPEED_AND_DIAG_ZH_V1：bootstrap 一开始就发起检查（与 loadBank/
-     UI 初始化/队列恢复并行，绝不 await），网络耗时与初始化耗时重叠而非串行相加。
-     主菜单渲染完成后 markUiReady 才允许展示 Modal（见 boot 段 startupUiReady）。 */
+  /* INSTANT_V2 cache 快路径：验证过且比当前版新的 cache → 立即提示（<200ms 量级），
+     后台 fresh revalidate 由 prefetch 唯一请求继续（绝不因 cache 跳过）。 */
+  prefetchReady.then(function (r) {
+    if (!r || !r.ok || !r.cachedNewer || !r.cached || !startupUpdateCtrl) { return; }
+    if (startupCachePromptShown || startupUpdateCtrl.flags().dismissed) { return; }
+    if (!modalUiReady || currentViewId() !== "view-menu" || Modal.isOpen()) { return; }
+    startupCachePromptShown = true;
+    startupTimingMark("promptShown");
+    window.__MSQStartupTiming.startupManifestSource = "cache";
+    if (window.__MSQStartupTimingReport) { window.__MSQStartupTimingReport(); }
+    showStartupUpdateModal(r.info, r.cached.manifest);
+  }, function () { /* prefetch reject：静默，controller 网络路径同样静默 */ });
+
+  /* INSTANT_V2：trigger 仍在 app.js bootstrap 期调用；其内部 getAppInfo/fetchLatest
+     复用 prefetch 的唯一请求（prefetch 在 questions.js 之前已经开始 fetch）。 */
   if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
 
   /* 启动更新提示 Modal（VC16_UI_POLISH_V1 + UI_DESIGN_V1）：复用现有 Modal 组件壳，
@@ -2564,21 +2598,25 @@
 
   Store.load();
   Modal.init();
+  /* STARTUP_UPDATE_INSTANT_V2：modalUiReady 与 bank/index 解耦 —— Modal.init 完成
+     即允许展示启动更新提示（更新 Modal 不依赖 searchIndex/batchIndex），
+     题库与 index 继续后台初始化，绝不为弹 Modal 阻塞正常启动。 */
+  startupTimingMark("modalUiReady");
+  modalUiReady = true;
+  if (startupUpdateCtrl) { startupUpdateCtrl.markUiReady(); }
   loadBank().then(function (data) {
     bank = data;
+    startupTimingMark("bankReady");
     byType = MSQ.indexByType(bank.questions);
     searchIndex = MSQ.buildSearchIndex(bank.questions);
     batchIndex = MSQ.buildBatchOcrIndex(bank.questions);
     batchIndexById = {};
     batchIndex.forEach(function (it) { batchIndexById[it.id] = it; });
+    startupTimingMark("indexesReady");
     bindEvents();
     renderMenu();
     registerSW();
     registerSystemBack();
-    /* VC17：主界面就绪 —— 启动检查早已在跑，此刻起才允许展示 Modal；
-       若检查已先完成并发现新版，markUiReady 会立即弹（不等待、不再串行）。 */
-    startupUiReady = true;
-    if (startupUpdateCtrl) { startupUpdateCtrl.markUiReady(); }
   }).catch(function (err) {
     document.body.innerHTML = "";
     var box = document.createElement("div");
