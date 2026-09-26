@@ -13,7 +13,12 @@
 </style>
 </head>
 <body>
-<!-- 完整复刻 www/index.html 的视图结构（app.js 启动期 bindEvents 需要全部元素），数据脚本以 fixture 内联替代 -->
+<!-- 完整复刻 www/index.html 的视图结构（app.js 启动期 bindEvents 需要全部元素），数据脚本以 fixture 内联替代
+     VC16_UI_POLISH_V1：无首页相机按钮；无首页版本行；诊断入口在更新页当前版本行；
+     启动更新 = Modal。URL 参数驱动 fake 更新服务：
+       ?latestvc=16        fake latest versionCode（默认 15 = 与 fake App 相同 → 静默）
+       ?updatedelay=2500   fake latest 延迟返回毫秒（UI16-13 抢操作场景）
+       ?updatefail=1       fake latest 直接网络失败（UI16-12 静默场景） -->
 
 <div id="app">
 
@@ -27,6 +32,7 @@
     </header>
     <div id="menu-buttons" class="grid"></div>
     <div class="menu-foot">
+      <button id="btn-update" class="linkbtn">检查更新</button>
       <button id="btn-settings" class="linkbtn">模拟考试设置</button>
       <button id="btn-clear" class="linkbtn danger">清除学习记录</button>
     </div>
@@ -91,7 +97,7 @@
     </main>
   </section>
 
-  <!-- 拍照搜题 -->
+  <!-- 拍照搜题（单题） -->
   <section id="view-photo" class="view hidden">
     <header class="quiz-head">
       <button id="btn-photo-back" class="backbtn">‹ 搜索</button>
@@ -105,56 +111,19 @@
     </main>
   </section>
 
-  <!-- 整页拍照搜题（选题型 → 拍整页 → 自动拆题 → 本页答案） -->
-  <section id="view-batch-photo" class="view hidden">
-    <header class="quiz-head">
-      <button id="btn-batch-back" class="backbtn">‹ 搜索</button>
-      <div class="qtitle">整页拍照搜题</div>
-    </header>
-    <main class="pad">
-      <div id="batch-type-row" class="batch-type-row" role="group" aria-label="本页题型">
-        <button type="button" class="batch-type-btn active" data-type="auto" aria-pressed="true">自动</button>
-        <button type="button" class="batch-type-btn" data-type="single" aria-pressed="false">单选</button>
-        <button type="button" class="batch-type-btn" data-type="multi" aria-pressed="false">多选</button>
-        <button type="button" class="batch-type-btn" data-type="judge" aria-pressed="false">判断</button>
-      </div>
-      <p class="batch-tip">默认自动识别题型：章节标题优先，识别不到时三种题型在本地各试跑一遍取最优。整页答案页可一键切换题型立即重算（不重拍）。手动锁定只在当前会话有效。</p>
-      <button id="btn-take-page" class="barbtn primary photo-take" type="button">📷 拍摄整页</button>
-      <p id="batch-status" class="search-count hidden"></p>
-      <details id="sample-panel" class="sample-panel">
-        <summary>测试样本采集</summary>
-        <label class="sample-row">
-          <input type="checkbox" id="sample-enabled">
-          <span>自动上传测试样本（仅开发调试）</span>
-        </label>
-        <div class="sample-row">
-          <input id="sample-server" type="url" placeholder="http://192.168.x.x:8787"
-                 autocomplete="off" spellcheck="false" inputmode="url">
-        </div>
-        <div class="sample-row">
-          <button id="btn-sample-test" class="barbtn" type="button">测试连接</button>
-        </div>
-        <p id="sample-test-status" class="sample-note hidden"></p>
-      </details>
-    </main>
-  </section>
-
-  <!-- 整页答案 -->
+  <!-- 整页答案（相机直拍直达，无中转页） -->
   <section id="view-batch-results" class="view hidden">
     <header class="quiz-head">
-      <button id="btn-batch-results-back" class="backbtn">‹ 重拍</button>
+      <button id="btn-batch-results-back" class="backbtn">‹ 首页</button>
       <div class="qtitle">整页答案</div>
     </header>
     <main id="batch-scroll" class="pad">
       <div id="batch-summary" class="batch-summary"></div>
       <div id="batch-list"></div>
       <div id="batch-tools"></div>
-      <div id="batch-sample-tools" class="sample-tools hidden">
-        <p class="sample-line">
-          <span id="batch-sample-status" class="sample-note hidden"></span>
-          <button id="btn-sample-retry" class="linkbtn hidden" type="button">重试</button>
-        </p>
-        <button id="btn-sample-flag" class="linkbtn hidden" type="button">⚑ 标记本页有问题</button>
+      <div id="batch-sample-tools" class="sample-tools">
+        <button id="btn-sample-flag" class="linkbtn hidden" type="button">反馈本页问题</button>
+        <div id="sample-feedback-panel" class="sample-feedback-panel hidden"></div>
       </div>
     </main>
   </section>
@@ -166,6 +135,28 @@
       <div class="qtitle">题目详情</div>
     </header>
     <main id="search-detail-body" class="pad"></main>
+  </section>
+
+  <!-- DEV 隐藏诊断（VC17：显示层全中文；入口 = 检查更新页当前版本行 7 连击，仅 DEV 构建） -->
+  <section id="view-devdiag" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">开发者诊断</div>
+    </header>
+    <main id="devdiag-body" class="pad"></main>
+  </section>
+
+  <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->
+  <section id="view-update" class="view hidden">
+    <header class="quiz-head">
+      <button id="btn-update-back" class="backbtn">‹ 返回</button>
+      <div class="qtitle">检查更新</div>
+    </header>
+    <main class="pad">
+      <p id="update-current" class="dim"></p>
+      <div id="update-body"></div>
+      <p id="update-error" class="batch-hint hidden"></p>
+    </main>
   </section>
 
   <!-- 考试成绩 -->
@@ -189,8 +180,7 @@
 <div id="nav-report">运行中…</div>
 
 <script>
-/* 内联 fixture 题库：app.js 的 loadBank 优先读 window.QUESTIONS_DATA（与正式 app 同路径）。
-   题干含 NAVTEST 标记保证搜题命中且不与其它数据混淆；题干足够长保证 OCR 匹配 high。 */
+/* 内联 fixture 题库 + fake Capacitor 插件（必须在 app.js 之前注入） */
 (function () {
   const S = (id, stem, opts, ans) => ({ id, major: "NAV", type: "single", stem, options: opts, answer: ans });
   const qs = [];
@@ -219,7 +209,7 @@
   window.QUESTIONS_DATA = { total: qs.length, questions: qs };
   window.__NAV_FIXTURE = qs;
 
-  /* OCR fixture：12 道单选题的整页行（含坐标，页面足够长可滚动） */
+  /* OCR fixture：12 道单选题的整页行（含坐标） */
   window.__ocrFixture = function () {
     const lines = [];
     let y = 60;
@@ -232,9 +222,118 @@
     return { text: lines.map((l) => l.text).join("\n"), ms: 8, width: 1000, height: y + 100, lines };
   };
 })();
+
+  const Q = new URLSearchParams(location.search);
+  window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
+  window.__order = [];   /* SUC17 时序观测：getInfo / update-fetch / menu-ready */
+  window.__feedbackCalls = [];
+  window.__httpFail = 0;
+  window.__queuePersisted = [];
+  window.__queueFeedbacks = [];
+  window.__cameraReject = null;
+  window.__queuePersistFail = 0;
+  window.__janitorRuns = [];
+  window.__queueListener = null;
+  window.__updateFetches = 0;   /* fake OTA latest 请求计数（UI16-7 一次性验证） */
+  window.Capacitor = { Plugins: {
+    App: {
+      getInfo: async () => {
+        window.__order.push("getInfo");   /* SUC17-1：trigger 在 bootstrap 期即调用 */
+        return { id: "com.jty.safetyquiz.dev", version: "1.0.15-dev", build: "15" };
+      },
+      addListener: () => ({ remove: () => {} }),
+      exitApp: () => {}
+    },
+    Camera: { getPhoto: async () => {
+      if (window.__cameraReject) {
+        const m = window.__cameraReject;
+        window.__cameraReject = null;
+        throw new Error(m);
+      }
+      return { dataUrl: "data:image/jpeg;base64,QUJD" };
+    } },
+    Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
+    CapacitorHttp: { request: async (opts) => {
+        const url = (opts && opts.url) || "";
+        if (url.indexOf("/api/update/") >= 0 && url.indexOf("/latest") >= 0) {
+          /* fake OTA latest 服务：URL 参数控制版本/延迟/失败（VC16/VC17 测试驱动） */
+          window.__order.push("update-fetch");
+          window.__updateFetches += 1;
+          const vc = parseInt(Q.get("latestvc") || "15", 10);
+          const delay = parseInt(Q.get("updatedelay") || "0", 10) || 0;
+          const fail = Q.get("updatefail") === "1";
+          await new Promise((r) => setTimeout(r, delay));
+          if (fail) { throw new Error("simulated dns failure"); }
+          return { status: 200, data: {
+            schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+            versionCode: vc, versionName: "1.0." + vc + "-dev",
+            sha256: "a".repeat(64), size: 17209403,
+            apkUrl: "https://apk.shiinalab.top/dev/vc" + vc + "/msq-dev-vc" + vc + ".apk",
+            fallbackApkUrl: "/api/update/dev/apk",
+            notes: "界面优化与问题修复"
+          } };
+        }
+        window.__c.http += 1;
+        if (url.indexOf("/api/feedback") >= 0) {
+          window.__feedbackCalls.push(JSON.parse(JSON.stringify(opts.data || {})));
+        }
+        if (window.__httpFail > 0) { window.__httpFail -= 1; return { status: 500, data: { ok: false } }; }
+        return { status: 200, data: { ok: true } };
+      } },
+    SampleQueue: {
+      setServer: async () => ({ ok: true }),
+      init: async () => ({ ok: true, recovered: 0, removed: 0 }),
+      addListener: (ev, cb) => { window.__queueListener = cb; return { remove: () => {} }; },
+      persistSample: async (o) => {
+        if (window.__queuePersistFail > 0) {
+          window.__queuePersistFail -= 1;
+          throw new Error("IO_ERROR disk full");
+        }
+        window.__queuePersisted.push({
+          sampleId: o.sampleId,
+          dataUrlLen: (o.photoDataUrl || "").length,
+          runJson: JSON.parse(o.runJson)
+        });
+        return { ok: true, sampleId: o.sampleId };
+      },
+      persistFeedback: async (o) => {
+        if (window.__queueFeedbackFail > 0) {
+          window.__queueFeedbackFail -= 1;
+          throw new Error("IO_ERROR");
+        }
+        window.__queueFeedbacks.push(JSON.parse(o.feedbackJson));
+        return { ok: true, sampleId: o.sampleId };
+      },
+      stats: async () => ({ ok: true, pending: 0, uploading: 0, retryWait: 0, failed: 0,
+        authFailed: 0, uploaded: 2, pendingBytes: 4 * 1024 * 1024 }),
+      retryFailed: async () => ({ ok: true, retried: 0 }),
+      cleanupFailed: async () => ({ ok: true, deleted: 0, failedToDelete: 0, bytesFreed: 0 }),
+      getDiagnostics: async () => ({
+        ok: true, oldestSampleAgeMs: 3600_000, lastUploadBytesPerSec: 3_900_000,
+        feedbackPendingCount: 0, lastJanitorAt: Date.now() - 3600_000,
+        deletedSamples: 3, deletedBytes: 48 * 1024 * 1024,
+        queueBytesBefore: 300 * 1024 * 1024, queueBytesAfter: 252 * 1024 * 1024
+      }),
+      runJanitorNow: async () => { window.__janitorRuns.push(1); return { ok: true }; }
+    }
+  } };
+
+  /* SUC17：观测主菜单渲染完成（renderMenu 向 menu-buttons 填充按钮） */
+  (function () {
+    const mb = document.getElementById("menu-buttons");
+    const mo = new MutationObserver(() => {
+      if (mb.children.length > 0 && window.__order.indexOf("menu-ready") < 0) {
+        window.__order.push("menu-ready");
+      }
+    });
+    mo.observe(mb, { childList: true });
+  })();
 </script>
 <script src="../www/js/core.js"></script>
 <script src="../www/js/sample-collector.js"></script>
+<script src="../www/js/updater.js"></script>
+<script src="../www/js/startup-update.js"></script>
+<script src="../www/js/apk-download-diag.js"></script>
 <script src="../www/js/app.js"></script>
 <script>
 (async function () {
@@ -250,115 +349,267 @@
     return null;
   };
   const vis = (id) => { const v = document.getElementById(id); return !!v && !v.classList.contains("hidden"); };
+  const modalVisible = () => vis("modal-root");
+  const modalText = () => (document.getElementById("modal-root").innerText || "");
+
+  const Q = new URLSearchParams(location.search);
+  const isFailRun = Q.get("updatefail") === "1";
+  const isLateRun = !isFailRun && Q.get("latestvc") === "16" && !!Q.get("updatedelay");
+  const isModalRun = !isFailRun && !isLateRun && Q.get("latestvc") === "16";
+  let batchPhotoEverVisible = false;
+  setInterval(() => { if (vis("view-batch-photo")) { batchPhotoEverVisible = true; } }, 30);
 
   try {
-    await poll(() => document.querySelector("#menu-buttons button"));
-    await sleep(120);
+    /* ============ UI16-12：网络失败 → 完全静默 ============ */
+    if (isFailRun) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(2500);   /* 等 fake 失败返回 */
+      check("UI16-12 网络失败：无 Modal、无跳转、留在首页",
+        !modalVisible() && vis("view-menu") && !vis("view-update"));
+      check("UI16-12b 检查确实发起过一次（失败被吞掉）", window.__updateFetches === 1);
+    }
+    /* ============ UI16-13：用户已离开首页 → 不抢弹 ============ */
+    else if (isLateRun) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(80);
+      document.getElementById("btn-search-entry").click();   /* 检查返回前就离开首页 */
+      check("UI16-13a 已进入搜题页", vis("view-search"));
+      check("SUC17-1b 此时 fetch 早已发出、响应未回（请求与初始化并行）",
+        window.__updateFetches === 1);
+      await sleep(3200);   /* fake latest 2.5s 后返回 vc16 */
+      check("UI16-13b 结果返回时不弹 Modal、不打断操作",
+        !modalVisible() && vis("view-search") && !vis("view-update"));
+      check("UI16-13c 本次检查只发生一次且被放弃", window.__updateFetches === 1);
+      window.handleBack();
+      await sleep(120);
+      check("UI16-13d 回首页后也不补弹（one-shot 已消耗）",
+        vis("view-menu") && !modalVisible() && window.__updateFetches === 1);
+    }
+    /* ============ UI16-4~9：有新版 → Modal ============ */
+    else if (isModalRun) {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      const modal = await poll(modalVisible, 4000);
+      check("UI16-4 启动检查到新版 → 首页弹出更新 Modal", !!modal);
+      const mt = modalText();
+      check("UI16-4b Modal 内容：最新/当前版本 + 稍后/立即更新",
+        mt.indexOf("发现新版本") >= 0 && mt.indexOf("1.0.16-dev") >= 0 &&
+        mt.indexOf("1.0.15-dev") >= 0 && mt.indexOf("稍后") >= 0 &&
+        mt.indexOf("立即更新") >= 0, mt.slice(0, 80));
+      check("UI16-4c Modal 无任何技术信息（URL/SHA/大小/渠道）",
+        mt.indexOf("apk") < 0 && mt.indexOf("http") < 0 && mt.indexOf("SHA") < 0 &&
+        mt.indexOf("shiinalab") < 0 && mt.indexOf("17209403") < 0);
+      check("UI16-5 不再自动导航到更新页（留在首页）",
+        !vis("view-update") && vis("view-menu"));
+      /* 稍后 */
+      Array.from(document.querySelectorAll("#modal-root .barbtn"))
+        .find((b) => b.textContent === "稍后").click();
+      await sleep(120);
+      check("UI16-6 稍后 → Modal 消失且留在首页",
+        !modalVisible() && vis("view-menu") && !vis("view-update"));
+      /* 本 session 不再弹 */
+      document.getElementById("btn-search-entry").click();
+      await sleep(100);
+      window.handleBack();
+      await sleep(100);
+      await sleep(700);
+      check("UI16-7 本 session 不重复弹（导航一圈后仍无 Modal，检查仅 1 次）",
+        !modalVisible() && vis("view-menu") && window.__updateFetches === 1);
+      check("UI16-7b Modal 仍可用 Back 关闭 = 稍后（onClose 标记 dismissed 已生效）",
+        window.__updateFetches === 1);
+    }
+    /* ============ 基础套件：NAV/FB/CAP/UI16-1/2/3/10/11 + DIAG ============ */
+    else {
+      await poll(() => document.querySelector("#menu-buttons button"));
+      await sleep(200);
 
-    /* 注入 fake 插件与调用计数器（OCR once / 返回零重算 / 零上传的行为证据） */
-    window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
-    window.Capacitor = { Plugins: {
-      Camera: { getPhoto: async () => ({ dataUrl: "data:image/jpeg;base64,QUJD" }) },
-      Ocr: { recognizeText: async () => { window.__c.ocr += 1; return window.__ocrFixture(); } },
-      CapacitorHttp: { request: async () => { window.__c.http += 1; return { status: 200, data: { ok: true } }; } }
-    }};
-    const wrap = (name, key) => {
-      const orig = window.MSQ[name];
-      window.MSQ[name] = function () { window.__c[key] += 1; return orig.apply(this, arguments); };
-    };
-    wrap("searchPageQuestionsByOcr", "match");
-    wrap("splitPageOcrLines", "split");
-    wrap("recomputePageFromLines", "auto");
+      window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
+      window.__feedbackCalls.length = 0;
+      window.__httpFail = 0;
+      window.__queuePersisted.length = 0;
+      window.__queueFeedbacks.length = 0;
 
-    /* —— NAV-A：search → detail → 左上角返回 → search —— */
-    const searchBtn = document.getElementById("btn-search-entry") ||
-      Array.from(document.querySelectorAll("#view-menu button"))
-        .find((b) => /搜题/.test(b.textContent));
-    check("NAV-A0 菜单有搜题入口", !!searchBtn);
-    searchBtn.click();
-    check("NAV-A1 进入搜题页", vis("view-search"));
-    const input = document.getElementById("search-input");
-    input.value = "NAVTEST";
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    await poll(() => document.querySelector("#search-results .search-item"));
-    document.querySelector("#search-results .search-item").click();
-    check("NAV-A2 打开题目详情", vis("view-search-detail"));
-    document.getElementById("btn-detail-back").click();
-    check("NAV-A3 左上角返回 → 搜题页", vis("view-search") && !vis("view-search-detail"));
+      const wrap = (name, key) => {
+        const orig = window.MSQ[name];
+        window.MSQ[name] = function () { window.__c[key] += 1; return orig.apply(this, arguments); };
+      };
+      wrap("searchPageQuestionsByOcr", "match");
+      wrap("splitPageOcrLines", "split");
+      wrap("recomputePageFromLines", "auto");
 
-    /* —— NAV-B/D/E：batch → Top2 detail → 左上角返回 → batch（滚动/展开保持） —— */
-    document.getElementById("btn-batch-photo").click();
-    check("NAV-B0 进入整页拍照页", vis("view-batch-photo"));
-    document.getElementById("btn-take-page").click();
-    await poll(() => document.querySelector("#batch-list .batch-row"));
-    await sleep(120);
-    check("NAV-B1 AUTO 出整页答案", vis("view-batch-results") &&
-      document.querySelectorAll("#batch-list .batch-row").length >= 10);
+      /* —— UI16-1/11：首页无相机大按钮、无版本行；启动无新版完全静默 —— */
+      check("UI16-1 首页无「拍整页搜题」按钮（只有搜题入口）",
+        !document.getElementById("btn-camera-entry") &&
+        !!document.getElementById("btn-search-entry") &&
+        document.getElementById("view-menu").innerText.indexOf("拍整页搜题") < 0);
+      check("UI16-1b 首页无诊断版本行（DIAG-7）",
+        !document.getElementById("menu-version"));
+      check("UI16-11 无新版 → 启动完全静默（无 Modal、不跳更新页）",
+        !modalVisible() && vis("view-menu") && !vis("view-update") &&
+        window.__updateFetches === 1);
+      check("SUC17-1 启动 fetch 在主菜单渲染完成前已发起（getInfo 先于 menu-ready）",
+        window.__order.indexOf("getInfo") >= 0 &&
+        window.__order.indexOf("menu-ready") >= 0 &&
+        window.__order.indexOf("getInfo") < window.__order.indexOf("menu-ready"),
+        JSON.stringify(window.__order));
+      check("SUC17-2 fetch 不阻塞 loadBank（菜单照常渲染，boot 正常完成）",
+        document.querySelectorAll("#menu-buttons button").length >= 3);
 
-    const c0 = JSON.parse(JSON.stringify(window.__c));
-    window.scrollTo(0, 100000);   /* 真实滚动通道：.view 为 min-height 时 window 滚动 */
-    const savedY = window.pageYOffset;
-    check("NAV-D0 整页答案可滚动", savedY > 40, "savedY=" + savedY);
+      /* —— NAV-A：search → detail → 返回 —— */
+      const searchBtn = document.getElementById("btn-search-entry");
+      searchBtn.click();
+      check("NAV-A1 进入搜题页", vis("view-search"));
+      const input = document.getElementById("search-input");
+      input.value = "NAVTEST";
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      await poll(() => document.querySelector("#search-results .search-item"));
+      document.querySelector("#search-results .search-item").click();
+      check("NAV-A2 打开题目详情", vis("view-search-detail"));
+      document.getElementById("btn-detail-back").click();
+      check("NAV-A3 左上角返回 → 搜题页", vis("view-search") && !vis("view-search-detail"));
 
-    const rows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
-    const openRow = rows[rows.length - 2];
-    openRow.click();
-    const detail0 = openRow.nextElementSibling;
-    const candBtns = detail0.querySelectorAll(".batch-cand");
-    check("NAV-E0 某题展开且 Top3 候选可见",
-      openRow.classList.contains("open") && !detail0.classList.contains("hidden") && candBtns.length >= 1);
+      /* —— CAP-S2 / UI16-3：旧中转页不存在 —— */
+      check("UI16-3 旧整页拍照页仍不存在",
+        !document.getElementById("view-batch-photo") &&
+        !document.getElementById("btn-take-page") &&
+        !document.getElementById("batch-type-row"));
 
-    candBtns[Math.min(1, candBtns.length - 1)].click();
-    check("NAV-B2 打开 Top2 原题详情", vis("view-search-detail"));
-    document.getElementById("btn-detail-back").click();
-    check("NAV-B3 左上角返回 → 整页答案", vis("view-batch-results") && !vis("view-search-detail"));
-    check("NAV-D1 滚动位置恢复（window 通道）",
-      Math.abs((window.pageYOffset || 0) - savedY) <= 3,
-      window.pageYOffset + " vs " + savedY);
-    check("NAV-E1 返回后展开/Top3 状态自然保留",
-      openRow.classList.contains("open") && !openRow.nextElementSibling.classList.contains("hidden") &&
-      openRow.nextElementSibling.querySelectorAll(".batch-cand").length === candBtns.length);
+      /* —— UI16-2 / NAV-B：搜题框右侧 📷 直接拍摄 —— */
+      document.getElementById("btn-batch-photo").click();
+      await poll(() => document.querySelector("#batch-list .batch-row"));
+      await sleep(120);
+      check("UI16-2 搜题框右侧相机 → 直接拍摄 → 整页答案（无中转页）",
+        vis("view-batch-results") &&
+        document.querySelectorAll("#batch-list .batch-row").length >= 10 &&
+        !batchPhotoEverVisible);
+      check("CAP-S4 拍摄固定 AUTO（run.json pageTypeMode=auto）",
+        window.__queuePersisted.length >= 1 &&
+        window.__queuePersisted[0].runJson.pageTypeMode === "auto");
+      check("CAP-S6 拍摄后样本已后台自动 persist", window.__queuePersisted.length === 1);
 
-    /* —— NAV-C：Top3 → 系统 back（handleBack 即系统返回唯一入口） —— */
-    candBtns[candBtns.length - 1].click();
-    check("NAV-C1 再次打开 Top3 详情（来源仍为 batch-results）", vis("view-search-detail"));
-    window.handleBack();
-    check("NAV-C2 系统 back → 整页答案", vis("view-batch-results") && !vis("view-search-detail"));
+      const c0 = JSON.parse(JSON.stringify(window.__c));
+      const rows = Array.from(document.querySelectorAll("#batch-list .batch-row"));
+      const openRow = rows[rows.length - 2];
+      openRow.click();
+      const candBtns = openRow.nextElementSibling.querySelectorAll(".batch-cand");
+      check("NAV-E0 展开题块且 Top3 候选可见",
+        openRow.classList.contains("open") && candBtns.length >= 1);
+      candBtns[Math.min(1, candBtns.length - 1)].click();
+      check("NAV-B2 打开 Top2 原题详情", vis("view-search-detail"));
+      document.getElementById("btn-detail-back").click();
+      check("NAV-B3 返回 → 整页答案", vis("view-batch-results") && !vis("view-search-detail"));
+      check("NAV-F/G 详情返回零重算零 OCR",
+        window.__c.ocr === c0.ocr && window.__c.match === c0.match &&
+        window.__c.split === c0.split && window.__c.auto === c0.auto);
 
-    /* —— NAV-F/G/H：详情返回零重算、零上传 —— */
-    check("NAV-F OCR 调用 = 0（无重新识别）", window.__c.ocr === c0.ocr, "ocr=" + window.__c.ocr);
-    check("NAV-G match/split/auto 调用 = 0（无重新分题匹配/无 AUTO 重判）",
-      window.__c.match === c0.match && window.__c.split === c0.split && window.__c.auto === c0.auto,
-      JSON.stringify(window.__c));
-    check("NAV-H 样本上传调用 = 0", window.__c.http === 0);
+      /* —— UI16-2b 相机取消：回到搜题页（无中转页残留） —— */
+      window.handleBack();   /* 整页答案 → 首页 */
+      await sleep(100);
+      document.getElementById("btn-search-entry").click();   /* 从搜题页发起拍摄 */
+      await sleep(100);
+      window.__cameraReject = "No image captured (cancelled)";
+      document.getElementById("btn-batch-photo").click();
+      await sleep(150);
+      check("UI16-2b 相机取消 → 静默回搜题页（无 Modal、无旧页面）",
+        vis("view-search") && !modalVisible() &&
+        document.getElementById("modal-root").classList.contains("hidden"));
 
-    /* —— NAV-J：一次 back 一层，不连退两级 —— */
-    window.handleBack();
-    check("NAV-J1 一次 back → 整页拍照页（不跳搜题页）", vis("view-batch-photo") && !vis("view-batch-results"));
-    window.handleBack();
-    check("NAV-J2 再一次 back → 搜题页", vis("view-search"));
+      /* —— 结果页题型人工纠错保留 —— */
+      document.getElementById("btn-batch-photo").click();
+      await poll(() => document.querySelector("#batch-list .batch-row"));
+      await sleep(120);
+      const ocrBeforeSwitch = window.__c.ocr;
+      const autoBeforeSwitch = window.__c.auto;
+      const typeLine = document.querySelector("#batch-summary .batch-type-line");
+      typeLine.querySelector(".linkbtn").click();
+      const switchBtns = typeLine.querySelectorAll(".batch-type-switch .batch-type-btn");
+      Array.from(switchBtns).find((b) => b.textContent === "单选题").click();
+      await sleep(150);
+      check("CAP-S5 结果页切题型重算零 OCR",
+        vis("view-batch-results") && window.__c.ocr === ocrBeforeSwitch &&
+        window.__c.auto === autoBeforeSwitch + 1);
 
-    /* —— NAV-I：search 详情与 batch 详情来源互不残留 —— */
-    input.value = "NAVTEST";
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    await poll(() => document.querySelector("#search-results .search-item"));
-    document.querySelector("#search-results .search-item").click();
-    document.getElementById("btn-detail-back").click();
-    check("NAV-I1 batch 详情之后再开 search 详情 → 返回仍回 search",
-      vis("view-search") && !vis("view-search-detail"));
+      /* —— UI16-10：手动检查更新行为不变（无新版 → 已是最新版） —— */
+      window.handleBack();   /* 整页答案 → 首页 */
+      await sleep(100);
+      check("NAV-J1 整页答案 back → 首页", vis("view-menu") && !vis("view-batch-results"));
+      document.getElementById("btn-update").click();
+      await poll(() => (document.getElementById("update-body").innerText || "").indexOf("当前版本") >= 0);
+      document.getElementById("btn-update-check").click();
+      await poll(() => (document.getElementById("update-body").innerText || "").indexOf("已经是最新版") >= 0);
+      check("UI16-10 手动检查：无新版显示「已经是最新版」（原交互）",
+        vis("view-update") &&
+        document.getElementById("update-body").innerText.indexOf("已经是最新版") >= 0);
 
-    document.getElementById("btn-batch-photo").click();
-    document.getElementById("btn-take-page").click();   /* 新的一次拍摄（新 OCR），进入新的整页答案 */
-    await poll(() => document.querySelector("#batch-list .batch-row"));
-    await sleep(120);
-    const rows2 = Array.from(document.querySelectorAll("#batch-list .batch-row"));
-    rows2[0].click();
-    const cand2 = rows2[0].nextElementSibling.querySelectorAll(".batch-cand");
-    cand2[0].click();
-    check("NAV-I2 再次从 batch 打开详情", vis("view-search-detail"));
-    window.handleBack();
-    check("NAV-I3 返回 → 整页答案（source 已更新为 batch-results，无残留）",
-      vis("view-batch-results") && !vis("view-search-detail"));
+      /* —— DIAG：更新页当前版本行 7 连击（仅 DEV；fake App 为 dev 包名） —— */
+      document.getElementById("btn-update-back").click();   /* 回菜单再进，重建版本行 */
+      await sleep(100);
+      document.getElementById("btn-update").click();
+      const verLine = await poll(() => {
+        const p = document.querySelector("#update-body p.dim");
+        return (p && p.textContent.indexOf("当前版本") === 0) ? p : null;
+      });
+      check("DIAG-2a 版本行存在且为整行块级元素（全宽可点）",
+        !!verLine && verLine.getBoundingClientRect().width > 200,
+        verLine && Math.round(verLine.getBoundingClientRect().width));
+      /* DIAG-3：6 次 → 不进入 */
+      for (let i = 0; i < 6; i++) { verLine.click(); }
+      await sleep(80);
+      check("DIAG-3 少于 7 次不进入", !vis("view-devdiag") && vis("view-update"));
+      /* DIAG-4：超 3 秒计数重置。计数器是全局的，每批之间必须留 >3s 让上一批过期 */
+      await sleep(3200);   /* 先让 DIAG-3 的 6 次计数自然过期 */
+      for (let i = 0; i < 6; i++) { verLine.click(); }
+      await sleep(80);
+      check("DIAG-4a 过期后 6 次不进入", !vis("view-devdiag") && vis("view-update"));
+      await sleep(3200);   /* 再次重置窗口 */
+      for (let i = 0; i < 6; i++) { verLine.click(); }
+      await sleep(80);
+      check("DIAG-4b 两批 6 次（间隔 >3s）均不进入（计数不跨窗口累计）",
+        !vis("view-devdiag") && vis("view-update"));
+      /* DIAG-1：重置后 7 连击进入 */
+      await sleep(3200);
+      for (let i = 0; i < 7; i++) { verLine.click(); }
+      await sleep(120);
+      check("DIAG-1 DEV 更新页当前版本 7 连击进入诊断页",
+        vis("view-devdiag"));
+      const ddText = document.getElementById("devdiag-body").innerText;
+      check("DIAG17-1/2/3 诊断页全中文：中文状态项+状态映射+中文按钮，无英文标签",
+        ddText.indexOf("待上传样本") >= 0 && ddText.indexOf("等待重试") >= 0 &&
+        ddText.indexOf("上传失败") >= 0 && ddText.indexOf("需要重新绑定") >= 0 &&
+        ddText.indexOf("队列占用空间") >= 0 && ddText.indexOf("最老样本等待时间") >= 0 &&
+        ddText.indexOf("最近上传速度") >= 0 && ddText.indexOf("上次自动清理") >= 0 &&
+        ddText.indexOf("上次清理样本数") >= 0 && ddText.indexOf("上次释放空间") >= 0 &&
+        ddText.indexOf("最近反馈同步状态") >= 0 && ddText.indexOf("已同步") >= 0 &&
+        Array.from(document.querySelectorAll("#devdiag-body .barbtn"))
+          .map((b) => b.textContent).indexOf("立即清理") >= 0 &&
+        Array.from(document.querySelectorAll("#devdiag-body .barbtn"))
+          .map((b) => b.textContent).indexOf("立即重试") >= 0 &&
+        !/pending|retry|failed|auth|synced|janitor|queue total|Run |Retry |never/i.test(ddText),
+        ddText.slice(0, 100));
+      check("DIAG17-1b 标题为「开发者诊断」",
+        document.querySelector("#view-devdiag .qtitle").textContent === "开发者诊断");
+      check("DIAG-2b 整行点击均有效（同一行上 7 次点击全部计数）",
+        vis("view-devdiag"));
+      /* DIAG-6：Back → 检查更新页（按钮 + 系统 Back 双路） */
+      document.getElementById("btn-devdiag-back").click();
+      await sleep(120);
+      check("DIAG-6a 诊断页返回按钮 → 检查更新页",
+        vis("view-update") && !vis("view-devdiag"));
+      const verLine2 = document.querySelector("#update-body p.dim");
+      for (let i = 0; i < 7; i++) { verLine2.click(); }
+      await sleep(120);
+      window.handleBack();
+      await sleep(120);
+      check("DIAG-6b 系统 Back → 检查更新页（不回首页、无异常 history）",
+        vis("view-update") && !vis("view-devdiag") && !vis("view-menu"));
+      /* DIAG-5：MAIN 不响应 —— 源码级守卫见 test_core（browser fake 恒为 dev 包名） */
+      check("DIAG-5 浏览器侧前置：手势只绑定在版本行（其余区域点击无副作用）",
+        vis("view-update"));
+
+      /* —— FB：反馈交互保留 —— */
+      window.handleBack();   /* 更新页 → 首页 */
+      await sleep(80);
+      check("FB-NAV 更新页返回 → 首页", vis("view-menu"));
+    }
   } catch (e) {
     R.push({ id: "HARNESS", pass: false, info: String((e && e.stack) || e) });
   }

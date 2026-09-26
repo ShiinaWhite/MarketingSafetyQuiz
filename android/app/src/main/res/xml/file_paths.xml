@@ -2,4 +2,6 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-path name="my_images" path="." />
     <cache-path name="my_cache_images" path="." />
+    <!-- SELF_UPDATE_V1：应用内更新下载目录（最小范围声明，供系统安装器读取） -->
+    <cache-path name="updates" path="updates/" />
 </paths>

@@ -105,6 +105,7 @@
   /* ---------------- 弹窗 ---------------- */
   var Modal = {
     root: null,
+    onClose: null,   /* 当前弹窗关闭回调（VC16：启动更新 Modal 用 Back 关闭 = 稍后） */
     init: function () { this.root = $("modal-root"); },
     isOpen: function () { return !this.root.classList.contains("hidden"); },
     open: function (build) {
@@ -115,7 +116,15 @@
       this.root.appendChild(box);
       this.root.classList.remove("hidden");
     },
-    close: function () { this.root.classList.add("hidden"); this.root.innerHTML = ""; },
+    close: function () {
+      this.root.classList.add("hidden");
+      this.root.innerHTML = "";
+      if (this.onClose) {
+        var cb = this.onClose;
+        this.onClose = null;
+        cb();
+      }
+    },
     alert: function (title, msg, onOk) {
       this.open(function (box) {
         var h = document.createElement("h3"); h.textContent = title || "提示"; box.appendChild(h);
@@ -239,7 +248,8 @@
 
     var box = $("menu-buttons");
     box.innerHTML = "";
-    // 搜题入口（独立于刷题模式的常驻功能）
+    // 搜题入口（VC16_UI_POLISH_V1：首页只保留搜题；拍摄走搜题页搜索框右侧 📷，
+    // 仍然直拍 → OCR → AUTO → 结果，无中转页）
     if (!$("btn-search-entry")) {
       var searchWrap = document.createElement("div");
       searchWrap.className = "search-entry-wrap";
@@ -991,8 +1001,9 @@
     if (Modal.isOpen()) { Modal.close(); return; }
     switch (currentViewId()) {
       case "view-search-detail": handleSearchDetailBack(); return;
+      case "view-update": handleUpdateBack(); return;
+      case "view-devdiag": openUpdateView(); return;
       case "view-batch-results": handleBatchResultsBack(); return;
-      case "view-batch-photo": handleBatchBack(); return;
       case "view-photo": handlePhotoBack(); return;
       case "view-search": handleSearchBack(); return;
       case "view-review": handleReviewBack(); return;
@@ -1171,50 +1182,16 @@
       totalMs: Math.round(performance.now() - totalStart) });
   }
 
-  /* ---------------- 整页拍照搜题（分题 + 题型强约束批量匹配） ----------------
-     与单题拍照完全独立：单题路径 searchQuestionsByOcr 保持原样，这里走
-     searchPageQuestionsByOcr（先分题，再只在所选题型的子集里匹配）。 */
+  /* ---------------- 整页拍照搜题（SIMPLIFY_CAPTURE_FLOW_V1 收口后的唯一相机主链） ----------------
+     首页相机按钮 / 搜题页 📷 → Camera.getPhoto → OCR → AUTO_PAGE_TYPE →
+     splitter / matcher → 结果页。无中转页、无拍摄前题型选择（固定 AUTO，
+     判错后可在结果页人工切换重算）。与单题路径 searchQuestionsByOcr 仍完全独立。 */
   var batchIndex = null;
   var batchIndexById = null;      /* 采集诊断用：id -> batchIndex 项（只读） */
-  var batchPageType = "auto";     /* 默认 AUTO；冷启动回到 auto，手动选择只是会话内有意识的 override */
   var lastBatch = null;
   var lastResolvedPageType = null; /* 会话内弱先验：上一页最终采用的题型（不跨重启） */
-  var lastSampleUpload = null;    /* 采集旁路：结果页打开期间保留当次 dataUrl 供重试 */
-
-  function setBatchStatus(text) {
-    var el = $("batch-status");
-    if (el) { el.textContent = text; el.classList.remove("hidden"); }
-  }
-
-  function renderBatchTypes() {
-    var box = $("batch-type-row");
-    if (!box) { return; }
-    var btns = box.getElementsByClassName("batch-type-btn");
-    for (var i = 0; i < btns.length; i++) {
-      var on = btns[i].getAttribute("data-type") === batchPageType;
-      btns[i].classList.toggle("active", on);
-      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
-    }
-  }
-
-  function initBatchTypes() {
-    var box = $("batch-type-row");
-    if (!box) { return; }
-    box.addEventListener("mousedown", function (e) { e.preventDefault(); });
-    box.addEventListener("click", function (e) {
-      var el = e.target;
-      while (el && el !== box && !el.classList.contains("batch-type-btn")) { el = el.parentNode; }
-      if (!el || el === box) { return; }
-      batchPageType = el.getAttribute("data-type") || "single";
-      renderBatchTypes();
-    });
-  }
-
-  function openBatchPhoto() {
-    show("view-batch-photo");
-    renderBatchTypes();
-    setBatchStatus("默认自动识别题型，直接拍整页即可；也可手动锁定单选/多选/判断，结果页可一键换题型重算");
-  }
+  var lastSampleUpload = null;    /* 反馈上下文：结果页打开期间绑定当次 sampleId */
+  var captureOriginView = "view-menu"; /* 相机取消时返回的入口页（menu 或 search） */
 
   /* OCR 返回：优先用带坐标的 lines；旧版本插件只返回 text 时按行退化，仍可分题。 */
   function normalizeOcrLines(res) {
@@ -1279,7 +1256,75 @@
     return d;
   }
 
-  function batchRow(b) {
+  /* 长按标错（REAL_SAMPLE_FEEDBACK_V2）：短按仍展开/收起详情，长按只反馈。
+     移动超过阈值取消计时器（滚动页面不误触）；长按后阻止合成 click。 */
+  var FEEDBACK_LONG_PRESS_MS = 600;
+  var FEEDBACK_MOVE_CANCEL_PX = 12;
+
+  function bindLongPress(el, onLongPress) {
+    var timer = null;
+    var startX = 0;
+    var startY = 0;
+    /* 长按后短时间内的合成 click 抑制窗（自动过期，不吞用户下一次真实 tap） */
+    var suppressClickUntil = 0;
+    el.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    el.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      timer = setTimeout(function () {
+        timer = null;
+        suppressClickUntil = Date.now() + 600;
+        onLongPress();
+      }, FEEDBACK_LONG_PRESS_MS);
+    }, { passive: true });
+    el.addEventListener("touchmove", function (e) {
+      if (!timer) { return; }
+      var dx = e.touches[0].clientX - startX;
+      var dy = e.touches[0].clientY - startY;
+      if (dx * dx + dy * dy > FEEDBACK_MOVE_CANCEL_PX * FEEDBACK_MOVE_CANCEL_PX) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }, { passive: true });
+    el.addEventListener("touchend", function (e) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (Date.now() < suppressClickUntil) {
+        e.preventDefault();   /* 阻止长按后的合成 click */
+      }
+    }, { passive: false });
+    el.addEventListener("touchcancel", function () {
+      if (timer) { clearTimeout(timer); timer = null; }
+    });
+  }
+
+  function updateRowWrongMark(rowEl, marked) {
+    if (!rowEl) { return; }
+    var mark = rowEl.querySelector(".batch-wrongmark");
+    if (marked && !mark) {
+      mark = document.createElement("span");
+      mark.className = "batch-wrongmark";
+      mark.textContent = "已标错";
+      rowEl.appendChild(mark);
+    } else if (!marked && mark) {
+      mark.parentNode.removeChild(mark);
+    }
+  }
+
+  function showFeedbackToast(msg) {
+    var toast = document.createElement("div");
+    toast.className = "fb-toast";
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(function () {
+      if (toast.parentNode) { toast.parentNode.removeChild(toast); }
+    }, 1600);
+  }
+
+  function batchRow(b, blockIndex) {
     var wrap = document.createElement("div");
     var row = document.createElement("button");
     row.type = "button";
@@ -1295,31 +1340,18 @@
     row.appendChild(no);
     row.appendChild(ans);
     var detail = batchDetail(b);
+    var suppressClickUntil = 0;
     row.addEventListener("click", function () {
+      if (Date.now() < suppressClickUntil) { return; }   /* 长按抑制窗内的合成 click */
       var open = detail.classList.toggle("hidden") === false;
       row.classList.toggle("open", open);
+    });
+    bindLongPress(row, function () {
+      toggleBlockFeedback(blockIndex, b, row);
     });
     wrap.appendChild(row);
     wrap.appendChild(detail);
     return wrap;
-  }
-
-  /* 折叠区：整页 OCR 原文 + 行坐标 / 分题结果（默认折叠，只用于排查） */
-  function batchCollapsible(parent, title, buildBody) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "explain-btn";
-    btn.textContent = title + " ▾";
-    var body = document.createElement("div");
-    body.className = "explain-body hidden";
-    buildBody(body);
-    btn.addEventListener("click", function () {
-      var open = body.classList.toggle("hidden") === false;
-      btn.textContent = title + (open ? " ▴" : " ▾");
-    });
-    parent.appendChild(btn);
-    parent.appendChild(body);
-    return body;
   }
 
   function appendBatchTools(state) {
@@ -1332,58 +1364,16 @@
     again.style.marginBottom = "12px";
     again.addEventListener("click", function () { startBatchPageSearch(); });
     tools.appendChild(again);
-
-    batchCollapsible(tools, "查看整页 OCR 文字", function (body) {
-      var sec = document.createElement("div");
-      sec.className = "explain-sec";
-      var head = document.createElement("p");
-      head.className = "explain-text";
-      head.textContent = "共 " + state.lines.length + " 行（含坐标）";
-      sec.appendChild(head);
-      state.lines.slice(0, 200).forEach(function (l) {
-        var p = document.createElement("p");
-        p.className = "batch-ocr-line";
-        var coord = (l.top === undefined || l.top === null)
-          ? ""
-          : ("  [" + Math.round(l.left) + "," + Math.round(l.top) + "→" + Math.round(l.right) + "," + Math.round(l.bottom) + "]");
-        p.textContent = l.text + coord;
-        sec.appendChild(p);
-      });
-      var full = document.createElement("p");
-      full.className = "explain-text";
-      full.textContent = "—— 全文 ——\n" + (state.text || "（无）");
-      sec.appendChild(full);
-      body.appendChild(sec);
-    });
-
-    batchCollapsible(tools, "查看分题结果", function (body) {
-      var sec = document.createElement("div");
-      sec.className = "explain-sec";
-      var srcName = { ocr: "ocr", repaired: "repaired（序列校正）", inferred: "inferred", unknown: "unknown（无题号）" };
-      state.out.blocks.forEach(function (b, i) {
-        var p = document.createElement("p");
-        p.className = "explain-text";
-        p.textContent = "block#" + (i + 1) +
-          "\nOCR题号：" + (b.rawScreenNumber != null ? b.rawScreenNumber : "（无）") +
-          "\n最终题号：" + (b.screenNumber != null ? b.screenNumber : b.label) +
-          "\n题号来源：" + (srcName[b.numberSource] || b.numberSource || "ocr") +
-          "\n" + (BATCH_TYPE_NAMES[b.type] || b.type) + " ｜ y=" + Math.round(b.top || 0) + "~" + Math.round(b.bottom || 0) +
-          " ｜ " + b.confidence + (b.rawScreenNumber != null && b.screenNumber != null &&
-            String(b.rawScreenNumber) !== String(b.screenNumber) ? "（原识别 " + b.rawScreenNumber + " → 已校正）" : "") +
-          "\n" + (b.rawText || "");
-        sec.appendChild(p);
-      });
-      body.appendChild(sec);
-    });
+    /* OCR 原文 / 分题明细等调试数据不再占正式结果页 UI，
+       但仍完整保存在 run.json（ocr.text/ocr.lines/blocks/Top3/scores）。 */
   }
 
-  /* 结果页切题型：只用已保存的 OCR lines 重跑 split + match，绝不重新拍照、
-     绝不调用 Ocr.recognizeText（TYPE_SWITCH_OCR_CALLS = 0，test_core 有静态守卫）。
-     mode 可为 "auto"（重新三题型试跑）或具体题型；这是用户的有意识选择，
-     会话内更新 batchPageType 与弱先验。 */
+  /* 结果页题型人工纠错（保留能力，CAP-S5）：只用已保存的 OCR lines 重跑 split +
+     match，绝不重新拍照、绝不调用 Ocr.recognizeText（TYPE_SWITCH_OCR_CALLS = 0，
+     test_core 有静态守卫）。mode 可为 "auto"（重新三题型试跑）或具体题型；
+     拍摄本身永远固定 AUTO（CAP-S4），这里是拍后用户的有意识纠正。 */
   function switchBatchPageType(mode) {
     if (!lastBatch || !lastBatch.lines) { return; }
-    batchPageType = mode;
     var lines = lastBatch.lines;
     var tSplit = performance.now();
     MSQ.splitPageOcrLines(lines, mode === "auto" ? "single" : mode);
@@ -1393,13 +1383,19 @@
       { limit: 3, previousType: lastResolvedPageType });
     var matchMs = Math.round(performance.now() - tMatch);
     lastResolvedPageType = r.resolved.type;
-    renderBatchResults({
+    /* 切题型产生新的重新计算结果：使用新 sampleId 重新采集（run.json 记录最终
+       展示结果），反馈状态随新 sample 重置；旧 sample 已保存的反馈不受影响，
+       也不把旧 blockIndex 映射到重新分块后的新 block。 */
+    var switchState = {
       lines: lines, text: lastBatch.text, ocrMs: lastBatch.ocrMs,
       splitMs: splitMs, matchMs: matchMs, totalMs: lastBatch.ocrMs + splitMs + matchMs,
       out: r.out, pageType: r.resolved.type, pageTypeMode: mode, resolved: r.resolved,
       suggestion: null, dataUrl: lastBatch.dataUrl,
-      ocrWidth: lastBatch.ocrWidth, ocrHeight: lastBatch.ocrHeight
-    });
+      ocrWidth: lastBatch.ocrWidth, ocrHeight: lastBatch.ocrHeight,
+      sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
+    };
+    renderBatchResults(switchState);
+    collectAndUploadSample(switchState);
   }
 
   /* 结果页顶部题型行：自动识别：X题 [修改] / 题型：X（手动）[切换]。
@@ -1435,7 +1431,7 @@
     if (isAuto && resolved.confidence === "ambiguous") {
       var hint = document.createElement("p");
       hint.className = "batch-hint";
-      hint.textContent = "题型判断不确定，可在下方切换题型立即重算（不会重新拍照）";
+      hint.textContent = "题型判断不确定，可在上方切换题型重新计算";
       wrap.appendChild(hint);
       row.classList.remove("hidden");   /* 不确定时直接展开，一键重算 */
     }
@@ -1491,7 +1487,7 @@
       state.splitMs + "ms · 匹配 " + state.matchMs + "ms · 合计 " + state.totalMs + "ms）";
     summary.appendChild(sub);
     summary.appendChild(buildBatchTypeLine(state));
-    blocks.forEach(function (b) { list.appendChild(batchRow(b)); });
+    blocks.forEach(function (b, i) { list.appendChild(batchRow(b, i)); });
     appendBatchTools(state);
   }
 
@@ -1499,11 +1495,11 @@
     var Camera = getPlugin("Camera");
     var Ocr = getPlugin("Ocr");
     if (!Camera || !Ocr) {
-      show("view-batch-photo");
-      setBatchStatus(photoPluginMissingMessage(Camera, Ocr));
+      Modal.alert("无法拍照", photoPluginMissingMessage(Camera, Ocr));
       return;
     }
-    setBatchStatus("正在打开相机…");
+    /* 相机取消时回到拍摄入口页（menu 入口 → 首页；搜题页 📷 → 搜题页） */
+    captureOriginView = (currentViewId() === "view-search") ? "view-search" : "view-menu";
     var photo;
     try {
       photo = await Camera.getPhoto({
@@ -1516,12 +1512,13 @@
       });
     } catch (e) {
       var msg = String((e && e.message) || e);
-      setBatchStatus(/permission|denied/i.test(msg)
-        ? "无法使用相机，请授予相机权限后重试"
-        : "未拍摄照片（" + msg.slice(0, 40) + "）");
+      if (/permission|denied/i.test(msg)) {
+        Modal.alert("无法使用相机", "请授予相机权限后重试");
+      }
+      /* 用户取消：静默回到入口页，绝不进入任何中间页 */
+      show(captureOriginView);
       return;
     }
-    setBatchStatus("正在识别整页文字…");
     var totalStart = performance.now();
     var ocrMs = 0, text = "", lines = [];
     var ocrWidth = 0, ocrHeight = 0;
@@ -1535,193 +1532,771 @@
       ocrHeight = (res && res.height) || 0;
       lines = normalizeOcrLines(res);
     } catch (e) {
-      setBatchStatus("识别失败，请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
+      Modal.alert("识别失败", "请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
       return;
     }
     if (!lines.length) {
-      setBatchStatus("未识别到清晰文字，请重新拍摄（尽量拍全、拍正、光线均匀）");
+      Modal.alert("未识别到清晰文字", "请重新拍摄（尽量拍全、拍正、光线均匀）");
       return;
     }
     var tSplit = performance.now();
-    /* 独立 split 只用于计时展示；AUTO 时以 single 作为计时占位默认值，正式分题在 recompute 内按判定题型进行 */
-    MSQ.splitPageOcrLines(lines, batchPageType === "auto" ? "single" : batchPageType);
+    /* 独立 split 只用于计时展示；AUTO 以 single 作为计时占位默认值，正式分题在 recompute 内按判定题型进行 */
+    MSQ.splitPageOcrLines(lines, "single");
     var splitMs = Math.round(performance.now() - tSplit);
     var tMatch = performance.now();
-    /* AUTO_PAGE_TYPE 统一入口：auto 在内存中三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
-    var r = MSQ.recomputePageFromLines(batchIndex, lines, batchPageType,
+    /* AUTO_PAGE_TYPE 固定生效（CAP-S4）：拍摄前没有任何题型选择，auto 在内存中
+       三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
+    var r = MSQ.recomputePageFromLines(batchIndex, lines, "auto",
       { limit: 3, previousType: lastResolvedPageType });
     var matchMs = Math.round(performance.now() - tMatch);
     var out = r.out;
     var resolved = r.resolved;
-    lastResolvedPageType = resolved.type;   /* 会话内弱先验；AUTO 结论与手动选择都算当前章节信号 */
-    /* 手动锁定但结果明显异常（无高/中置信）时才多花一步试跑，给"更像X题"建议 */
-    var suggestion = null;
-    if (resolved.method === "manual") {
-      var curQ = MSQ.autoTypeScore(out);
-      if (curQ.counts.high + curQ.counts.medium === 0) {
-        var runsX = {};
-        ["single", "multi", "judge"].forEach(function (t) {
-          runsX[t] = (t === batchPageType) ? out
-            : MSQ.searchPageQuestionsByOcr(batchIndex, lines, t, { limit: 3 });
-        });
-        suggestion = MSQ.suggestBetterPageType(batchPageType, out, runsX);
-      }
-    }
-    var collecting = typeof MSQSample !== "undefined" && MSQSample &&
-      MSQSample.shouldCollect(sampleSettings());
-    setBatchStatus(collecting ? "识别完成" : "识别完成（全程本地，图片不保存不上传）");
+    lastResolvedPageType = resolved.type;   /* 会话内弱先验：AUTO 结论作为下一页信号 */
     var state = {
       lines: lines, text: text, ocrMs: ocrMs, splitMs: splitMs, matchMs: matchMs,
       totalMs: Math.round(performance.now() - totalStart), out: out,
-      pageType: resolved.type, pageTypeMode: batchPageType, resolved: resolved,
-      suggestion: suggestion, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight
+      pageType: resolved.type, pageTypeMode: "auto", resolved: resolved,
+      suggestion: null, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight,
+      sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
     };
     renderBatchResults(state);
     collectAndUploadSample(state);
   }
 
-  /* 整页结果 → 整页拍照 → 搜题 → 首页 */
+  /* 整页结果 Back → 首页（SIMPLIFY_CAPTURE_FLOW_V1：旧整页拍照中转页已删除，
+     不得再回到已不存在的页面，也不留空 history entry） */
   function handleBatchResultsBack() {
-    show("view-batch-photo");
-    renderBatchTypes();
+    renderMenu();
   }
 
-  function handleBatchBack() {
-    show("view-search");
+  /* ---------------- 样本采集旁路（SIMPLIFY_CAPTURE_FLOW_V1：纯后台 best-effort） ----------------
+     普通用户不可见、不可配置、不可关闭（AUTO_SAMPLE_UPLOAD 恒 ON，无 opt-out）。
+     persist → persistent queue → COS PUT → commit → PC mirror 全部在原生后台进行；
+     本函数任何失败只写非敏感 console 诊断，绝不 toast/modal/banner/status，
+     绝不影响 OCR、splitter、matcher、答案展示（CAP-S8/9/10）。 */
+  function sampleQueuePlugin() { return getPlugin("SampleQueue"); }
+
+  function sampleDebug(msg) { console.log("[sample] " + msg); }
+
+  function initSampleResultTools() {
+    var flag = $("btn-sample-flag");
+    if (flag) { flag.addEventListener("click", toggleFeedbackPanel); }
   }
 
-  /* ---------------- 真实样本采集旁路（仅开发调试，默认 OFF） ----------------
-     整条链路是非阻塞旁路：构造/上传的任何失败都只体现在状态条上，
-     绝不影响 OCR、结果展示、返回、再次拍摄。
-     photo.dataUrl 由 lastSampleUpload 持有（内存，不进 localStorage），
-     结果页打开期间可手动重试；App 重启后不做离线补传（V1 约定）。 */
-  function sampleSettings() {
-    return (typeof MSQSample !== "undefined" && MSQSample)
-      ? MSQSample.loadSettings() : { enabled: false, serverUrl: "" };
+  /* 结果页只保留用户主动反馈入口；队列状态/失败计数一律不上 UI */
+  function renderSampleFeedbackVisibility() {
+    var flag = $("btn-sample-flag");
+    if (flag) { flag.classList.toggle("hidden", !lastSampleUpload); }
+    renderFeedbackButton();
   }
 
-  function initSamplePanel() {
-    var box = $("sample-panel");
-    if (!box || typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var s = sampleSettings();
-    $("sample-enabled").checked = s.enabled;
-    $("sample-server").value = s.serverUrl;
-    var save = function () {
-      MSQSample.saveSettings(null, {
-        enabled: $("sample-enabled").checked,
-        serverUrl: $("sample-server").value
+  function initSampleQueue() {
+    var Queue = sampleQueuePlugin();
+    if (!Queue) { return; }
+    if (typeof Queue.setServer === "function") {
+      Queue.setServer({ serverUrl: MSQSample.PUBLIC_BASE_URL });
+    }
+    if (typeof Queue.init === "function") {
+      Queue.init({ serverUrl: MSQSample.PUBLIC_BASE_URL });
+    }
+    if (typeof Queue.addListener === "function") {
+      Queue.addListener("sampleQueueChanged", function (stats) {
+        /* 仅存内存供 DEV 隐藏诊断读取；不驱动任何普通 UI */
+        window.__lastQueueStats = stats;
       });
-      updateSampleToolsVisibility();
-    };
-    $("sample-enabled").addEventListener("change", save);
-    $("sample-server").addEventListener("change", save);
-    $("btn-sample-test").addEventListener("click", function () {
-      var url = $("sample-server").value.trim();
-      MSQSample.saveSettings(null, { enabled: $("sample-enabled").checked, serverUrl: url });
-      var status = $("sample-test-status");
-      status.textContent = "正在连接…";
-      status.classList.remove("hidden");
-      MSQSample.testConnection(url, 5000).then(function (r) {
-        status.textContent = r.message;
-      });
+    }
+  }
+
+  function currentFeedback() {
+    return lastSampleUpload ? lastSampleUpload.feedback : null;
+  }
+
+  /* 反馈持久化：写本地队列（filesDir/sample_queue/<sampleId>/feedback.json），
+     由原生 worker 在 sample 上传成功后自动补传；不做网络直传。
+     SIMPLIFY_CAPTURE_FLOW_V1：用户提交动作照常表现为已记录（上方 toast），
+     其后台持久化/上传失败完全静默（仅 console 诊断），不再显示保存失败。 */
+  function persistFeedbackNow() {
+    if (!lastSampleUpload || typeof MSQSample === "undefined" || !MSQSample) { return; }
+    var sid = lastSampleUpload.sampleId;
+    if (!sid) { return; }
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.persistFeedback === "function")) {
+      sampleDebug("feedback persist skipped: queue unavailable");
+      return;
+    }
+    Queue.persistFeedback({
+      sampleId: sid,
+      feedbackJson: JSON.stringify(
+        MSQSample.buildFeedbackJson(sid, lastSampleUpload.feedback, lastSampleUpload.blockRefs))
+    }).then(null, function (e) {
+      sampleDebug("feedback persist failed (silent): " +
+        String((e && e.code) || "error"));
     });
   }
 
-  function initSampleResultTools() {
-    var retry = $("btn-sample-retry");
+  function renderFeedbackButton() {
     var flag = $("btn-sample-flag");
-    if (retry) {
-      retry.addEventListener("click", function () {
-        if (!lastSampleUpload) { return; }
-        var target = lastSampleUpload;
-        setSampleUploadStatus("样本上传中…", false);
-        MSQSample.postJSON(MSQSample.joinUrl(target.serverUrl, "/api/sample"), target.payload, 20000)
-          .then(function () {
-            target.uploaded = true;
-            setSampleUploadStatus("样本已保存：" + target.payload.sampleId, false);
-          })
-          .catch(function () {
-            setSampleUploadStatus("样本上传失败", true);
-          });
-      });
-    }
-    if (flag) {
-      flag.addEventListener("click", function () {
-        if (!lastSampleUpload || flag.disabled) { return; }
-        flag.disabled = true;
-        MSQSample.postJSON(MSQSample.joinUrl(lastSampleUpload.serverUrl, "/api/feedback"),
-          { sampleId: lastSampleUpload.payload.sampleId, userFlag: "has_error" }, 10000)
-          .then(function () {
-            flag.textContent = "⚑ 已反馈 ✓";
-          })
-          .catch(function () {
-            flag.disabled = false;   /* 失败静默恢复，不打扰答题 */
-          });
-      });
+    if (!flag) { return; }
+    var fb = currentFeedback();
+    var done = !!(fb && (fb.pageTypes.length > 0 || Object.keys(fb.blocks).length > 0));
+    flag.textContent = done ? "本页已反馈 ▾" : "反馈本页问题";
+  }
+
+  function toggleFeedbackPanel() {
+    var panel = $("sample-feedback-panel");
+    if (!panel || !lastSampleUpload) { return; }
+    if (panel.classList.toggle("hidden") === false) {
+      buildFeedbackPanel(panel);
     }
   }
 
-  function setSampleUploadStatus(text, showRetry) {
-    var el = $("batch-sample-status");
-    var retry = $("btn-sample-retry");
-    if (!el) { return; }
-    el.textContent = text;
-    el.classList.remove("hidden");
-    if (retry) { retry.classList.toggle("hidden", !showRetry); }
+  function panelHint(panel, msg) {
+    var el = panel.querySelector(".fb-panel-hint");
+    if (el) { el.textContent = msg || ""; }
   }
 
-  function updateSampleToolsVisibility() {
-    var box = $("batch-sample-tools");
-    var flag = $("btn-sample-flag");
-    var on = sampleSettings().enabled;
-    if (box) { box.classList.toggle("hidden", !on); }
-    if (flag) { flag.classList.toggle("hidden", !on || !lastSampleUpload); }
+  function buildFeedbackPanel(panel) {
+    var fb = currentFeedback() || { pageTypes: [] };
+    panel.innerHTML = "";
+    var title = document.createElement("p");
+    title.className = "sample-note fb-panel-hint";
+    title.textContent = "本页存在哪些问题？（可多选）";
+    panel.appendChild(title);
+    var selected = {};
+    fb.pageTypes.forEach(function (t) { selected[t] = true; });
+    MSQSample.FEEDBACK_PAGE_ISSUES.forEach(function (issue) {
+      var b = document.createElement("button");
+      b.type = "button";
+      var active = !!selected[issue.type];
+      b.className = "feedback-chip" + (active ? " active" : "");
+      b.textContent = (active ? "✓ " : "") + issue.label;
+      b.addEventListener("click", function () {
+        selected[issue.type] = !selected[issue.type];
+        b.className = "feedback-chip" + (selected[issue.type] ? " active" : "");
+        b.textContent = (selected[issue.type] ? "✓ " : "") + issue.label;
+      });
+      panel.appendChild(b);
+    });
+    panel.appendChild(document.createElement("br"));
+
+    var submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "barbtn primary feedback-btn";
+    submit.textContent = "提交反馈";
+    submit.addEventListener("click", function () {
+      var types = Object.keys(selected).filter(function (t) { return selected[t]; });
+      if (!types.length || !lastSampleUpload) { panelHint(panel, "请至少选择一项"); return; }
+      lastSampleUpload.feedback.pageTypes = types;
+      renderFeedbackButton();
+      persistFeedbackNow();
+      showFeedbackToast("已记录本页问题");
+      panel.classList.add("hidden");
+    });
+    panel.appendChild(submit);
+
+    var clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "barbtn feedback-btn";
+    clear.textContent = "清除本页反馈";
+    clear.addEventListener("click", function () {
+      if (!lastSampleUpload) { return; }
+      lastSampleUpload.feedback.pageTypes = [];
+      renderFeedbackButton();
+      persistFeedbackNow();
+      showFeedbackToast("已清除本页反馈");
+      panel.classList.add("hidden");
+    });
+    panel.appendChild(clear);
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "linkbtn feedback-btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", function () { panel.classList.add("hidden"); });
+    panel.appendChild(cancel);
   }
 
+  function toggleBlockFeedback(blockIndex, block, rowEl) {
+    if (!lastSampleUpload || !lastSampleUpload.feedback) { return; }
+    var fb = lastSampleUpload.feedback;
+    var key = blockIndex + ":wrong_answer";
+    var nowMarked = !fb.blocks[key];
+    if (nowMarked) { fb.blocks[key] = true; } else { delete fb.blocks[key]; }
+    updateRowWrongMark(rowEl, nowMarked);
+    if (navigator.vibrate) { try { navigator.vibrate(30); } catch (e) { /* 无震动能力 */ } }
+    renderFeedbackButton();
+    if (nowMarked && lastSampleUpload.blockRefs) {
+      lastSampleUpload.blockRefs[key] = block;   // 供 feedback.json 构建定位字段
+    }
+    persistFeedbackNow();
+    showFeedbackToast(nowMarked ? "已标记该答案有误" : "已取消标错");
+  }
+
+  function setSampleUploadStatus(text) {
+    /* SIMPLIFY_CAPTURE_FLOW_V1：样本状态对普通用户彻底不可见（占位保留防误用），
+       诊断只走 sampleDebug console 通道 */
+    sampleDebug("status: " + String(text || "").slice(0, 60));
+  }
+
+  /* 落盘优先（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：样本先持久化到
+     filesDir/sample_queue/，持久化成功即 SAFE；后台上传由原生 worker 完成，
+     拍题主链绝不 await 网络。AUTO_SAMPLE_UPLOAD 恒 ON：没有 opt-out 分支。 */
   function collectAndUploadSample(state) {
-    updateSampleToolsVisibility();
-    if (typeof MSQSample === "undefined" || !MSQSample) { return; }
-    var s = sampleSettings();
-    if (!MSQSample.shouldCollect(s)) { return; }   /* OFF：与改动前完全一致 */
-    var payload;
+    renderSampleFeedbackVisibility();
     try {
-      payload = MSQSample.buildUploadPayload({
+      if (typeof MSQSample === "undefined" || !MSQSample || !state.sampleId) { return; }
+      /* 反馈上下文先就位：即使落盘失败，用户仍可对结果页提交反馈（提交本身照常工作） */
+      lastSampleUpload = {
+        sampleId: state.sampleId,
+        feedback: MSQSample.feedbackInitialState(),
+        blockRefs: {}
+      };
+      var panel = $("sample-feedback-panel");
+      if (panel) { panel.classList.add("hidden"); }   /* 新 sample：反馈面板收起并重置 */
+      renderSampleFeedbackVisibility();
+      var Queue = sampleQueuePlugin();
+      if (!(Queue && typeof Queue.persistSample === "function")) {
+        sampleDebug("persist skipped: queue unavailable");
+        return;
+      }
+      var runJson;
+      try {
+        runJson = JSON.stringify(MSQSample.buildRunManifest({
+          sampleId: state.sampleId,
+          capturedAt: new Date().toISOString(),
+          pageType: state.pageType,
+          pageTypeMode: state.pageTypeMode,
+          resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
+          pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
+          autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
+            ? state.resolved.confidence : undefined,
+          text: state.text,
+          lines: state.lines,
+          out: state.out,
+          ocrWidth: state.ocrWidth,
+          ocrHeight: state.ocrHeight,
+          timing: {
+            ocrMs: state.ocrMs, splitMs: state.splitMs,
+            matchMs: state.matchMs, totalMs: state.totalMs
+          },
+          bankById: batchIndexById
+        }));
+      } catch (e) {
+        sampleDebug("run.json build failed (silent): " + String((e && e.name) || "error"));
+        return;
+      }
+      Queue.persistSample({
+        sampleId: state.sampleId,
         photoDataUrl: state.dataUrl,
-        sampleId: MSQSample.makeSampleId(new Date()),
-        capturedAt: new Date().toISOString(),
-        /* pageType = 最终实际用于展示答案的题型（AUTO 判定结果或手动选择） */
-        pageType: state.pageType,
-        pageTypeMode: state.pageTypeMode,
-        resolvedPageType: state.resolved ? state.resolved.type : state.pageType,
-        pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
-        autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
-          ? state.resolved.confidence : undefined,
-        text: state.text,
-        lines: state.lines,
-        out: state.out,
-        ocrWidth: state.ocrWidth,
-        ocrHeight: state.ocrHeight,
-        timing: {
-          ocrMs: state.ocrMs, splitMs: state.splitMs,
-          matchMs: state.matchMs, totalMs: state.totalMs
-        },
-        bankById: batchIndexById
+        runJson: runJson
+      }).then(null, function (e) {
+        sampleDebug("persist failed (silent): " + String((e && e.code) || "error"));
       });
     } catch (e) {
-      setSampleUploadStatus("样本上传失败", true);
+      sampleDebug("collect skipped (silent): " + String((e && e.name) || "error"));
+    }
+  }
+
+  /* ---------------- DEV 隐藏诊断（VC16_UI_POLISH_V1） ----------------
+     入口 = 检查更新页的「当前版本：…」整行，3 秒内 7 连击；仅 DEV 构建绑定手势。
+     MAIN：不绑定、不响应、不暴露（openUpdateView 内 diagnosticsChannel 早退）。
+     只展示非敏感队列诊断（计数/字节/janitor 记录），绝不显示任何凭据、
+     签名下载地址或服务器域名（test_core 有内容守卫）。 */
+  var devDiagTaps = { count: 0, firstAt: 0 };
+
+  /* 整行 7 连击绑定：el 是块级 <p>，整行都是点击区（DIAG-2） */
+  function bindDevDiagTap(el) {
+    if (!el) { return; }
+    el.addEventListener("click", function () {
+      var now = Date.now();
+      if (now - devDiagTaps.firstAt > 3000) { devDiagTaps.count = 0; }
+      if (devDiagTaps.count === 0) { devDiagTaps.firstAt = now; }
+      devDiagTaps.count += 1;
+      if (devDiagTaps.count >= 7) {
+        devDiagTaps.count = 0;
+        openDevDiagnostics();
+      }
+    });
+  }
+
+  function openDevDiagnostics() {
+    var Queue = sampleQueuePlugin();
+    if (!(Queue && typeof Queue.stats === "function")) { return; }
+    renderDevDiagnostics();
+    show("view-devdiag");
+  }
+
+  function renderDevDiagnostics() {
+    var box = $("devdiag-body");
+    var Queue = sampleQueuePlugin();
+    if (!box || !(Queue && typeof Queue.stats === "function")) { return; }
+    var rows = [];
+    var add = function (k, v) { rows.push(k + "：" + v); };
+    /* VC17：仅显示层中文化（底层 enum/value/schema 不变）。
+       数值格式化只用数字与单位，不出现任何英文标签。 */
+    var fmtBytes = function (n) {
+      return (typeof MSQUpdater !== "undefined" && MSQUpdater && MSQUpdater.formatBytes)
+        ? MSQUpdater.formatBytes(n) : String(n) + " 字节";
+    };
+    var fmtAge = function (ms) {
+      if (ms == null || ms < 0) { return "暂无样本"; }
+      var min = Math.round(ms / 60000);
+      if (min < 1) { return "不足 1 分钟"; }
+      if (min < 60) { return min + " 分钟"; }
+      return (Math.round(min / 6) / 10) + " 小时";
+    };
+    var fmtSpeed = function (bytesPerSec) {
+      return bytesPerSec > 0 ? Math.round(bytesPerSec / 1024) + " KB/s" : "暂无记录";
+    };
+    var fmtTime = function (ts) {
+      var d = new Date(ts);
+      var p2 = function (n) { return (n < 10 ? "0" : "") + n; };
+      return p2(d.getMonth() + 1) + "-" + p2(d.getDate()) + " " +
+        p2(d.getHours()) + ":" + p2(d.getMinutes());
+    };
+    Queue.stats().then(function (st) {
+      var diagPromise = (typeof Queue.getDiagnostics === "function")
+        ? Queue.getDiagnostics() : Promise.resolve(null);
+      return diagPromise.then(function (d) {
+        if (st) {
+          add("待上传样本", st.pending || 0);
+          add("等待重试", st.retryWait || 0);
+          add("上传失败", st.failed || 0);
+          add("需要重新绑定", st.authFailed || 0);
+          add("队列占用空间", fmtBytes(st.pendingBytes || 0));
+        }
+        if (d) {
+          add("最老样本等待时间", fmtAge(d.oldestSampleAgeMs));
+          add("最近上传速度", fmtSpeed(d.lastUploadBytesPerSec));
+          add("上次自动清理", d.lastJanitorAt > 0 ? fmtTime(d.lastJanitorAt) : "尚未运行");
+          add("上次清理样本数", d.deletedSamples || 0);
+          add("上次释放空间", fmtBytes(d.deletedBytes || 0));
+          add("最近反馈同步状态", MSQSample.feedbackSyncLabel(d.feedbackPendingCount));
+        } else {
+          add("诊断数据", "需升级安装包");
+        }
+        /* APK_CDN_STABILITY_DIAG_V1：最近一次更新下载链路（非敏感，仅 DEV 诊断） */
+        var dl = (typeof MSQDownloadDiag !== "undefined" && MSQDownloadDiag)
+          ? MSQDownloadDiag.load(typeof localStorage !== "undefined" ? localStorage : null) : null;
+        if (dl) {
+          add("最近下载来源", dl.apkDownloadTransport === "cdn" ? "CDN"
+            : (dl.apkDownloadTransport === "legacy" ? "Legacy 备用通道" : "未知"));
+          add("是否发生回退", dl.apkFallbackUsed ? "是（CDN → Legacy）" : "否");
+          add("回退原因", dl.apkFallbackReason || "—");
+          add("HTTP 状态", dl.apkHttpStatus || "—");
+          add("下载字节数", dl.apkDownloadBytes ? fmtBytes(dl.apkDownloadBytes) : "—");
+          add("下载耗时", dl.apkDownloadMs ? (Math.round(dl.apkDownloadMs / 100) / 10) + " s" : "—");
+          add("平均下载速度", dl.apkBytesPerSec ? Math.round(dl.apkBytesPerSec / 1024) + " KB/s" : "—");
+          add("CDN 缓存", dl.apkCacheStatus === "hit" ? "命中"
+            : (dl.apkCacheStatus === "miss" ? "未命中" : "未知"));
+          add("下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败");
+        }
+        box.innerHTML = "";
+        rows.forEach(function (line) {
+          var p = document.createElement("p");
+          p.className = "sample-note";
+          p.textContent = line;
+          box.appendChild(p);
+        });
+        var bj = document.createElement("button");
+        bj.type = "button";
+        bj.className = "barbtn";
+        bj.style.marginTop = "14px";
+        bj.textContent = "立即清理";
+        bj.addEventListener("click", function () {
+          if (typeof Queue.runJanitorNow === "function") {
+            Queue.runJanitorNow().then(renderDevDiagnostics, function () { });
+          }
+        });
+        box.appendChild(bj);
+        var br = document.createElement("button");
+        br.type = "button";
+        br.className = "barbtn";
+        br.style.marginTop = "10px";
+        br.textContent = "立即重试";
+        br.addEventListener("click", function () {
+          Queue.retryFailed().then(renderDevDiagnostics, function () { });
+        });
+        box.appendChild(br);
+      });
+    }, function () {
+      box.innerHTML = "";
+      var p = document.createElement("p");
+      p.className = "sample-note";
+      p.textContent = "队列状态不可用";
+      box.appendChild(p);
+    });
+  }
+
+  /* ---------------- 应用内自更新（SELF_UPDATE_V1，仅手动"检查更新"） ----------------
+     逻辑在 updater.js（纯函数），下载/校验/安装在原生 UpdatePlugin。
+     级联取更新服务器：更新设置 > Sample Collector 设置 > 内置默认（当前为空）。 */
+  var updateInfo = null;       /* {id, versionName, versionCode}，来自 App.getInfo() */
+  var updateManifest = null;   /* 通过校验的服务器 latest.json */
+  var updatePhase = "idle";    /* idle|checking|available|latest|downgrade|invalid|downloading|downloaded|needPermission|installing */
+  var updateProgressBound = false;
+
+  function updateButton(label, id, handler, primary) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = id;
+    b.className = "barbtn" + (primary ? " primary" : "");
+    b.style.marginBottom = "10px";
+    b.textContent = label;
+    b.addEventListener("click", handler);
+    return b;
+  }
+
+  function updateSetError(msg) {
+    var el = $("update-error");
+    if (!el) { return; }
+    if (msg) { el.textContent = msg; el.classList.remove("hidden"); }
+    else { el.classList.add("hidden"); }
+  }
+
+  function renderUpdateView(statusText) {
+    var body = $("update-body");
+    if (!body) { return; }
+    body.innerHTML = "";
+    var status = document.createElement("p");
+    status.style.whiteSpace = "pre-line";
+    status.className = "dim";
+    status.textContent = statusText || "";
+    body.appendChild(status);
+
+    if (updateInfo && updatePhase !== "checking" && updatePhase !== "downloading" && updatePhase !== "installing") {
+      body.appendChild(updateButton("检查更新", "btn-update-check", function () { checkForUpdate(); }, true));
+    }
+    if (updatePhase === "available" && updateManifest) {
+      var info = document.createElement("p");
+      info.style.whiteSpace = "pre-line";
+      info.textContent = "发现新版本 " + updateManifest.versionName +
+        "（versionCode " + updateManifest.versionCode + "）" +
+        (updateManifest.notes ? "\n更新内容：" + updateManifest.notes : "") +
+        "\n大小：" + (typeof MSQUpdater !== "undefined" ? MSQUpdater.formatBytes(updateManifest.size) : updateManifest.size);
+      body.appendChild(info);
+      body.appendChild(updateButton("下载安装", "btn-update-download", function () { startUpdateDownload(); }, true));
+    }
+    if (updatePhase === "needPermission") {
+      body.appendChild(updateButton("打开安装权限设置", "btn-update-perm", function () { openInstallPermissionSettings(); }, true));
+      body.appendChild(updateButton("继续安装", "btn-update-install", function () { installUpdate(); }));
+    }
+    if (updatePhase === "downloaded") {
+      body.appendChild(updateButton("安装更新", "btn-update-install", function () { installUpdate(); }, true));
+    }
+  }
+
+  /* autostart=true：VC16 启动 Modal 的「立即更新」入口 —— 打开页面后自动跑一次
+     既有 checkForUpdate()，直接落到 available/下载安装状态（同一套下载安装链） */
+  function openUpdateView(autostart) {
+    show("view-update");
+    updateSetError("");
+    updatePhase = "idle";
+    renderUpdateView("正在读取应用信息…");
+    var App = getPlugin("App");
+    if (!(App && typeof App.getInfo === "function")) {
+      renderUpdateView("当前环境不支持应用内更新（无 Capacitor App 插件，浏览器调试模式）");
       return;
     }
-    lastSampleUpload = { serverUrl: s.serverUrl, payload: payload, uploaded: false };
-    setSampleUploadStatus("样本上传中…", false);
-    updateSampleToolsVisibility();
-    MSQSample.postJSON(MSQSample.joinUrl(s.serverUrl, "/api/sample"), payload, 20000)
-      .then(function () {
-        if (lastSampleUpload) { lastSampleUpload.uploaded = true; }
-        setSampleUploadStatus("样本已保存：" + payload.sampleId, false);
-      })
-      .catch(function () {
-        setSampleUploadStatus("样本上传失败", true);   /* 不向用户展示异常细节 */
+    App.getInfo().then(function (info) {
+      updateInfo = {
+        id: info.id,
+        versionName: info.version,
+        versionCode: parseInt(info.build, 10) || 0
+      };
+      renderUpdateView("当前版本：" + updateInfo.versionName +
+        "（versionCode " + updateInfo.versionCode + "）");
+      /* VC16：DEV 隐藏诊断入口 = 「当前版本」整行 7 连击（仅 DEV 构建绑定）。
+         整行 <p> 是块级元素，全宽可点（DIAG-2）；MAIN 直接跳过，不绑不响应。 */
+      if (typeof MSQSample !== "undefined" && MSQSample &&
+          MSQSample.diagnosticsChannel(updateInfo.id) === "dev") {
+        var statusEl = $("update-body").querySelector("p.dim");
+        bindDevDiagTap(statusEl);
+      }
+      if (autostart === true) { checkForUpdate(); }
+    }, function () {
+      renderUpdateView("无法读取应用信息");
+    });
+  }
+
+  function updateResolvedServer() {
+    if (typeof MSQUpdater === "undefined" || !MSQUpdater) { return null; }
+    return MSQUpdater.resolveUpdateServer(MSQUpdater.loadSettings(), MSQUpdater.PUBLIC_BASE_URL);
+  }
+
+  function checkForUpdate() {
+    if (!updateInfo || typeof MSQUpdater === "undefined") { return; }
+    updatePhase = "checking";
+    updateSetError("");
+    renderUpdateView("正在检查更新…");
+    var channel = MSQUpdater.updateChannelFor(updateInfo.id);
+    if (!channel) {
+      updatePhase = "invalid";
+      updateSetError("当前应用渠道不支持应用内更新");
+      renderUpdateView("");
+      return;
+    }
+    var server = updateResolvedServer();
+    var fetchJson = (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
+      ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
+      : Promise.reject(new Error("无传输层"));
+    fetchJson.then(function (manifest) {
+      var v = MSQUpdater.validateManifest(manifest, {
+        channel: channel,
+        packageName: updateInfo.id
       });
+      if (!v.ok) {
+        updatePhase = "invalid";
+        updateSetError(v.error);
+        renderUpdateView("");
+        return;
+      }
+      updateManifest = manifest;
+      var state = MSQUpdater.checkUpdateState(updateInfo.versionCode, manifest);
+      if (state === "available") {
+        updatePhase = "available";
+        renderUpdateView("");
+      } else if (state === "latest") {
+        updatePhase = "latest";
+        renderUpdateView("已经是最新版");
+      } else {
+        updatePhase = "downgrade";
+        updateSetError("服务器上的版本不高于当前版本，暂不更新");
+        renderUpdateView("");
+      }
+    }, function () {
+      updatePhase = "invalid";
+      updateSetError("无法连接更新服务器，请确认电脑和手机在同一局域网且接收器已启动");
+      renderUpdateView("");
+    });
+  }
+
+  function updateFriendlyError(e) {
+    var code = e && e.code ? String(e.code) : "";
+    var msg = String((e && e.message) || e || "未知错误");
+    if (code === "SHA_MISMATCH") { return "更新包校验失败（SHA256 不一致），已删除下载文件"; }
+    if (code === "SIGNER_MISMATCH") { return "更新包签名不一致，已拒绝安装"; }
+    if (code === "PACKAGE_MISMATCH") { return "更新包与应用不匹配，已拒绝安装"; }
+    if (code === "VERSION_MISMATCH") { return "更新包版本与发布信息不一致"; }
+    if (code === "TOO_LARGE") { return "更新包超过大小上限"; }
+    if (code === "NO_UPDATE") { return "没有已下载的更新包，请重新下载"; }
+    return "下载失败（" + msg.slice(0, 60) + "）";
+  }
+
+  function startUpdateDownload() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!Update || !updateManifest || !updateInfo) { return; }
+    var url = MSQUpdater.resolveApkUrl(updateResolvedServer(), updateManifest.apkUrl);
+    if (!url) { updateSetError("下载地址无效"); return; }
+    updatePhase = "downloading";
+    updateSetError("");
+    renderUpdateView("正在下载 0%");
+    /* APK_CDN_STABILITY_DIAG_V1：非敏感下载诊断（只进 DEV 诊断页） */
+    var diagStore = (typeof localStorage !== "undefined") ? localStorage : null;
+    var diag = (typeof MSQDownloadDiag !== "undefined") ? MSQDownloadDiag : null;
+    var firstFailureReason = null;
+    if (typeof Update.addListener === "function" && !updateProgressBound) {
+      updateProgressBound = true;
+      Update.addListener("updateDownloadProgress", function (p) {
+        if (updatePhase !== "downloading") { return; }
+        var pct = (p && p.percent) ? p.percent : 0;
+        var txt = "正在下载 " + pct + "%";
+        if (p && p.totalBytes) {
+          txt += "（" + MSQUpdater.formatBytes(p.downloadedBytes) + " / " +
+            MSQUpdater.formatBytes(p.totalBytes) + "）";
+        }
+        renderUpdateView(txt);
+      });
+    }
+    var attemptDownload = function (currentUrl, isFallback) {
+      var transport = isFallback ? "legacy" : "cdn";
+      Update.downloadUpdate({
+        url: currentUrl,
+        sha256: updateManifest.sha256,
+        expectedPackageName: updateInfo.id,
+        expectedVersionCode: updateManifest.versionCode,
+        expectedSize: updateManifest.size
+      }).then(function (res) {
+        if (diag) {
+          diag.save(diagStore, diag.buildSuccessRecord({
+            transport: transport,
+            fallbackUsed: isFallback,
+            fallbackReason: firstFailureReason,
+            result: res || {}
+          }));
+        }
+        afterDownloadVerified();
+      }, function (e) {
+        if (diag) {
+          diag.save(diagStore, diag.buildFailureRecord({
+            transport: transport,
+            fallbackUsed: isFallback,
+            error: e
+          }));
+          if (!firstFailureReason) {
+            firstFailureReason = diag.fallbackReasonOf(e);
+          }
+        }
+        /* APK_DELIVERY_COS_CDN_VC13_V1：仅明确传输层失败才回退 legacy 通道一次；
+           安全校验失败（SHA/size/package/version/signer/解析）= HARD FAIL，
+           绝不“换通道再试” */
+        var fallbackUrl = (!isFallback && updateManifest.fallbackApkUrl &&
+                           MSQUpdater.shouldTryFallback(e))
+          ? MSQUpdater.fallbackApkUrlFor(updateManifest, updateResolvedServer()) : null;
+        if (fallbackUrl && fallbackUrl !== currentUrl) {
+          renderUpdateView("CDN 通道失败，改用备用通道…");
+          attemptDownload(fallbackUrl, true);
+          return;
+        }
+        updatePhase = "available";
+        updateSetError(updateFriendlyError(e));
+        renderUpdateView("下载未完成，可重新下载安装");
+      });
+    };
+    attemptDownload(url, false);
+  }
+
+  function afterDownloadVerified() {
+    var Update = getPlugin("UpdatePlugin");
+    updatePhase = "downloaded";
+    if (!(Update && typeof Update.canInstallUpdates === "function")) {
+      renderUpdateView("下载校验通过");
+      return;
+    }
+    Update.canInstallUpdates().then(function (r) {
+      if (r && r.canInstall) {
+        renderUpdateView("下载校验通过，可安装");
+      } else {
+        updatePhase = "needPermission";
+        renderUpdateView("需要允许本应用安装更新包（系统安全机制，仅此一次授权）");
+      }
+    }, function () {
+      renderUpdateView("下载校验通过");
+    });
+  }
+
+  function openInstallPermissionSettings() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!(Update && typeof Update.openInstallPermissionSettings === "function")) { return; }
+    Update.openInstallPermissionSettings().then(function () { }, function () { });
+  }
+
+  function installUpdate() {
+    var Update = getPlugin("UpdatePlugin");
+    if (!(Update && typeof Update.installDownloadedUpdate === "function")) { return; }
+    if (!updateManifest || !updateInfo) { return; }
+    updatePhase = "installing";
+    /* 安装前原生侧会对最终文件做第二次全量校验（SHA256/包名/versionCode/签名） */
+    Update.installDownloadedUpdate({
+      sha256: updateManifest.sha256,
+      expectedPackageName: updateInfo.id,
+      expectedVersionCode: updateManifest.versionCode
+    }).then(function (r) {
+      renderUpdateView("已调起系统安装器（" + (r && r.versionName || updateManifest.versionName) +
+        "），请在系统界面确认更新；安装完成后重新打开应用");
+    }, function (e) {
+      updatePhase = "downloaded";
+      updateSetError(updateFriendlyError(e));
+      renderUpdateView("");
+    });
+  }
+
+  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1 + VC17 提前并行） ----------------
+     编排与决策在 startup-update.js（可测纯逻辑）；manifest 获取/校验/版本比较/
+     更新提示 UI/下载/校验/安装全部复用手动"检查更新"的同一条路径，无第二套 updater。
+     每个 App process / WebView 生命周期只自动检查一次；任何失败完全静默。
+     VC17：trigger 在 bootstrap 期立即执行（与 loadBank 并行）；startupUiReady 在
+     主菜单渲染完成后置位，此前检查结果暂存在 controller 内，就绪后立即展示。 */
+  var startupUiReady = false;
+  var startupUpdateCtrl = (typeof MSQStartupUpdate !== "undefined" && MSQStartupUpdate)
+    ? MSQStartupUpdate.createController({
+        getAppInfo: function () {
+          var App = getPlugin("App");
+          if (!(App && typeof App.getInfo === "function")) { return Promise.resolve(null); }
+          return App.getInfo().then(function (info) {
+            return {
+              id: info.id,
+              versionName: info.version,
+              versionCode: parseInt(info.build, 10) || 0
+            };
+          }, function () { return null; });
+        },
+        channelFor: function (id) {
+          return MSQUpdater.updateChannelFor(id);
+        },
+        /* 与手动 checkForUpdate() 完全相同的服务器解析、endpoint 与超时 */
+        fetchLatest: function (channel) {
+          var server = updateResolvedServer();
+          return (typeof MSQSample !== "undefined" && MSQSample && MSQSample.getJSON)
+            ? MSQSample.getJSON(server + "/api/update/" + channel + "/latest", 10000)
+            : Promise.reject(new Error("无传输层"));
+        },
+        validate: function (manifest, expected) {
+          return MSQUpdater.validateManifest(manifest, expected);
+        },
+        compare: function (currentVersionCode, manifest) {
+          return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
+        },
+        /* 只在主菜单就绪、用户仍停在首屏且无弹窗时提示，绝不抢正在进行的操作 */
+        canShowNow: function () {
+          return startupUiReady && currentViewId() === "view-menu" && !Modal.isOpen();
+        },
+        /* VC16：不再自动跳转更新页，改为首页上的轻量 Modal。
+           稍后/立即更新/系统 Back 都经 Modal.close → onClose 标记 dismissed，
+           本次 session 不再自动弹；真正 cold start 才会重新提醒。 */
+        showPrompt: function (info, manifest) {
+          showStartupUpdateModal(info, manifest);
+        },
+        debug: function (msg) { console.log("[startup-update] " + msg); }
+      })
+    : null;
+
+  /* VC17_STARTUP_SPEED_AND_DIAG_ZH_V1：bootstrap 一开始就发起检查（与 loadBank/
+     UI 初始化/队列恢复并行，绝不 await），网络耗时与初始化耗时重叠而非串行相加。
+     主菜单渲染完成后 markUiReady 才允许展示 Modal（见 boot 段 startupUiReady）。 */
+  if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
+
+  /* 启动更新提示 Modal（VC16_UI_POLISH_V1）：复用现有 HTML/CSS Modal 组件，
+     不是系统 AlertDialog，也不新增 native plugin。
+     内容只有版本名与简短 notes —— 绝不含 apkUrl/fallback/域名/SHA/size/诊断。
+     立即更新 → openUpdateView(true) 进入既有检查/下载/安装页（同一套
+     UpdatePlugin/SHA256/size/package/versionCode/signer 与 CDN/fallback 链）。 */
+  function showStartupUpdateModal(info, manifest) {
+    if (!info || !manifest) { return; }
+    var notes = (typeof manifest.notes === "string") ? manifest.notes.trim() : "";
+    if (notes.length > 60) { notes = notes.slice(0, 60) + "…"; }   /* 防弹窗过高 */
+    Modal.open(function (box) {
+      var h = document.createElement("h3");
+      h.textContent = "发现新版本";
+      box.appendChild(h);
+      var m = document.createElement("div");
+      m.className = "msg";
+      m.style.whiteSpace = "pre-line";
+      m.textContent = "最新版本：" + manifest.versionName +
+        "\n当前版本：" + info.versionName +
+        (notes ? "\n更新内容：" + notes : "");
+      box.appendChild(m);
+      var btns = document.createElement("div");
+      btns.className = "btns";
+      btns.appendChild(mkBtn("稍后", "barbtn cancel", function () { Modal.close(); }));
+      btns.appendChild(mkBtn("立即更新", "barbtn ok", function () {
+        Modal.close();
+        openUpdateView(true);
+      }));
+      box.appendChild(btns);
+    });
+    /* 任何关闭路径（稍后 / Back / 立即更新）都算"本次 session 已处理"。
+       遮罩点击本就不关闭（Modal 无遮罩点击处理器），避免误触。 */
+    Modal.onClose = function () {
+      if (startupUpdateCtrl) { startupUpdateCtrl.markDismissed(); }
+    };
+  }
+
+  /* 更新页返回 = 关闭更新提示：本次 session 不再自动弹（仅影响启动自动检查，
+     手动"检查更新"不受任何影响）。系统 Back 与页内返回按钮共用。 */
+  function handleUpdateBack() {
+    if (startupUpdateCtrl) { startupUpdateCtrl.markDismissed(); }
+    renderMenu();
   }
 
   /* ---------------- 清除记录 ---------------- */
@@ -1816,18 +2391,14 @@
     $("btn-detail-back").addEventListener("click", handleSearchDetailBack);
     $("btn-take-photo").addEventListener("click", startPhotoSearch);
     $("btn-photo-back").addEventListener("click", handlePhotoBack);
-    $("btn-batch-photo").addEventListener("click", function () {
-      var Camera = getPlugin("Camera");
-      var Ocr = getPlugin("Ocr");
-      openBatchPhoto();
-      if (!Camera || !Ocr) { setBatchStatus(photoPluginMissingMessage(Camera, Ocr)); }
-    });
-    $("btn-batch-back").addEventListener("click", handleBatchBack);
+    $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
-    $("btn-take-page").addEventListener("click", startBatchPageSearch);
-    initBatchTypes();
-    initSamplePanel();
+    $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });
     initSampleResultTools();
+    initSampleQueue();
+    $("btn-update").addEventListener("click", function () { openUpdateView(); });
+    $("btn-update-back").addEventListener("click", handleUpdateBack);
+    /* btn-update-check 由 renderUpdateView 动态创建并绑定，不做静态绑定 */
     var searchInput = $("search-input");
     searchInput.addEventListener("input", function () {
       clearTimeout(searchDebounceTimer);
@@ -1862,6 +2433,10 @@
     renderMenu();
     registerSW();
     registerSystemBack();
+    /* VC17：主界面就绪 —— 启动检查早已在跑，此刻起才允许展示 Modal；
+       若检查已先完成并发现新版，markUiReady 会立即弹（不等待、不再串行）。 */
+    startupUiReady = true;
+    if (startupUpdateCtrl) { startupUpdateCtrl.markUiReady(); }
   }).catch(function (err) {
     document.body.innerHTML = "";
     var box = document.createElement("div");

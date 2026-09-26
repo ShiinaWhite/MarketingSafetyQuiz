@@ -54,3 +54,27 @@ sample_collector.local.*
 
 # ---- 本机 BAT 启动器（用户本机工具，仅 ignore 不删除） ----
 启动仿真考试测试台.bat
+
+# ---- 公网样本写接口认证 Secret（本机文件，绝不入库） ----
+.secrets/
+
+# ---- Cloudflare R2 credential（R2_FAST_TRANSFER_V1） ----
+# R2 Account/Access/Secret 只允许存在于 PC 本机，绝不进 Git / JS bundle / APK / 日志 / 错误响应。
+# 模板见 tools/sample_collector/.env.r2.example（占位符，可入库）。
+.env.r2.local
+.env.r2.*
+*.env.r2
+tools/sample_collector/.env.r2.local
+!.env.r2.example
+
+# ---- 腾讯云 COS credential（COS_SAMPLE_TRANSFER_POC / V1） ----
+# COS SecretId/SecretKey 只允许存在于 PC 本机（Collector 进程内），绝不进 Git / APK / JS / 日志。
+# 手机永远只拿短时 presigned PUT URL，绝不持有长期 SecretKey。
+.env.cos.local
+.env.cos.*
+*.env.cos
+tools/sample_collector/.env.cos.local
+!.env.cos.example
+
+# ---- 兜底：任何 provider 的本机 secret env（防止未来新增 provider 时遗漏） ----
+.env.*.local

@@ -1,3 +1,13 @@
+/* APK_SIZE_OPTIMIZATION_V1：修复 ioncamera-android 1.0.2 的 POM 把 junit:junit:4.13.2
+   声明为 runtime scope（打包 bug）导致的 junit/hamcrest 泄漏。
+   只从三个 variant 的 RuntimeClasspath 剔除；禁止改成 endsWith('RuntimeClasspath') ——
+   那会连 devUnitTestRuntimeClasspath 一起命中，JVM 单测将 NoClassDefFoundError（已实测）。
+   testImplementation / unit test classpath 不受影响。 */
+configurations.matching { it.name in ['debugRuntimeClasspath', 'devRuntimeClasspath', 'releaseRuntimeClasspath'] }.all {
+    exclude group: 'junit', module: 'junit'
+    exclude group: 'org.hamcrest', module: 'hamcrest-core'
+}
+
 apply plugin: 'com.android.application'
 
 android {
@@ -10,16 +20,64 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        /* PUBLIC_SAMPLE_AUTH_V1：所有 variant 都生成该字段（默认空串），
+           dev 变体经 -PMSQ_SAMPLE_WRITE_TOKEN 注入真实值 */
+        buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '""'
+        /* QUEUE_RECOVERY_AND_CLEANUP_V1：认证 generation（非敏感整数）。
+           token 轮换发布新版时递增（1→2→3），用于旧 auth_failed 自动恢复判定；
+           与 token 本身无关，非秘密 */
+        buildConfigField "int", "MSQ_SAMPLE_AUTH_GENERATION", (project.findProperty("MSQ_SAMPLE_AUTH_GENERATION") ?: "1")
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    buildFeatures {
+        buildConfig true
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        /* DEV_TO_MAIN_SYNC_V1：R8 + 资源收缩成为共享能力 —— stable 发布路径
+           （debug buildType，assembleDebug → 营销安规刷题.apk）与 dev 用同一套
+           minify 配置；ABI 差异仍仅由下方 dev 块内的发布属性控制，
+           stable 保持全 ABI 兼容 */
+        debug {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        /* DEV 版本号注入（SELF_UPDATE_V1）：-PDEV_VERSION_CODE / -PDEV_VERSION_NAME */
+        dev {
+            initWith debug
+            matchingFallbacks = ['debug']
+            applicationIdSuffix '.dev'
+            versionNameSuffix '-dev'
+            signingConfig signingConfigs.debug
+            /* APK_SIZE_OPTIMIZATION_V1（APK_SIZE_AUDIT_V1 结论落地）：
+               minify + R8 + 资源收缩。keep rules 全部来自依赖自带 consumer rules——
+               Capacitor AAR（keep @CapacitorPlugin/Plugin 子类）、ML Kit、CameraX；
+               审计已核验 Ocr/Update/SampleQueuePlugin、TextRecognition.getClient、
+               ioncamera 拍照链类在 R8 后全部保留，勿另加自定义规则 */
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            /* APK_SIZE_OPTIMIZATION_V1：DEV 发布构建带 -PDEV_ARM64_ONLY 时仅保留
+               arm64-v8a（审计实测省 28.77 MiB）。普通开发/模拟器构建不带该属性，
+               保持全部 ABI（bench 模拟器为 x86_64，需要全 ABI 才能装机测试） */
+            if (project.findProperty("DEV_ARM64_ONLY")) {
+                ndk {
+                    abiFilters 'arm64-v8a'
+                }
+            }
+            /* PUBLIC_SAMPLE_AUTH_V1：样本写接口 Bearer token（发布流程经
+               -PMSQ_SAMPLE_WRITE_TOKEN 注入，来源 .secrets/ 或环境变量，
+               绝不入库；为空时 App 上传将收到 401 并保留本地队列） */
+            def sampleToken = project.findProperty("MSQ_SAMPLE_WRITE_TOKEN") ?: ""
+            buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '"' + sampleToken.toString() + '"'
         }
     }
 }
@@ -30,6 +88,42 @@ repositories {
     }
 }
 
+/* SELF_UPDATE_V1：DEV 版本号注入（仅 dev buildType 的最终产物生效）。
+   用法：gradlew :app:assembleDev -PDEV_VERSION_CODE=2 -PDEV_VERSION_NAME=1.0.2
+   不传参数时保持默认（versionCode 1 / versionName 1.0-dev）；
+   正式 assembleDebug / assembleRelease 完全不受影响。 */
+androidComponents {
+    onVariants(selector().withBuildType("dev")) { variant ->
+        def devCodeProp = project.findProperty("DEV_VERSION_CODE")
+        def devNameProp = project.findProperty("DEV_VERSION_NAME")
+        variant.outputs.each { output ->
+            if (devCodeProp) { output.versionCode.set(devCodeProp.toString().toInteger()) }
+            if (devNameProp) { output.versionName.set(devNameProp.toString() + "-dev") }
+        }
+    }
+}
+
+/* APK_SIZE_OPTIMIZATION_V1：三个非运行路径 JSON 不进 APK（APK_SIZE_AUDIT_V1 实测：
+   questions.json 仅 www 端 fetch 兜底、explanations.json 零引用、explanations.sample.json
+   仅 node 测试夹具）。www/ 源文件与 test_core.js 夹具继续保留；
+   assets/public 由 cap sync 生成且不入库，重新 sync 会原样还原，无需恢复逻辑。 */
+tasks.register("pruneNonRuntimePackagedAssets") {
+    doLast {
+        ['questions.json', 'explanations.json', 'explanations.sample.json'].each { name ->
+            def f = file("src/main/assets/public/data/$name")
+            if (f.exists()) {
+                if (!f.delete()) { throw new GradleException("无法删除打包资产 " + f) }
+            }
+        }
+    }
+}
+/* 用独立前置任务而非 mergeAssets.doFirst：doFirst 删除发生在 AGP 输入指纹
+   之后，增量构建会让 merge worker 读到已删除文件（NoSuchFileException 实测）。
+   dependsOn 保证删除在 merge 的输入扫描之前完成。 */
+tasks.matching { it.name ==~ /merge\w*Assets/ }.configureEach { assetsTask ->
+    assetsTask.dependsOn "pruneNonRuntimePackagedAssets"
+}
+
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
@@ -38,6 +132,7 @@ dependencies {
     implementation project(':capacitor-android')
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.json:json:20240303"   // JVM 单测使用真实 org.json（mockable android.jar 的 stub 不可用）
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')

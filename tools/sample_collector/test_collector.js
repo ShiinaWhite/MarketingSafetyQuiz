@@ -71,7 +71,7 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "msq-collector-test-"));
   let server = null;
   try {
-    const collector = createCollector({ out: tmp });
+    const collector = createCollector({ out: tmp, allowAnonymousWrites: true });
     const port = await collector.listen("127.0.0.1", 0);
     server = collector.server;
 
@@ -128,7 +128,17 @@ async function main() {
     /* ---- 重复 / 非法输入 ---- */
     section("重复与非法输入");
     r = await request(port, "POST", "/api/sample", { sampleId: SAMPLE_ID, photoDataUrl: dataUrl, manifest });
-    check("重复 sampleId → 409（禁止覆盖）", r.status === 409);
+    check("重复上传同内容 → 200 alreadyExists（幂等，at-least-once 重传安全）",
+      r.status === 200 && JSON.parse(r.body.toString("utf8")).alreadyExists === true,
+      "status=" + r.status);
+    check("幂等重传后 capture.jpg 未被破坏",
+      fs.readFileSync(path.join(sampleDir, "capture.jpg")).equals(jpg));
+    const jpgB = makeFixtureJpeg(320, 240);
+    r = await request(port, "POST", "/api/sample",
+      { sampleId: SAMPLE_ID, photoDataUrl: "data:image/jpeg;base64," + jpgB.toString("base64"), manifest });
+    check("同 sampleId 不同内容 → 409 conflict（不覆盖）", r.status === 409);
+    check("409 冲突后 capture.jpg 仍为原始字节",
+      fs.readFileSync(path.join(sampleDir, "capture.jpg")).equals(jpg));
 
     const badIds = ["../etc/passwd", "a/b/c", "20260923_171530", "20260923_171530_ZZ12cd",
       "20261301_171530_ab12cd", "", undefined, SAMPLE_ID + "/../../x"];
@@ -158,28 +168,261 @@ async function main() {
     /* ---- 超限 body（独立实例 + 独立临时目录，低上限） ---- */
     section("body 大小上限");
     const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "msq-collector-test2-"));
-    const small = createCollector({ out: tmp2, maxBodyBytes: 1024 });
+    const small = createCollector({ out: tmp2, maxBodyBytes: 1024, allowAnonymousWrites: true });
     const smallPort = await small.listen("127.0.0.1", 0);
     try {
       const padded = JSON.parse(JSON.stringify(manifest));
       padded.ocr.text = "x".repeat(5000); /* 确保 body > 1KB 触发上限 */
       r = await request(smallPort, "POST", "/api/sample", { sampleId: "20260923_171535_ba12cd", photoDataUrl: dataUrl, manifest: padded });
       check("超限 body → 413", r.status === 413);
+    /* ---- 更新接口（只读；channel 白名单 + 固定文件名） ---- */
+    section("GET /api/update/*");
+    const updatesRoot = fs.mkdtempSync(path.join(os.tmpdir(), "msq-updates-test-"));
+    const devDir = path.join(updatesRoot, "dev");
+    fs.mkdirSync(devDir, { recursive: true });
+    const updApk = makeFixtureJpeg(320, 240); /* 任意字节即可，服务器只透传 */
+    fs.writeFileSync(path.join(devDir, "营销安规刷题-DEV.apk"), updApk);
+    fs.writeFileSync(path.join(devDir, "latest.json"), JSON.stringify({
+      schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+      versionCode: 3, versionName: "1.0.3-dev", apkUrl: "/api/update/dev/apk",
+      sha256: sha256Hex(updApk), size: updApk.length, publishedAt: "2026-09-24T00:00:00Z", notes: "t"
+    }));
+
+    const collector2 = createCollector({ out: tmp, updatesRoot: updatesRoot, allowAnonymousWrites: true });
+    const port2 = await collector2.listen("127.0.0.1", 0);
+    try {
+      r = await request(port2, "GET", "/api/update/dev/latest");
+      check("latest 200 + no-store", r.status === 200 && (r.headers["cache-control"] || "").includes("no-store"));
+      const latest = JSON.parse(r.body.toString("utf8"));
+      check("latest 内容透传（schemaVersion/channel/versionCode）",
+        latest.schemaVersion === 1 && latest.channel === "dev" && latest.versionCode === 3);
+      r = await request(port2, "GET", "/api/update/dev/apk");
+      check("apk 200 + 正确 Content-Type/Length",
+        r.status === 200 &&
+        r.headers["content-type"] === "application/vnd.android.package-archive" &&
+        Number(r.headers["content-length"]) === updApk.length);
+      check("apk 字节完全一致", r.body.equals(updApk));
+      r = await request(port2, "GET", "/api/update/nosuch/latest");
+      check("未知 channel → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/stable/latest");
+      check("stable channel 无文件 → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/..%2F..%2F/latest");
+      check("channel 穿越尝试 → 404（白名单外）", r.status === 404);
+      r = await request(port2, "GET", "/api/update/dev/nothere");
+      check("更新接口其它路径 → 404", r.status === 404);
+      r = await request(port2, "GET", "/api/update/dev/apk?file=..%2F..%2Fx");
+      check("查询参数被忽略（无任意文件读取）", r.status === 200 && r.body.equals(updApk));
+    } finally { collector2.server.close(); fs.rmSync(updatesRoot, { recursive: true, force: true }); }
     } finally {
       small.server.close();
       fs.rmSync(tmp2, { recursive: true, force: true });
     }
 
-    /* ---- feedback ---- */
-    section("POST /api/feedback");
+    /* ---- feedback：v1 兼容 + v2 幂等 upsert ---- */
+    section("POST /api/feedback（v1 请求兼容）");
     r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, userFlag: "has_error", screenNumbers: ["31", "33"] });
-    check("feedback 200", r.status === 200);
-    const fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
-    check("feedback.json 落盘且可解析", fb.userFlag === "has_error" && fb.screenNumbers.join() === "31,33");
+    check("v1 请求 feedback 200", r.status === 200);
+    let fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("v1 请求迁移为 v2 且 legacy 保留（不破坏历史数据）",
+      fb.schemaVersion === 2 && fb.legacy && fb.legacy.userFlag === "has_error" &&
+      fb.legacy.screenNumbers.join() === "31,33" && fb.pageIssues.length === 0 && fb.blockIssues.length === 0);
     r = await request(port, "POST", "/api/feedback", { sampleId: "20260923_171536_bb12cd", userFlag: "x" });
     check("样本不存在 → 404", r.status === 404);
     r = await request(port, "POST", "/api/feedback", { sampleId: "../x", userFlag: "x" });
     check("feedback 非法 sampleId → 400", r.status === 400);
+
+    section("POST /api/feedback（v2 幂等 upsert）");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["missing_question", "other"] });
+    check("page set 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("pageIssues = 2 项（已排序去重）",
+      fb.pageIssues.length === 2 && fb.pageIssues[0].type === "missing_question" && fb.pageIssues[1].type === "other");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["missing_question", "other"] });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("重复 set 同 issue 幂等（不产生重复）", fb.pageIssues.length === 2);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["wrong_page_type"] });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("page set 全量替换（修改反馈）",
+      fb.pageIssues.length === 1 && fb.pageIssues[0].type === "wrong_page_type");
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "remove", scope: "page" });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("page remove 清空", fb.pageIssues.length === 0);
+
+    const blockPayload = { screenNumber: "27", rawScreenNumber: "27", numberSource: "ocr",
+      type: "single", finalAnswer: "A", confidence: "low", finalBankId: 123, matchedByOptions: false };
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 2, block: blockPayload });
+    check("block set 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("blockIssue 落盘且字段完整",
+      fb.blockIssues.length === 1 && fb.blockIssues[0].blockIndex === 2 &&
+      fb.blockIssues[0].issue === "wrong_answer" && fb.blockIssues[0].finalAnswer === "A" &&
+      fb.blockIssues[0].finalBankId === 123 && fb.blockIssues[0].matchedByOptions === false);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 2, block: blockPayload });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("重复 block set 幂等（upsert 不重复）", fb.blockIssues.length === 1);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer",
+        blockIndex: 3, block: blockPayload });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("block 3 反馈不影响 block 2", fb.blockIssues.length === 2);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "remove", scope: "block", issue: "wrong_answer", blockIndex: 2 });
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("block remove 撤销（只删目标项）",
+      fb.blockIssues.length === 1 && fb.blockIssues[0].blockIndex === 3);
+
+    section("POST /api/feedback（非法输入）");
+    r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, action: "upsert", scope: "page" });
+    check("非法 action → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback", { sampleId: SAMPLE_ID, action: "set", scope: "page" });
+    check("page set 缺 issueTypes → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "page", issueTypes: ["not_a_type"] });
+    check("未知 issueType → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "not_an_issue", blockIndex: 1 });
+    check("未知 block issue → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: -1 });
+    check("blockIndex 非法 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      { sampleId: SAMPLE_ID, action: "set", scope: "block", issue: "wrong_answer", blockIndex: 1, block: "oops" });
+    check("block 字段非对象 → 400", r.status === 400);
+
+    /* ---- FB-P 系列（FEEDBACK_PERSISTENCE_REPAIR_V1）：v2 全量文档 ----
+       手机队列 worker 补传的就是 buildFeedbackJson 产出的文档本体；
+       旧 server 把它当操作模型拒绝 400（根因二），这里用真实 HTTP 锁定。 */
+    section("POST /api/feedback（v2 全量文档 = worker 补传协议）");
+    const doc = (pageIssues, blockIssues) => ({
+      schemaVersion: 2, sampleId: SAMPLE_ID, updatedAt: new Date().toISOString(),
+      pageIssues, blockIssues
+    });
+    const blockDoc = { blockIndex: 2, issue: "wrong_answer", screenNumber: "27",
+      rawScreenNumber: "27", numberSource: "ocr", type: "single", finalAnswer: "A",
+      confidence: "low", finalBankId: 123, matchedByOptions: false };
+    r = await request(port, "POST", "/api/feedback", doc([], []));
+    check("FB-P8 空文档（清除）200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P8 清除后 pageIssues/blockIssues 均空",
+      fb.schemaVersion === 2 && fb.pageIssues.length === 0 && fb.blockIssues.length === 0);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }, { type: "wrong_page_type" }, { type: "other" }], []));
+    check("FB-P3 多页面问题文档 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P3 三类页面问题全量落盘（排序）",
+      fb.pageIssues.length === 3 && fb.pageIssues[0].type === "missing_question" &&
+      fb.pageIssues[1].type === "other" && fb.pageIssues[2].type === "wrong_page_type");
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [blockDoc]));
+    check("FB-P4 wrong_answer+页面问题共存文档 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P4 共存落盘：1 页面问题 + 1 答案错误",
+      fb.pageIssues.length === 1 && fb.blockIssues.length === 1 &&
+      fb.blockIssues[0].blockIndex === 2 && fb.blockIssues[0].finalAnswer === "A" &&
+      fb.blockIssues[0].finalBankId === 123);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [blockDoc]));
+    check("FB-P7 同文档幂等重放 200", r.status === 200);
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P7 幂等重放不产生重复", fb.pageIssues.length === 1 && fb.blockIssues.length === 1);
+    r = await request(port, "POST", "/api/feedback", { schemaVersion: 2, sampleId: SAMPLE_ID });
+    check("v2 文档缺数组 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback", doc([{ type: "bogus" }], []));
+    check("v2 文档未知页面问题 → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      doc([], [{ blockIndex: -1, issue: "wrong_answer" }]));
+    check("v2 文档非法 blockIndex → 400", r.status === 400);
+    r = await request(port, "POST", "/api/feedback",
+      doc([{ type: "missing_question" }], [{ blockIndex: 5, issue: "wrong_answer" }]));
+    fb = JSON.parse(fs.readFileSync(path.join(sampleDir, "feedback.json"), "utf8"));
+    check("FB-P9 文档内缺定位字段也可落盘（server 清洗为 null）",
+      r.status === 200 && fb.blockIssues[0].blockIndex === 5 && fb.blockIssues[0].screenNumber === null);
+    r = await request(port, "POST", "/api/feedback", doc([{ type: "missing_question" }], []));
+    check("FB-P9 已存在样本的文档 → 200（只写目标样本）", r.status === 200);
+    r = await request(port, "POST", "/api/feedback",
+      { schemaVersion: 2, sampleId: "20260923_171536_bb12cd", pageIssues: [], blockIssues: [] });
+    check("FB-P9 不存在的样本 → 404（不误写其他样本）", r.status === 404);
+
+    /* ---- 写接口认证（PUBLIC_SAMPLE_AUTH_V1：AUTH-1~10 + 限流） ---- */
+    section("POST 写接口认证");
+    const authRoot = fs.mkdtempSync(path.join(os.tmpdir(), "msq-auth-test-"));
+    const CURRENT = "a".repeat(64);
+    const PREVIOUS = "b".repeat(64);
+    const authCollector = createCollector({
+      out: authRoot,
+      updatesRoot: authRoot,
+      writeTokens: [CURRENT, PREVIOUS],
+      allowAnonymousWrites: false
+    });
+    const authPort = await authCollector.listen("127.0.0.1", 0);
+    const authDir = path.join(authRoot, "2026-09-23", "20260923_180000_aa11aa");
+    try {
+      const post = (body, headers) => request(authPort, "POST", "/api/sample", body, headers);
+      const bearerHeaders = (tok) => ({ Authorization: "Bearer " + tok });
+
+      let ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest }, {});
+      check("AUTH-1 无 Authorization → 401", ra.status === 401 &&
+        JSON.parse(ra.body.toString("utf8")).error === "unauthorized");
+      check("AUTH-9 无 token 请求未创建任何文件/目录", !fs.existsSync(authDir));
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders("c".repeat(64)));
+      check("AUTH-2 错误 token → 401", ra.status === 401);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        { Authorization: "Basic " + "a".repeat(64) });
+      check("AUTH-3 错误 scheme → 401", ra.status === 401);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        { Authorization: "Bearer " });
+      check("AUTH-4 空 token → 401", ra.status === 401);
+      check("AUTH-9b 多次失败仍未创建文件/目录", !fs.existsSync(authDir));
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(CURRENT));
+      check("AUTH-5 正确 token（CURRENT）/api/sample → 201", ra.status === 201);
+      check("AUTH-9c 认证成功后目录/文件正常创建", fs.existsSync(path.join(authDir, "capture.jpg")));
+
+      let rf = await request(authPort, "POST", "/api/feedback",
+        { sampleId: "20260923_180000_aa11aa", userFlag: "has_error" }, bearerHeaders(PREVIOUS));
+      check("AUTH-6 正确 token（PREVIOUS）/api/feedback → 200", rf.status === 200);
+
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(PREVIOUS));
+      check("AUTH-7 正确 token 重复同内容 sample → 200 alreadyExists",
+        ra.status === 200 && JSON.parse(ra.body.toString("utf8")).alreadyExists === true);
+
+      const jpgB = makeFixtureJpeg(320, 240);
+      ra = await post({ sampleId: "20260923_180000_aa11aa",
+        photoDataUrl: "data:image/jpeg;base64," + jpgB.toString("base64"), manifest },
+        bearerHeaders(CURRENT));
+      check("AUTH-8 正确 token 但内容冲突 → 409", ra.status === 409);
+
+      const tokenLeak = JSON.stringify(ra.headers) + ra.body.toString("utf8");
+      check("AUTH-10 响应头/体不包含 token 内容",
+        tokenLeak.indexOf(CURRENT) < 0 && tokenLeak.indexOf(PREVIOUS) < 0);
+
+      /* 未认证限流：AUTH-1~4 + 下面循环会累计 unauth 计数，超过 15/min → 429 */
+      let saw429 = false;
+      for (let i = 0; i < 14; i++) {
+        ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest }, {});
+        if (ra.status === 429) { saw429 = true; break; }
+      }
+      check("RATE 未认证请求超限 → 429", saw429 || ra.status === 429);
+      ra = await post({ sampleId: "20260923_180000_aa11aa", photoDataUrl: dataUrl, manifest },
+        bearerHeaders(CURRENT));
+      check("RATE 认证成功维度独立计数（不受 unauth 限流影响）",
+        ra.status === 201 || ra.status === 200 || ra.status === 409);
+    } finally {
+      authCollector.server.close();
+      fs.rmSync(authRoot, { recursive: true, force: true });
+    }
 
     /* ---- 目录净度与穿越隔离 ---- */
     section("目录净度");
@@ -203,7 +446,8 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  console.log("\n==============================================");
+
+    console.log("\n==============================================");
   if (fails.length) {
     console.log(`结果：${fails.length} 项失败 ✗`);
     fails.forEach((f) => console.log("  FAIL: " + f));

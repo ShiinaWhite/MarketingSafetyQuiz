@@ -15,18 +15,24 @@
   "use strict";
 
   var SCHEMA_VERSION = 1;
-  var SETTINGS_KEY = "msq.sampleCollection.v1";
+  var SETTINGS_KEY = "msq.sampleCollection.v2";   /* v2：migrationVersion + autoUpload（无服务器地址配置） */
+  var LEGACY_SETTINGS_KEY = "msq.sampleCollection.v1";
   var SAMPLE_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
   var JPEG_DATAURL_PREFIX = "data:image/jpeg;base64,";
 
-  /* ---------------- 设置（store 可注入，便于 Node 自检） ---------------- */
+  /* 统一公网更新/采集服务器（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1）：
+     不做 LAN/Public 自动择路；公网不可用时样本留在本地队列。 */
+  var PUBLIC_BASE_URL = "https://update.shiinalab.top";
+
+  /* ---------------- 设置（store 可注入，便于 Node 自检） ----------------
+     v2 配置只有 autoUpload 一项；服务器固定 PUBLIC_BASE_URL，用户不可编辑。
+     迁移策略（PERSISTENT_SAMPLE_UPLOAD_QUEUE_V1 任务七）：v1 {enabled} 无法
+     区分「用户主动关闭」与「历史默认 OFF」，统一迁移为 ON——禁止升级后
+     自动上传莫名保持 OFF。 */
 
   function normalizeSettings(raw) {
     var s = (raw && typeof raw === "object") ? raw : {};
-    var url = typeof s.serverUrl === "string" ? s.serverUrl.trim() : "";
-    if (!/^https?:\/\//i.test(url)) { url = ""; }
-    while (url.length > 0 && url.charAt(url.length - 1) === "/") { url = url.slice(0, -1); }
-    return { enabled: s.enabled === true, serverUrl: url };
+    return { migrationVersion: 2, autoUpload: s.autoUpload === true };
   }
 
   function loadSettings(store) {
@@ -34,22 +40,66 @@
     if (!st || typeof st.getItem !== "function") { return normalizeSettings(null); }
     var raw = null;
     try { raw = JSON.parse(st.getItem(SETTINGS_KEY) || "null"); } catch (e) { raw = null; }
-    return normalizeSettings(raw);
+    if (raw && typeof raw === "object" && raw.migrationVersion === 2) {
+      return normalizeSettings(raw);
+    }
+    /* v1（或空）迁移：统一默认 ON 并写回 v2 */
+    var migrated = normalizeSettings({ autoUpload: true });
+    saveSettings(st, migrated);
+    return migrated;
   }
 
   function saveSettings(store, settings) {
     var st = store || (typeof localStorage !== "undefined" ? localStorage : null);
     if (!st || typeof st.setItem !== "function") { return false; }
     try {
-      st.setItem(SETTINGS_KEY, JSON.stringify(normalizeSettings(settings)));
+      var s = normalizeSettings(settings);
+      s.migrationVersion = 2;
+      st.setItem(SETTINGS_KEY, JSON.stringify(s));
+      try { st.removeItem(LEGACY_SETTINGS_KEY); } catch (e2) { /* 旧 key 清理尽力而为 */ }
       return true;
     } catch (e) { return false; }
   }
 
-  /* 自动上传总开关：必须显式开启且已配置服务器地址（默认永远 OFF） */
-  function shouldCollect(settings) {
-    var s = normalizeSettings(settings);
-    return s.enabled === true && !!s.serverUrl;
+  /* 自动采集总开关（SIMPLIFY_CAPTURE_FLOW_V1）：样本采集彻底后台 best-effort，
+     用户无 opt-out——无论历史设置如何，恒为 ON；设置持久化仅为兼容保留，
+     不再驱动任何行为，也不再有对应 UI。 */
+  function shouldCollect() {
+    return true;
+  }
+
+  /* 渠道判定（SIMPLIFY_CAPTURE_FLOW_V1）：仅 DEV 构建显示隐藏诊断入口。
+     与 updater.js 的 updateChannelFor 同源包名表；放在本模块是因为诊断面板
+     展示的是样本队列状态（不改动冻结的 updater/SELF_UPDATE）。 */
+  var DEV_PACKAGE = "com.jty.safetyquiz.dev";
+  var STABLE_PACKAGE = "com.jty.safetyquiz";
+
+  function diagnosticsChannel(applicationId) {
+    if (applicationId === DEV_PACKAGE) { return "dev"; }
+    if (applicationId === STABLE_PACKAGE) { return "stable"; }
+    return null;
+  }
+
+  /* ---------------- 诊断显示层中文映射（VC17，仅 UI 层） ----------------
+     底层 enum/value/schema 一律不动；键为内部状态值（含 native 的 auth_failed
+     与任务书措辞 auth_required 两个别名），值为中文显示文案。 */
+  var DIAG_STATUS_LABELS = {
+    pending: "待上传",
+    retry_wait: "等待重试",
+    uploading: "正在上传",
+    capture_uploaded: "照片已上传",
+    synced: "已同步",
+    failed: "失败",
+    auth_failed: "需要重新绑定",
+    auth_required: "需要重新绑定"
+  };
+
+  function diagnosticStatusLabel(status) {
+    return DIAG_STATUS_LABELS[status] || String(status == null ? "" : status);
+  }
+
+  function feedbackSyncLabel(pendingCount) {
+    return (pendingCount > 0) ? ("待上传 ×" + pendingCount) : "已同步";
   }
 
   /* ---------------- sampleId：YYYYMMDD_HHMMSS_xxxxxx（6 位小写 hex） ---------------- */
@@ -273,18 +323,165 @@
     });
   }
 
+  /* ---------------- 反馈（REAL_SAMPLE_FEEDBACK_V2，纯函数） ----------------
+     页面级反馈 = "这一整页存在结构性问题"；题目级反馈 = "这一题最终答案错了"。
+     状态绑定 sampleId（每个 sample 一份，不跨 sample 残留）；服务器 /api/feedback
+     为幂等 upsert（set 全量替换 / remove 删除）。 */
+
+  var FEEDBACK_PAGE_ISSUES = [
+    { type: "missing_question", label: "漏题" },
+    { type: "wrong_screen_number", label: "题号异常" },
+    { type: "wrong_page_type", label: "题型判断错误" },
+    { type: "other", label: "其他" }
+  ];
+  var FEEDBACK_BLOCK_ISSUES = ["wrong_answer"];
+
+  function feedbackInitialState() {
+    return { pageTypes: [], blocks: {} };
+  }
+
+  function isValidFeedbackOp(op) {
+    if (!op || typeof op !== "object") { return false; }
+    if (op.action !== "set" && op.action !== "remove") { return false; }
+    if (op.scope !== "page" && op.scope !== "block") { return false; }
+    if (typeof op.sampleId !== "string" || !op.sampleId) { return false; }
+    if (op.scope === "page") {
+      if (op.action === "set") {
+        if (!Array.isArray(op.issueTypes) || op.issueTypes.length === 0 ||
+            op.issueTypes.length > FEEDBACK_PAGE_ISSUES.length) { return false; }
+        var known = {};
+        FEEDBACK_PAGE_ISSUES.forEach(function (i) { known[i.type] = true; });
+        for (var i = 0; i < op.issueTypes.length; i++) {
+          if (!known[op.issueTypes[i]]) { return false; }
+        }
+      }
+      return true;
+    }
+    /* block */
+    if (FEEDBACK_BLOCK_ISSUES.indexOf(op.issue) < 0) { return false; }
+    if (typeof op.blockIndex !== "number" || op.blockIndex < 0 ||
+        Math.floor(op.blockIndex) !== op.blockIndex || op.blockIndex > 999) { return false; }
+    if (op.action === "set" && (!op.block || typeof op.block !== "object")) { return false; }
+    return true;
+  }
+
+  function buildPageFeedbackRequest(sampleId, issueTypes) {
+    return { sampleId: sampleId, action: "set", scope: "page", issueTypes: issueTypes.slice() };
+  }
+
+  function buildPageClearRequest(sampleId) {
+    return { sampleId: sampleId, action: "remove", scope: "page" };
+  }
+
+  /* 只提取稳定定位字段（不猜正确答案；不重跑 matcher，直接用当前结果页已有 block） */
+  function buildBlockFeedbackRequest(sampleId, action, blockIndex, block) {
+    var b = block || {};
+    var req = {
+      sampleId: sampleId,
+      action: action === "remove" ? "remove" : "set",
+      scope: "block",
+      issue: "wrong_answer",
+      blockIndex: blockIndex
+    };
+    if (req.action === "set") {
+      req.block = {
+        screenNumber: (b.screenNumber != null) ? String(b.screenNumber) : null,
+        rawScreenNumber: (b.rawScreenNumber != null) ? String(b.rawScreenNumber) : null,
+        numberSource: b.numberSource || "ocr",
+        type: b.type || null,
+        finalAnswer: (b.answer !== undefined) ? b.answer : null,
+        confidence: b.confidence || "none",
+        finalBankId: (b.bankId !== undefined) ? b.bankId : null,
+        matchedByOptions: !!(b.matches && b.matches.assistedByOptions)
+      };
+    }
+    return req;
+  }
+
+  /* 纯函数：把 op 应用到反馈状态，返回新状态（绝不改写入参）。FB-P 系列语义锚点。 */
+  function applyFeedbackToState(state, op) {
+    var next = { pageTypes: (state && state.pageTypes ? state.pageTypes : []).slice(), blocks: {} };
+    var k;
+    var oldBlocks = (state && state.blocks) || {};
+    for (k in oldBlocks) {
+      if (Object.prototype.hasOwnProperty.call(oldBlocks, k)) { next.blocks[k] = oldBlocks[k]; }
+    }
+    if (!isValidFeedbackOp(op)) { return next; }
+    if (op.scope === "page") {
+      if (op.action === "set") {
+        next.pageTypes = op.issueTypes.slice().sort();
+      } else {
+        next.pageTypes = [];
+      }
+      return next;
+    }
+    var key = String(op.blockIndex) + ":" + op.issue;
+    if (op.action === "set") { next.blocks[key] = true; }
+    else { delete next.blocks[key]; }
+    return next;
+  }
+
+  /* 客户端 v2 feedback.json 构建（写本地队列 + 上传共用同一结构）。
+     blockRefs 提供 blockIndex → block 定位字段映射（来自当前结果页已有 block）。 */
+  function buildFeedbackJson(sampleId, feedback, blockRefs) {
+    var fb = feedback || {};
+    var pageIssues = (fb.pageTypes || []).map(function (t) { return { type: t }; });
+    var blockIssues = [];
+    Object.keys(fb.blocks || {}).forEach(function (key) {
+      if (!fb.blocks[key]) { return; }
+      var idx = Number(key.split(":")[0]);
+      var b = (blockRefs && blockRefs[key]) || {};
+      blockIssues.push({
+        blockIndex: idx,
+        issue: "wrong_answer",
+        screenNumber: (b.screenNumber != null) ? String(b.screenNumber) : null,
+        rawScreenNumber: (b.rawScreenNumber != null) ? String(b.rawScreenNumber) : null,
+        numberSource: b.numberSource || "ocr",
+        type: b.type || null,
+        finalAnswer: (b.answer !== undefined) ? b.answer : null,
+        confidence: b.confidence || "none",
+        finalBankId: (b.bankId !== undefined) ? b.bankId : null,
+        matchedByOptions: !!(b.matches && b.matches.assistedByOptions)
+      });
+    });
+    blockIssues.sort(function (a, b2) { return a.blockIndex - b2.blockIndex; });
+    return {
+      schemaVersion: 2,
+      sampleId: sampleId,
+      updatedAt: new Date().toISOString(),
+      pageIssues: pageIssues,
+      blockIssues: blockIssues
+    };
+  }
+
   return {
     SCHEMA_VERSION: SCHEMA_VERSION,
     SETTINGS_KEY: SETTINGS_KEY,
+    LEGACY_SETTINGS_KEY: LEGACY_SETTINGS_KEY,
+    PUBLIC_BASE_URL: PUBLIC_BASE_URL,
     SAMPLE_ID_RE: SAMPLE_ID_RE,
+    FEEDBACK_PAGE_ISSUES: FEEDBACK_PAGE_ISSUES,
+    FEEDBACK_BLOCK_ISSUES: FEEDBACK_BLOCK_ISSUES,
+    FEEDBACK_PAGE_ISSUES: FEEDBACK_PAGE_ISSUES,
+    FEEDBACK_BLOCK_ISSUES: FEEDBACK_BLOCK_ISSUES,
     normalizeSettings: normalizeSettings,
     loadSettings: loadSettings,
     saveSettings: saveSettings,
     shouldCollect: shouldCollect,
+    diagnosticsChannel: diagnosticsChannel,
+    diagnosticStatusLabel: diagnosticStatusLabel,
+    feedbackSyncLabel: feedbackSyncLabel,
     makeSampleId: makeSampleId,
     joinUrl: joinUrl,
     buildRunManifest: buildRunManifest,
     buildUploadPayload: buildUploadPayload,
+    feedbackInitialState: feedbackInitialState,
+    buildFeedbackJson: buildFeedbackJson,
+    isValidFeedbackOp: isValidFeedbackOp,
+    buildPageFeedbackRequest: buildPageFeedbackRequest,
+    buildPageClearRequest: buildPageClearRequest,
+    buildBlockFeedbackRequest: buildBlockFeedbackRequest,
+    applyFeedbackToState: applyFeedbackToState,
     requestJSON: requestJSON,
     getJSON: getJSON,
     postJSON: postJSON,

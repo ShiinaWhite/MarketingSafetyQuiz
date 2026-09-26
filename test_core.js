@@ -3,6 +3,15 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+
+/* DEV_TO_MAIN_SYNC_V1：源码守卫的行尾鲁棒性 —— merge/checkout 会按 autocrlf
+   把工作区写成 CRLF，守卫里的多行字符串模式一律按 LF 匹配（只影响本测试
+   的文本读取；JSON.parse 等对 \r\n 不敏感）。 */
+const _origReadFileSync = fs.readFileSync.bind(fs);
+fs.readFileSync = function (p, opts) {
+  const c = _origReadFileSync(p, opts);
+  return (typeof c === "string") ? c.replace(/\r\n/g, "\n") : c;
+};
 const MSQ = require("./www/js/core.js");
 
 const fails = [];
@@ -924,29 +933,42 @@ function pick(arr, n, r) {
 
 /* ---------- 真实样本采集旁路（www/js/sample-collector.js） ----------
    只测「采集不改变识别结果」与「样本数据完整」：matcher 输出是唯一事实来源。 */
-section("真实样本采集：设置默认 OFF");
+section("真实样本采集：设置（v2 公网固定 endpoint，自动上传默认 ON）");
 const MSQSample = require("./www/js/sample-collector.js");
 const memStore = () => {
   const m = {};
   return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); } };
 };
-check("默认设置 = OFF + 空地址（普通用户绝不无意上传）",
-  (() => { const s = MSQSample.normalizeSettings(undefined); return s.enabled === false && s.serverUrl === ""; })());
-check("shouldCollect：默认 OFF", MSQSample.shouldCollect(undefined) === false);
-check("shouldCollect：enabled 但无地址 = OFF", MSQSample.shouldCollect({ enabled: true, serverUrl: "" }) === false);
-check("shouldCollect：enabled + 合法地址 = ON",
-  MSQSample.shouldCollect({ enabled: true, serverUrl: "http://10.0.2.2:8787" }) === true);
-check("serverUrl 归一化：去尾斜杠",
-  MSQSample.normalizeSettings({ enabled: true, serverUrl: "http://192.168.3.20:8787/" }).serverUrl
-    === "http://192.168.3.20:8787");
-check("serverUrl 非法协议被拒", MSQSample.normalizeSettings({ serverUrl: "ftp://x" }).serverUrl === "");
+check("默认设置 = 自动上传 ON（fresh config，loadSettings 迁移层生效）",
+  (() => {
+    const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    return fresh.migrationVersion === 2 && fresh.autoUpload === true;
+  })());
+check("shouldCollect：强制 ON（SIMPLIFY_CAPTURE_FLOW_V1，用户无 opt-out）", (() => {
+  const fresh = MSQSample.loadSettings({ getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  return MSQSample.shouldCollect(fresh) === true && MSQSample.shouldCollect() === true;
+})());
+check("历史 opt-out 设置不再生效（恒 ON）", (() => {
+  const st = memStore();
+  MSQSample.saveSettings(st, { autoUpload: false });
+  return MSQSample.shouldCollect(MSQSample.loadSettings(st)) === true;
+})());
+check("v1 配置迁移：无法区分主动关闭与默认 OFF → 统一 ON", (() => {
+  const st = memStore();
+  st.setItem(MSQSample.LEGACY_SETTINGS_KEY,
+    JSON.stringify({ enabled: false, serverUrl: "http://192.168.3.39:8787" }));
+  const s = MSQSample.loadSettings(st);
+  return s.autoUpload === true && st.getItem(MSQSample.SETTINGS_KEY) !== null;
+})());
+check("PUBLIC_BASE_URL 固定公网域名（无 IP/端口）",
+  MSQSample.PUBLIC_BASE_URL === "https://update.shiinalab.top");
 {
   const st = memStore();
-  MSQSample.saveSettings(st, { enabled: true, serverUrl: "http://10.0.2.2:8787" });
+  MSQSample.saveSettings(st, { autoUpload: true });
   const back = MSQSample.loadSettings(st);
-  check("设置 localStorage 存取往返", back.enabled === true && back.serverUrl === "http://10.0.2.2:8787");
+  check("设置 v2 存取往返", back.autoUpload === true && back.migrationVersion === 2);
   st.setItem(MSQSample.SETTINGS_KEY, "{bad json");
-  check("坏 JSON 回退默认 OFF", MSQSample.loadSettings(st).enabled === false);
+  check("坏 JSON 回退默认 ON", MSQSample.loadSettings(st).autoUpload === true);
 }
 
 section("sampleId 生成");
@@ -1258,6 +1280,1024 @@ section("导航：详情来源与返回（静态守卫）");
     (appSrc3.match(/case "view-batch-results": handleBatchResultsBack\(\); return;/g) || []).length === 1);
 }
 
-console.log("\n" + "=".repeat(46));
-if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
-console.log("结果：全部通过 ✓");
+/* ---------- SELF_UPDATE_V1：应用内自更新纯逻辑 ---------- */
+section("应用自更新：updater.js（UPD-A~L）");
+const MSQUpdater = require("./www/js/updater.js");
+{
+  const goodManifest = {
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: 2, versionName: "1.0.2-dev", apkUrl: "/api/update/dev/apk",
+    sha256: "c5f8965a5c6a3f86bde2ee50d71ebc22b2bade0650e1174bbc3572a11d959abb",
+    size: 52450325, publishedAt: "2026-09-24T00:00:00Z", notes: "SELF_UPDATE_V1"
+  };
+  const v = (m, exp) => MSQUpdater.validateManifest(m, exp || { channel: "dev", packageName: "com.jty.safetyquiz.dev" });
+
+  check("UPD-A 当前1 新2 → available", MSQUpdater.checkUpdateState(1, goodManifest) === "available");
+  check("UPD-B 当前2 新2 → latest", MSQUpdater.checkUpdateState(2, goodManifest) === "latest");
+  check("UPD-C 当前3 新2 → 不允许降级", MSQUpdater.checkUpdateState(3, goodManifest) === "downgrade");
+  check("UPD-D packageName 不匹配 → reject",
+    !v(Object.assign({}, goodManifest, { packageName: "com.jty.safetyquiz" })).ok);
+  check("UPD-E channel 不匹配 → reject",
+    !v(Object.assign({}, goodManifest, { channel: "stable" })).ok);
+  check("UPD-F schemaVersion 不支持 → reject",
+    !v(Object.assign({}, goodManifest, { schemaVersion: 2 })).ok);
+  check("UPD-G sha256 非法 → reject",
+    !v(Object.assign({}, goodManifest, { sha256: "abc" })).ok);
+  check("UPD-H size 异常 → reject",
+    !v(Object.assign({}, goodManifest, { size: 0 })).ok &&
+    !v(Object.assign({}, goodManifest, { size: MSQUpdater.MAX_APK_BYTES + 1 })).ok);
+  check("合法 manifest → ok", v(goodManifest).ok);
+  check("versionCode 非整数 → reject",
+    !v(Object.assign({}, goodManifest, { versionCode: 2.5 })).ok &&
+    !v(Object.assign({}, goodManifest, { versionCode: "2" })).ok);
+
+  check("UPD-I 相对 apkUrl → 按 server 解析",
+    MSQUpdater.resolveApkUrl("http://192.168.3.39:8787", "/api/update/dev/apk")
+      === "http://192.168.3.39:8787/api/update/dev/apk");
+  check("UPD-J 绝对 https apkUrl → 保持原样",
+    MSQUpdater.resolveApkUrl("http://192.168.3.39:8787", "https://update.shiinalab.top/dev/app.apk")
+      === "https://update.shiinalab.top/dev/app.apk");
+  check("UPD-K 未配置更新服务器 → 使用内置公网默认",
+    MSQUpdater.resolveUpdateServer({}, null, "") === "https://update.shiinalab.top");
+  check("UPD-K2 显式 bundled default 可覆盖内置公网",
+    MSQUpdater.resolveUpdateServer({}, "https://example.test") === "https://example.test");
+  check("UPD-L 内置默认恒可用（不存在无服务器状态）",
+    MSQUpdater.resolveUpdateServer({}, null, undefined) === "https://update.shiinalab.top");
+  check("更新设置优先于采集设置",
+    MSQUpdater.resolveUpdateServer({ serverUrl: "https://update.shiinalab.top" },
+      { serverUrl: "http://192.168.3.39:8787" }, "") === "https://update.shiinalab.top");
+  check("渠道由 applicationId 决定（不写死 dev）",
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz.dev") === "dev" &&
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz") === "stable" &&
+    MSQUpdater.updateChannelFor("com.other.app") === null);
+  check("serverUrl 归一化（坏协议拒绝/去尾斜杠）",
+    MSQUpdater.normalizeSettings({ serverUrl: "ftp://x" }).serverUrl === "" &&
+    MSQUpdater.normalizeSettings({ serverUrl: "http://a:1/" }).serverUrl === "http://a:1");
+}
+
+/* ---------- APK_DELIVERY_COS_CDN_VC13_V1：CDN apkUrl + fallback 语义 ---------- */
+section("CDN 迁移：绝对 apkUrl / fallbackApkUrl 前向兼容 / 回退分类（UPD-CDN 系列）");
+{
+  const CDN_URL = "https://apk.shiinalab.top/dev/vc13/msq-dev-vc13.apk";
+  const manifestVc13 = {
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: 13, versionName: "1.0.13-dev",
+    apkUrl: CDN_URL,
+    fallbackApkUrl: "/api/update/dev/apk",
+    sha256: "7".repeat(64), size: 17221414,
+    publishedAt: "2026-09-26T00:00:00Z", notes: "CDN"
+  };
+  const v13 = (m) => MSQUpdater.validateManifest(m, { channel: "dev", packageName: "com.jty.safetyquiz.dev" });
+
+  check("UPD-CDN-1a 绝对 HTTPS CDN apkUrl 原样透传",
+    MSQUpdater.resolveApkUrl("https://update.shiinalab.top", CDN_URL) === CDN_URL);
+  check("UPD-CDN-1b CDN apkUrl 的 manifest 校验通过", v13(manifestVc13).ok);
+  /* #2 vc12 前向兼容：未知 fallbackApkUrl 字段不破坏校验（vc12 代码同样宽松，已实证） */
+  check("UPD-CDN-2 manifest 含 fallbackApkUrl 仍校验通过（vc12 前向兼容）", v13(manifestVc13).ok);
+  check("UPD-CDN-2b 无 fallbackApkUrl 的 manifest 同样通过（legacy 不受影响）",
+    v13(Object.assign({}, manifestVc13, { fallbackApkUrl: undefined })).ok);
+  /* #13 malformed size → manifest 校验拒绝 */
+  check("UPD-CDN-13 size 畸形（字符串/负数/非整数）→ reject",
+    !v13(Object.assign({}, manifestVc13, { size: "17221414" })).ok &&
+    !v13(Object.assign({}, manifestVc13, { size: -1 })).ok &&
+    !v13(Object.assign({}, manifestVc13, { size: 17.5 })).ok);
+
+  /* #3-10 回退分类矩阵：传输失败允许回退，安全失败一律 HARD FAIL */
+  const cls = (e) => MSQUpdater.classifyDownloadFailure(e);
+  const fb = (e) => MSQUpdater.shouldTryFallback(e);
+  check("UPD-CDN-3 DNS/IO 异常（DOWNLOAD_FAILED）→ transport，允许回退",
+    cls({ code: "DOWNLOAD_FAILED", message: "下载失败：Unable to resolve host apk.shiinalab.top" }) === "transport" &&
+    fb({ code: "DOWNLOAD_FAILED", message: "x" }) === true);
+  check("UPD-CDN-4/5/6 HTTP 503 / 429 / 408 → transport，允许回退一次",
+    [503, 500, 429, 408].every((s) =>
+      fb({ code: "HTTP_ERROR", message: "下载失败 HTTP " + s }) === true));
+  check("UPD-CDN-6b HTTP 404/403 → security，禁止回退",
+    cls({ code: "HTTP_ERROR", message: "下载失败 HTTP 404" }) === "security" &&
+    fb({ code: "HTTP_ERROR", message: "下载失败 HTTP 403" }) === false);
+  /* #7-10 安全校验失败 = HARD FAIL，绝不回退 */
+  check("UPD-CDN-7 SHA mismatch → 禁止回退",
+    fb({ code: "SHA_MISMATCH", message: "更新包校验失败（SHA256 不一致）" }) === false &&
+    cls({ code: "SHA_MISMATCH", message: "x" }) === "security");
+  check("UPD-CDN-8 package mismatch → 禁止回退",
+    fb({ code: "PACKAGE_MISMATCH", message: "x" }) === false);
+  check("UPD-CDN-9 version mismatch → 禁止回退",
+    fb({ code: "VERSION_MISMATCH", message: "x" }) === false);
+  check("UPD-CDN-10 signer mismatch / 解析失败 / 超限 / 安装前校验 → 禁止回退",
+    ["SIGNER_MISMATCH", "PARSE_FAILED", "TOO_LARGE", "VERIFY_FAILED"].every((c) =>
+      fb({ code: c, message: "x" }) === false));
+  check("UPD-CDN-10b 无 code 的拒绝（JS 侧参数错误）→ 禁止回退",
+    fb(new Error("下载地址无效")) === false);
+
+  /* fallback URL 解析：相对路径按控制面 server 拼接；缺失 → null */
+  check("UPD-CDN-11 fallbackApkUrl 相对路径 → 控制面拼接",
+    MSQUpdater.fallbackApkUrlFor(manifestVc13, "https://update.shiinalab.top") ===
+      "https://update.shiinalab.top/api/update/dev/apk");
+  check("UPD-CDN-12 无 fallbackApkUrl → null（不触发回退）",
+    MSQUpdater.fallbackApkUrlFor({ apkUrl: CDN_URL }, "https://update.shiinalab.top") === null);
+
+  /* #14 安装前二次校验仍然存在（静态守卫，防未来被误删） */
+  const pluginSrc = fs.readFileSync(path.join(__dirname, "android/app/src/main/java/com/jty/safetyquiz/UpdatePlugin.java"), "utf8");
+  const installIdx = pluginSrc.indexOf("public void installDownloadedUpdate");
+  const verifyIdx = pluginSrc.indexOf("verifyApkFile(call, apk, expectedSha256", installIdx);
+  check("UPD-CDN-14 installDownloadedUpdate 安装前二次全量校验仍在（静态守卫）",
+    installIdx >= 0 && verifyIdx > installIdx);
+  check("UPD-CDN-14b 下载校验使用多态 size 解析（getLong 陷阱修复，静态守卫）",
+    pluginSrc.includes("UpdateVerifier.flexibleLong("));
+}
+
+/* ---------- STARTUP_UPDATE_CHECK_V1：冷启动自动检查更新（SUC 系列） ----------
+   决策矩阵是纯函数；编排（createController）内部走 Promise 微任务，所以本小节
+   的编排断言在异步函数内完成，文件末尾的统一结论推迟到其完成后输出。 */
+section("启动自动检查更新：startup-update.js（SUC 系列）");
+const MSQStartupUpdate = require("./www/js/startup-update.js");
+const appSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+
+/* 决策矩阵（SUC-2~6/9 的判定核心，同步纯函数） */
+{
+  const d = (check, flags) => MSQStartupUpdate.decideStartupPrompt(check, flags || {});
+  check("SUC-2 决策：latest.versionCode > current（available）且首屏空闲 → 弹更新提示",
+    d({ ok: true, state: "available" }, { canShowNow: true }).prompt === true &&
+    d({ ok: true, state: "available" }, { canShowNow: true }).reason === "newer-version");
+  check("SUC-3 决策：latest == current（latest）→ 完全静默",
+    d({ ok: true, state: "latest" }).prompt === false);
+  check("SUC-4 决策：latest < current（downgrade）→ 完全静默",
+    d({ ok: true, state: "downgrade" }).prompt === false);
+  check("SUC-5 决策：检查失败（offline/DNS/超时/5xx 归并为 ok:false）→ 完全静默",
+    d({ ok: false }).prompt === false && d(null).prompt === false &&
+    d({ ok: false }).reason === "check-failed");
+  check("SUC-6 决策：manifest 无效（校验失败）→ 完全静默",
+    d({ ok: false, error: "更新信息 versionCode 无效" }).prompt === false);
+  check("SUC-9 决策：用户已关闭提示 → 本次 session 不再自动弹",
+    d({ ok: true, state: "available" }, { dismissed: true }).prompt === false);
+  check("SUC-9b 决策：用户已离开首屏/有弹窗（ui-busy）→ 不抢当前操作",
+    d({ ok: true, state: "available" }, { canShowNow: false }).prompt === false &&
+    d({ ok: true, state: "available" }, { canShowNow: false }).reason === "ui-busy");
+}
+
+/* 编排测试：注入 fake io，驱动与 app.js 完全相同的 controller 代码 */
+function runSucOrchestrationTests() {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const SU_CREATE = (io) => MSQStartupUpdate.createController(io);
+  const sucManifest = (vc) => ({
+    schemaVersion: 1, channel: "dev", packageName: "com.jty.safetyquiz.dev",
+    versionCode: vc, versionName: "1.0." + vc, sha256: "a".repeat(64),
+    size: 17221414, apkUrl: "https://apk.shiinalab.top/dev/vc" + vc + "/msq-dev-vc" + vc + ".apk",
+    fallbackApkUrl: "/api/update/dev/apk"
+  });
+  function makeIo(overrides) {
+    const io = {
+      calls: { fetch: 0, prompt: 0 }, logs: [], manifest: null,
+      getAppInfo: () => Promise.resolve(
+        { id: "com.jty.safetyquiz.dev", versionName: "1.0.14", versionCode: 14 }),
+      channelFor: (id) => (id === "com.jty.safetyquiz.dev" ? "dev" : null),
+      fetchLatest: function () {
+        this.calls.fetch++;
+        return this.manifest === "REJECT"
+          ? Promise.reject(new Error("simulated transport failure"))
+          : Promise.resolve(this.manifest);
+      },
+      validate: (m, exp) => MSQUpdater.validateManifest(m, exp),
+      compare: (cur, m) => MSQUpdater.checkUpdateState(cur, m),
+      canShowNow: () => true,
+      showPrompt: function (info, m) {
+        this.calls.prompt++;
+        this.promptedWith = { info: info, m: m };
+      },
+      debug: function (msg) { this.logs.push(msg); }
+    };
+    return Object.assign(io, overrides || {});
+  }
+
+  return Promise.resolve().then(async () => {
+    /* SUC-1 冷启动只触发一次检查（再触发=前台恢复/相机返回/安装器返回） */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      const c = SU_CREATE(io);
+      const r1 = c.trigger();
+      c.trigger(); c.trigger(); c.trigger();
+      await flush();
+      check("SUC-1 冷启动触发检查且整个 session 恰好一次（fetch 恰好 1 次）",
+        r1.ran === true && io.calls.fetch === 1);
+      check("SUC-1b 二次触发被拒并记 debug（后台→前台/相机返回同路径）",
+        io.logs.some((l) => l.includes("already ran this session")));
+    }
+
+    /* SUC-2 有更新 → 弹既有更新提示；SUC-12 manifest 原样透传 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(15);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      check("SUC-2 latest(15) > current(14) → 弹出更新提示一次",
+        io.calls.prompt === 1 && io.promptedWith.m.versionCode === 15 &&
+        io.promptedWith.info.versionCode === 14);
+      check("SUC-12a 启动路径把校验通过的 manifest 原样交给既有更新 UI（apkUrl/fallback/size 不变）",
+        io.promptedWith.m === io.manifest &&
+        io.promptedWith.m.apkUrl === sucManifest(15).apkUrl &&
+        io.promptedWith.m.fallbackApkUrl === "/api/update/dev/apk");
+    }
+
+    /* SUC-3/4 无更新/降级 → 完全静默 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-3 latest == current → 不弹、无 UI 状态",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("not-newer:latest")));
+    }
+    {
+      const io = makeIo(); io.manifest = sucManifest(13);
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-4 latest < current → 不弹",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("not-newer:downgrade")));
+    }
+
+    /* SUC-5 网络失败（offline/DNS/超时/5xx 在 MSQSample.getJSON 一律 reject）→ 静默 */
+    {
+      const io = makeIo(); io.manifest = "REJECT";
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-5 网络失败 → 不弹不抛错，仅非敏感 debug log",
+        io.calls.prompt === 0 &&
+        io.logs.some((l) => l.includes("startup update check failed: network/transport")));
+    }
+
+    /* SUC-6 manifest 畸形/校验失败 → 静默 */
+    {
+      const io = makeIo(); io.manifest = { foo: 1 };
+      SU_CREATE(io).trigger(); await flush();
+      check("SUC-6a 畸形 manifest → 不弹",
+        io.calls.prompt === 0 && io.logs.some((l) => l.includes("check-failed")));
+    }
+    {
+      /* 真 validateManifest 校验矩阵：schema/渠道/包名/versionCode/sha/size 全挡 */
+      const bad = [
+        null,
+        Object.assign(sucManifest(15), { schemaVersion: 2 }),
+        Object.assign(sucManifest(15), { channel: "stable" }),
+        Object.assign(sucManifest(15), { packageName: "com.other.app" }),
+        Object.assign(sucManifest(15), { versionCode: 1.5 }),
+        Object.assign(sucManifest(15), { sha256: "zz" }),
+        Object.assign(sucManifest(15), { size: -1 })
+      ];
+      const allRejected = bad.every((m) =>
+        !MSQUpdater.validateManifest(m, { channel: "dev", packageName: "com.jty.safetyquiz.dev" }).ok);
+      check("SUC-6b 真 validateManifest 挡住全部畸形 manifest（进入启动静默路径）",
+        allRejected);
+    }
+
+    /* SUC-7/8 前台恢复/相机返回不重新检查：一次性状态 + app.js 无生命周期监听器 */
+    {
+      const io = makeIo(); io.manifest = sucManifest(14);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      const n1 = io.calls.fetch;
+      c.trigger(); c.trigger(); await flush();
+      check("SUC-7/8 任何后续 trigger（=后台恢复/相机返回）都不再 fetch",
+        n1 === 1 && io.calls.fetch === 1 && c.flags().started === true);
+      check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
+        !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
+        !appSrc.includes("visibilitychange"));
+      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），就绪后才可展示",
+        appSrc.indexOf("startupUpdateCtrl.trigger();") > 0 &&
+        appSrc.indexOf("startupUpdateCtrl.trigger();") < appSrc.indexOf("loadBank().then(") &&
+        appSrc.includes("startupUiReady = true;") &&
+        appSrc.indexOf("startupUiReady = true;") > appSrc.indexOf("registerSystemBack();") &&
+        appSrc.includes("startupUpdateCtrl.markUiReady();"));
+      check("SUC17-2b canShowNow 含 startupUiReady 门（未就绪绝不展示）",
+        appSrc.includes("return startupUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
+    }
+
+    /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
+    {
+      const io = makeIo(); io.manifest = sucManifest(15);
+      const c = SU_CREATE(io);
+      c.trigger(); await flush();
+      c.markDismissed();
+      const second = c.trigger(); await flush();
+      check("SUC-9 dismiss 后再次触发（含未来误接线）也不弹",
+        io.calls.prompt === 1 && second.ran === false &&
+        c.flags().dismissed === true);
+    }
+
+    /* SUC-10/11 手动"检查更新"交互不受启动静默行为影响（源码守卫） */
+    {
+      const mIdx = appSrc.indexOf("function checkForUpdate()");
+      const endIdx = appSrc.indexOf("function updateFriendlyError", mIdx);
+      const manual = appSrc.slice(mIdx, endIdx);
+      check("SUC-10 手动 checkForUpdate 不读启动一次性/dismissed 状态（dismiss 后仍可查）",
+        mIdx > 0 && endIdx > mIdx &&
+        !manual.includes("startupUpdate") && !manual.includes("dismissed"));
+      check("SUC-11 手动检查的「已是最新版/暂不更新/无法连接」原交互保留",
+        manual.includes("已经是最新版") && manual.includes("暂不更新") &&
+        manual.includes("无法连接更新服务器"));
+    }
+
+    /* SUC-12 启动与手动共用同一获取/校验/比较/弹窗/下载/校验/安装路径（源码守卫） */
+    {
+      const bootIdx = appSrc.indexOf("STARTUP_UPDATE_CHECK_V1");
+      const startSec = appSrc.slice(bootIdx, appSrc.indexOf("清除记录", bootIdx));
+      check("SUC-12b 启动 fetch 与手动同一 endpoint/超时（/api/update/<channel>/latest, 10000）",
+        startSec.includes('"/api/update/" + channel + "/latest", 10000'));
+      check("SUC-12c 启动校验/比较直接调用 MSQUpdater.validateManifest/checkUpdateState",
+        startSec.includes("MSQUpdater.validateManifest(manifest, expected)") &&
+        startSec.includes("MSQUpdater.checkUpdateState(currentVersionCode, manifest)"));
+      check("SUC-12d 启动提示为 Modal（VC16），「立即更新」进入既有更新页与下载链",
+        startSec.includes("function showStartupUpdateModal") &&
+        startSec.includes("Modal.open(function (box)") &&
+        startSec.includes("openUpdateView(true)") &&
+        !startSec.includes('show("view-update")'));
+      const dlIdx = appSrc.indexOf("function startUpdateDownload()");
+      const dl = appSrc.slice(dlIdx, appSrc.indexOf("function afterDownloadVerified", dlIdx));
+      check("SUC-12e 下载/回退/校验仍走同一 UpdatePlugin 路径（resolveApkUrl/shouldTryFallback/verifier）",
+        dl.includes("MSQUpdater.resolveApkUrl") && dl.includes("MSQUpdater.shouldTryFallback") &&
+        dl.includes("MSQUpdater.fallbackApkUrlFor") && dl.includes("Update.downloadUpdate") &&
+        dl.includes("sha256: updateManifest.sha256") &&
+        dl.includes("expectedPackageName: updateInfo.id"));
+    }
+
+    /* ====== VC17：启动检查提前并行（fetch 与初始化重叠，就绪后才展示） ====== */
+    {
+      /* SUC17-3 fetch 先完成 → menu ready 后立即 Modal */
+      const ioA = makeIo(); ioA.manifest = sucManifest(15);   /* 对 current=14 为 available */
+      ioA.canShowNow = () => false;                            /* UI 未就绪 */
+      const cA = SU_CREATE(ioA);
+      cA.trigger(); await flush();
+      check("SUC17-3a fetch 先完成但 UI 未就绪 → 暂存不弹",
+        ioA.calls.prompt === 0 && cA.flags().pendingPrompt === true);
+      ioA.canShowNow = () => true;                             /* 主菜单就绪且空闲 */
+      cA.markUiReady(); await flush();
+      check("SUC17-3b menu ready → 立即弹（网络与初始化时间重叠）",
+        ioA.calls.prompt === 1 && cA.flags().pendingPrompt === false &&
+        cA.flags().uiReady === true);
+
+      /* SUC17-4 menu 先就绪 → fetch 返回后立即弹 */
+      const ioB = makeIo(); ioB.manifest = sucManifest(15);
+      const cB = SU_CREATE(ioB);
+      cB.markUiReady();
+      cB.trigger(); await flush();
+      check("SUC17-4 menu 先 ready → fetch 返回后立即 Modal",
+        ioB.calls.prompt === 1 && cB.flags().pendingPrompt === false);
+
+      /* SUC17-5 UI 已就绪但用户已离开首页 → 放弃（不抢弹、不暂存） */
+      const ioC = makeIo(); ioC.manifest = sucManifest(15);
+      ioC.canShowNow = () => false;
+      const cC = SU_CREATE(ioC);
+      cC.markUiReady();               /* 就绪，但 canShowNow=false = 用户在别处/弹窗中 */
+      cC.trigger(); await flush();
+      check("SUC17-5 user 已离开 menu → 直接放弃",
+        ioC.calls.prompt === 0 && cC.flags().pendingPrompt === false &&
+        ioC.logs.some((l) => l.includes("ui-busy")));
+
+      /* SUC17-8/9 一次性与 dismiss 语义在暂存态下依然成立 */
+      const ioD = makeIo(); ioD.manifest = sucManifest(15);
+      ioD.canShowNow = () => false;
+      const cD = SU_CREATE(ioD);
+      cD.trigger(); await flush();
+      const rD2 = cD.trigger(); await flush();
+      cD.markDismissed();
+      ioD.canShowNow = () => true;
+      cD.markUiReady(); await flush();
+      check("SUC17-8/9 暂存态下二次触发无效、dismiss 后即使就绪也不弹",
+        rD2.ran === false && ioD.calls.fetch === 1 && ioD.calls.prompt === 0 &&
+        cD.flags().dismissed === true && cD.flags().pendingPrompt === false);
+    }
+  });
+}
+
+/* ---------- SIMPLIFY_CAPTURE_FLOW_V1：界面收口 + 后台 best-effort 采集（CAP 系列） ---------- */
+section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯函数）");
+{
+  const indexSrc = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  /* —— UI16-1 首页无「拍整页搜题」大按钮；UI16-2 搜题页相机仍直拍 —— */
+  check("UI16-1 首页相机入口已删除（VC16），只保留搜题入口",
+    !appSrc.includes("btn-camera-entry") && !appSrc.includes("拍整页搜题") &&
+    appSrc.includes('searchBtn.id = "btn-search-entry";'));
+  check("UI16-2 搜题框右侧相机仍直接调用 startBatchPageSearch",
+    appSrc.includes('$("btn-batch-photo").addEventListener("click", startBatchPageSearch);'));
+
+  /* —— CAP-S2 不再导航到旧整页拍照页面 —— */
+  check("CAP-S2a index.html 已删除 view-batch-photo 中转页",
+    !indexSrc.includes("view-batch-photo") && !indexSrc.includes("btn-take-page") &&
+    !indexSrc.includes("batch-type-row"));
+  check("CAP-S2b app.js 不再出现旧页面导航/选择器代码",
+    !appSrc.includes('show("view-batch-photo")') && !appSrc.includes("openBatchPhoto") &&
+    !appSrc.includes("initBatchTypes") && !appSrc.includes("handleBatchBack") &&
+    !appSrc.includes("batchPageType"));
+
+  /* —— CAP-S3 相机取消回入口页（menu 入口 = 首页） —— */
+  check("CAP-S3 相机取消：非权限错误静默回入口页，权限错误 Modal 提示",
+    appSrc.includes("var captureOriginView") &&
+    appSrc.includes("captureOriginView = (currentViewId() === \"view-search\") ? \"view-search\" : \"view-menu\";") &&
+    appSrc.includes("show(captureOriginView);") &&
+    appSrc.includes("/permission|denied/i.test(msg)") &&
+    appSrc.includes('Modal.alert("无法使用相机", "请授予相机权限后重试");'));
+
+  /* —— CAP-S4 AUTO_PAGE_TYPE 固定生效 —— */
+  check("CAP-S4 拍摄固定 AUTO（recompute 传 \"auto\"，pageTypeMode 恒 auto，无拍摄前选择）",
+    appSrc.includes('MSQ.recomputePageFromLines(batchIndex, lines, "auto",') &&
+    appSrc.includes('pageTypeMode: "auto"') && !appSrc.includes("batch-type-row"));
+
+  /* —— CAP-S5 结果页题型人工纠错保留 —— */
+  check("CAP-S5 结果页仍可切题型重算（switchBatchPageType/buildBatchTypeLine 完整，零重新 OCR）",
+    appSrc.includes("function switchBatchPageType(mode)") &&
+    appSrc.includes("function buildBatchTypeLine(state)") &&
+    appSrc.includes('["auto", "single", "multi", "judge"].forEach'));
+
+  /* —— CAP-S6 sample 仍后台自动 persist（无 opt-out） —— */
+  check("CAP-S6 collectAndUploadSample 无条件持久化（无 shouldCollect 分支）",
+    appSrc.includes("Queue.persistSample({") &&
+    !/shouldCollect\(/.test(appSrc) &&
+    appSrc.indexOf("lastSampleUpload = {") < appSrc.indexOf("Queue.persistSample({"));
+
+  /* —— CAP-S7 COS queue 仍自动处理（worker 链路零改动） —— */
+  check("CAP-S7 原生 worker 链路未动（init 恢复 + startWorker + processSample 三步直传）",
+    pluginSrc.includes("SampleQueueModel.normalizeStatusOnBoot") &&
+    pluginSrc.includes("private void startWorker()") &&
+    pluginSrc.includes('serverUrl + "/api/sample/init"') &&
+    pluginSrc.includes('serverUrl + "/api/sample/commit"'));
+
+  /* —— CAP-S8/9/10 样本失败完全静默且不影响拍题主链 —— */
+  check("CAP-S8 collectAndUploadSample 整体 try/catch 兜底（样本异常不可能打断拍题）",
+    appSrc.indexOf("function collectAndUploadSample(state)") > 0 &&
+    /function collectAndUploadSample\(state\) \{\s*\n\s*renderSampleFeedbackVisibility\(\);\s*\n\s*try \{/.test(appSrc));
+  check("CAP-S9 持久化失败无任何 UI 提示（仅 console 诊断）",
+    !appSrc.includes("本页样本未能保存") &&
+    !/persistSample[\s\S]{0,600}showFeedbackToast/.test(appSrc) &&
+    appSrc.includes('sampleDebug("persist failed (silent): "'));
+  check("CAP-S9b 旧状态行/清理按钮/测试连接/采集面板代码已全部移除",
+    !appSrc.includes("renderQueueStatus") && !appSrc.includes("cleanupFailedSamples") &&
+    !appSrc.includes("btn-sample-cleanup") && !appSrc.includes("btn-sample-test") &&
+    !appSrc.includes("sample-queue-status") && !appSrc.includes("setBatchStatus"));
+  check("CAP-S10 原生侧无 Toast/通知（上传失败只改状态后台重试）",
+    !pluginSrc.includes("android.widget.Toast") && !pluginSrc.includes("NotificationManager"));
+
+  /* —— CAP-S11 feedback 持久化协议不退化 —— */
+  check("CAP-S11 persistFeedback 仍走本地队列补传，失败仅 console（提交动作 UI 不变）",
+    appSrc.includes("Queue.persistFeedback({") &&
+    appSrc.includes('sampleDebug("feedback persist failed (silent): "') &&
+    !/persistFeedback[\s\S]{0,600}showFeedbackToast\("反馈保存失败/.test(appSrc));
+
+  /* —— CAP-S17/18 普通 UI 无任何 sample 配置与域名 —— */
+  check("CAP-S17 index.html 无样本采集配置区",
+    !indexSrc.includes("sample-panel") && !indexSrc.includes("sample-enabled") &&
+    !indexSrc.includes("测试样本采集") && !indexSrc.includes("自动上传测试样本") &&
+    !indexSrc.includes("同步状态"));
+  check("CAP-S18 UI 不含服务器/CDN/COS 域名",
+    !indexSrc.includes("shiinalab") && !appSrc.includes("shiinalab") &&
+    !indexSrc.includes("apk.shiinalab") && !indexSrc.includes("update.shiinalab"));
+
+  /* —— DIAG 系列：DEV 隐藏诊断入口 = 检查更新页「当前版本」整行 7 连击 —— */
+  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（仅 dev 渠道；块级整行可点）",
+    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) === "dev"') &&
+    appSrc.indexOf('renderUpdateView("当前版本："') < appSrc.indexOf("bindDevDiagTap(statusEl)") &&
+    appSrc.includes("function bindDevDiagTap(el)") &&
+    appSrc.includes("devDiagTaps.count >= 7"));
+  check("DIAG-3/4 计数逻辑：>=7 才进入，超 3 秒重置",
+    appSrc.includes("now - devDiagTaps.firstAt > 3000") &&
+    appSrc.includes("if (devDiagTaps.count >= 7) {"));
+  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel 非 dev 直接跳过）",
+    appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+    MSQSample.diagnosticsChannel("com.other.app") === null);
+  check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路）",
+    appSrc.includes('$("btn-devdiag-back").addEventListener("click", function () { openUpdateView(); });') &&
+    appSrc.includes('case "view-devdiag": openUpdateView(); return;'));
+  check("DIAG-7 首页不再存在诊断版本行（menu-version 全删）",
+    !indexSrc.includes("menu-version") && !appSrc.includes("menu-version") &&
+    !appSrc.includes("initDevDiagnostics"));
+
+  /* —— DIAG17：诊断页显示层全中文（VC17；底层 enum 不动） —— */
+  check("DIAG17-2 状态 enum 中文映射纯函数（内部值不变，含 auth_failed 别名）",
+    MSQSample.diagnosticStatusLabel("pending") === "待上传" &&
+    MSQSample.diagnosticStatusLabel("retry_wait") === "等待重试" &&
+    MSQSample.diagnosticStatusLabel("uploading") === "正在上传" &&
+    MSQSample.diagnosticStatusLabel("capture_uploaded") === "照片已上传" &&
+    MSQSample.diagnosticStatusLabel("synced") === "已同步" &&
+    MSQSample.diagnosticStatusLabel("failed") === "失败" &&
+    MSQSample.diagnosticStatusLabel("auth_failed") === "需要重新绑定" &&
+    MSQSample.diagnosticStatusLabel("auth_required") === "需要重新绑定");
+  check("DIAG17-2b 反馈同步状态中文映射", MSQSample.feedbackSyncLabel(0) === "已同步" &&
+    MSQSample.feedbackSyncLabel(2) === "待上传 ×2");
+  {
+    const ddIdx = appSrc.indexOf("function renderDevDiagnostics()");
+    const dd = appSrc.slice(ddIdx, appSrc.indexOf("/* ---------------- 应用内自更新", ddIdx));
+    check("DIAG17-1 诊断页渲染仅中文标签（旧英文标签全删）",
+      dd.includes('"待上传样本"') && dd.includes('"等待重试"') && dd.includes('"上传失败"') &&
+      dd.includes('"需要重新绑定"') && dd.includes('"队列占用空间"') &&
+      dd.includes('"最老样本等待时间"') && dd.includes('"最近上传速度"') &&
+      dd.includes('"上次自动清理"') && dd.includes('"上次清理样本数"') &&
+      dd.includes('"上次释放空间"') && dd.includes('"最近反馈同步状态"') &&
+      !dd.includes('"pending"') && !dd.includes('"retry_wait"') &&
+      !dd.includes('"failed"') && !dd.includes('"queue total bytes"') &&
+      !dd.includes('"oldest sample age"') && !dd.includes('"last janitor"') &&
+      !dd.includes('"last feedback sync"') && !dd.includes('"Run janitor now"') &&
+      !dd.includes('"Retry queue now"'));
+    check("DIAG17-3 两个操作按钮中文（立即清理/立即重试）",
+      dd.includes('"立即清理"') && dd.includes('"立即重试"'));
+    check("DIAG17-1b 诊断页标题中文（开发者诊断）",
+      indexSrc.includes("开发者诊断") && !indexSrc.includes("Developer Diagnostics"));
+    check("DIAG17 诊断页不渲染任何域名/endpoint/objectKey",
+      !dd.includes("shiinalab") && !dd.includes("objectKey") &&
+      !dd.includes("presigned") && !dd.includes("serverUrl"));
+  }
+
+  /* —— UI16-4~9/13 启动更新 Modal（源码守卫；行为在 nav_test 实测） —— */
+  {
+    const mIdx = appSrc.indexOf("function showStartupUpdateModal");
+    const modalFn = mIdx > 0
+      ? appSrc.slice(mIdx, appSrc.indexOf("function handleUpdateBack", mIdx))
+      : "";
+    check("UI16-4 Modal 内容只有版本信息与简短 notes（≤60 字截断）",
+      modalFn.includes('"发现新版本"') && modalFn.includes('"最新版本："') &&
+      modalFn.includes("当前版本：") && modalFn.includes("notes.length > 60"));
+    check("UI16-4b Modal 绝不含 apkUrl/fallback/域名/SHA/size/诊断字段",
+      !/apkUrl|fallbackApkUrl|sha256|shiinalab|versionCode/.test(modalFn.replace(/[^;]*notes[^;]*;/g, "")) &&
+      !modalFn.includes("manifest.size") && !modalFn.includes("manifest.sha256"));
+    check("UI16-5 启动不再自动导航（showPrompt 只调 Modal；Modal 内无页面跳转）",
+      appSrc.includes("showPrompt: function (info, manifest) {\n          showStartupUpdateModal(info, manifest);\n        }") &&
+      !modalFn.includes('show("') && !modalFn.includes("renderMenu"));
+    check("UI16-6 稍后 = 仅关闭 Modal 留在当前页（不导航）",
+      /稍后[^;]*barbtn cancel[^;]*function \(\) \{ Modal\.close\(\); \}/.test(modalFn.replace(/\r?\n/g, "")));
+    check("UI16-7/8 任何关闭路径都 markDismissed（本 session 不再弹；Back=稍后）",
+      modalFn.includes("Modal.onClose = function () {") &&
+      modalFn.includes("markDismissed()") &&
+      appSrc.includes("var cb = this.onClose;") &&
+      appSrc.includes("if (Modal.isOpen()) { Modal.close(); return; }"));
+    check("UI16-9 立即更新 → openUpdateView(true)（autostart 复用既有 checkForUpdate/下载链）",
+      modalFn.includes("openUpdateView(true)") &&
+      appSrc.includes("if (autostart === true) { checkForUpdate(); }") &&
+      appSrc.includes('$("btn-update").addEventListener("click", function () { openUpdateView(); });'));
+    check("UI16-13 抢操作守卫：canShowNow 仍是「首屏 + 无弹窗」",
+      appSrc.includes("currentViewId() === \"view-menu\" && !Modal.isOpen()"));
+    check("UI16 遮罩不关闭（modal-root 无点击关闭处理器）",
+      !appSrc.includes('this.root.addEventListener("click"') &&
+      !/modal-root[\s\S]{0,120}addEventListener\("click"/.test(appSrc));
+  }
+  check("CAP-S20b 诊断内容守卫：无 token/URL/Authorization 字段",
+    !appSrc.includes("presignedPutUrl") && !appSrc.includes("Authorization") &&
+    !appSrc.includes("MSQ_SAMPLE_WRITE_TOKEN") &&
+    pluginSrc.includes("public void getDiagnostics"));
+
+  /* —— Janitor 调度守卫（逻辑在 JVM：SampleQueueJanitorTest） —— */
+  check("CAP-JAN 调度三时机：cold init / worker 空转 / runJanitorNow（均串行于 worker 线程）",
+    /workerExecutor\.execute[\s\S]{0,120}runJanitor\(false\)/.test(pluginSrc) &&
+    pluginSrc.includes("runJanitor(false);\n                return;") &&
+    pluginSrc.includes("public void runJanitorNow") &&
+    modelSrc.includes("JANITOR_MIN_INTERVAL_MS") &&
+    modelSrc.includes("QUEUE_HARD_LIMIT_BYTES = 256L * 1024 * 1024") &&
+    modelSrc.includes("JANITOR_FAILED_RETENTION_MS = 7L * 24 * 3600 * 1000") &&
+    modelSrc.includes("JANITOR_PENDING_RETENTION_MS = 14L * 24 * 3600 * 1000"));
+}
+
+/* ---------- APK_CDN_STABILITY_DIAG_V1：下载链路诊断（CDN-D 系列） ---------- */
+section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
+{
+  const MSQDownloadDiag = require("./www/js/apk-download-diag.js");
+  const st = memStore();
+
+  /* CDN-D1 primary CDN success → transport=cdn */
+  const d1 = MSQDownloadDiag.buildSuccessRecord({
+    transport: "cdn", fallbackUsed: false, fallbackReason: null,
+    result: { httpStatus: 200, bytes: 17211763, downloadMs: 12345, cacheStatus: "Cache Hit" }
+  });
+  check("CDN-D1 primary 成功 → transport=cdn / finalHost=CDN / cache=hit / ok=true",
+    d1.apkDownloadTransport === "cdn" && d1.apkFinalHost === "CDN" &&
+    d1.apkCacheStatus === "hit" && d1.downloadOk === true &&
+    d1.apkHttpStatus === 200 && d1.apkFallbackUsed === false);
+
+  /* CDN-D2 transport error → fallbackUsed=true（legacy 成功覆盖为最终态） */
+  const d2fail = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "DOWNLOAD_FAILED", message: "下载失败：connect timeout" }
+  });
+  const d2ok = MSQDownloadDiag.buildSuccessRecord({
+    transport: "legacy", fallbackUsed: true, fallbackReason: d2fail.apkFallbackReason,
+    result: { httpStatus: 200, bytes: 17211763, downloadMs: 45678, cacheStatus: "Cache Hit" }
+  });
+  check("CDN-D2 回退链：cdn 失败后 legacy 成功 → transport=legacy / fallbackUsed=true",
+    d2fail.downloadOk === false && d2ok.apkDownloadTransport === "legacy" &&
+    d2ok.apkFallbackUsed === true && d2ok.apkFallbackReason === "DOWNLOAD_FAILED" &&
+    d2ok.apkFinalHost === "Legacy");
+  MSQDownloadDiag.save(st, d2ok);
+  const d2loaded = MSQDownloadDiag.load(st);
+  check("CDN-D2b 保存/加载往返一致（同 store key，最终态可回读）",
+    d2loaded && d2loaded.apkDownloadTransport === "legacy" &&
+    d2loaded.apkFallbackUsed === true && d2loaded.downloadOk === true);
+
+  /* CDN-D3 HTTP 5xx → fallback reason recorded（仅 code+状态，无原始消息） */
+  const d3 = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "HTTP_ERROR", message: "下载失败 HTTP 503" }
+  });
+  check("CDN-D3 HTTP 5xx → 原因记录含状态码（HTTP_ERROR HTTP 503），原始消息不留存",
+    d3.apkFallbackReason === "HTTP_ERROR HTTP 503" && d3.apkHttpStatus === 503 &&
+    d3.downloadOk === false && d3.apkDownloadBytes === null);
+
+  /* CDN-D4 security mismatch → no fallback（记录保持 cdn + 失败） */
+  const d4 = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "SHA_MISMATCH", message: "更新包校验失败（SHA256 不一致）" }
+  });
+  check("CDN-D4 安全校验失败 → 不回退（fallbackUsed=false，原因=SHA_MISMATCH）",
+    d4.apkDownloadTransport === "cdn" && d4.apkFallbackUsed === false &&
+    d4.apkFallbackReason === "SHA_MISMATCH" && d4.apkHttpStatus === null &&
+    d4.apkFinalHost === "CDN");
+
+  /* CDN-D5 legacy success → transport=legacy */
+  const d5 = MSQDownloadDiag.buildSuccessRecord({
+    transport: "legacy", fallbackUsed: true, fallbackReason: "DOWNLOAD_FAILED",
+    result: { httpStatus: 200, bytes: 17193159, downloadMs: 30000, cacheStatus: undefined }
+  });
+  check("CDN-D5 legacy 成功 → transport=legacy / finalHost=Legacy",
+    d5.apkDownloadTransport === "legacy" && d5.apkFinalHost === "Legacy" &&
+    d5.downloadOk === true);
+
+  /* CDN-D6 speed calculation correct */
+  check("CDN-D6 速度计算：17211763B / 12345ms → 1394229 B/s",
+    d1.apkBytesPerSec === Math.round(17211763 * 1000 / 12345) &&
+    d1.apkBytesPerSec === 1394229);
+  check("CDN-D6b 无耗时/零耗时 → 速度为 null（不伪造）",
+    MSQDownloadDiag.buildSuccessRecord({
+      transport: "cdn", fallbackUsed: false, fallbackReason: null,
+      result: { httpStatus: 200, bytes: 100, downloadMs: 0, cacheStatus: "Cache Hit" }
+    }).apkBytesPerSec === null);
+
+  /* CDN-D7 diagnostics contains no credential / domain */
+  const d7 = MSQDownloadDiag.sanitize({
+    schemaVersion: 1, updatedAt: "2026-09-26T09:00:00.000Z", downloadOk: true,
+    apkDownloadTransport: "cdn",
+    apkFallbackReason: "Unknown host apk.shiinalab.top with token=abc",
+    apkHttpStatus: "https://evil.example/snimische",
+    someUnknownKey: "should be dropped",
+    apkFinalHost: "CDN"
+  });
+  const d7text = JSON.stringify(d7);
+  check("CDN-D7 黑名单子串（域名/URL/token）全部过滤，未知键丢弃",
+    !d7text.includes("shiinalab") && !d7text.includes("https://") &&
+    !d7text.includes("token") && !("someUnknownKey" in d7) &&
+    d7.apkFallbackReason === "[filtered]" && d7.apkHttpStatus === "[filtered]");
+  check("CDN-D7b FORBIDDEN 黑名单覆盖任务要求项",
+    ["apk.shiinalab.top", "update.shiinalab.top", "authorization", "secret",
+      "presigned", "cookie"].every((f) => MSQDownloadDiag.FORBIDDEN.indexOf(f) >= 0));
+
+  /* CDN-D8 cache status unknown handled safely */
+  check("CDN-D8 缓存状态解析：明确 indicator 才映射，缺失/未知 → unknown",
+    MSQDownloadDiag.normalizeCacheStatus(undefined) === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus(null) === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus("") === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus("Cache Hit") === "hit" &&
+    MSQDownloadDiag.normalizeCacheStatus("Cache Miss") === "miss" &&
+    MSQDownloadDiag.normalizeCacheStatus("X-Whatever") === "unknown" &&
+    d5.apkCacheStatus === "unknown");
+
+  /* native 侧诊断字段守卫（无 URL/域名落盘） */
+  const updSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/UpdatePlugin.java"), "utf8");
+  check("CDN-D9 native resolve 携带非敏感诊断字段 + X-Cache-Lookup 解析，不含域名/URL",
+    updSrc.includes('ret.put("httpStatus", status)') &&
+    updSrc.includes('ret.put("downloadMs", downloadMs)') &&
+    updSrc.includes('ret.put("bytesPerSec"') &&
+    updSrc.includes('ret.put("cacheStatus", cacheStatus)') &&
+    updSrc.includes('getHeaderField("X-Cache-Lookup")') &&
+    !updSrc.includes("shiinalab") && !/ret\.put\("(url|host|finalHost)"/.test(updSrc));
+  check("CDN-D9b 诊断模块已接入 app.js 下载链路与 DEV 诊断页（仅 DEV 可见）",
+    appSrc.includes("diag.buildSuccessRecord({") && appSrc.includes("diag.buildFailureRecord({") &&
+    appSrc.includes('add("最近下载来源"') && appSrc.includes('add("是否发生回退"'));
+}
+
+/* ---------- DEV_TO_MAIN_SYNC_V1：MAIN/STABLE 构建边界守卫（MAIN-1~8） ---------- */
+section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
+{
+  const gradleSrc = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const mainStrings = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/values/strings.xml"), "utf8");
+  const devStrings = fs.readFileSync(path.join(__dirname,
+    "android/app/src/dev/res/values/strings.xml"), "utf8");
+  const pubSrc = fs.readFileSync(path.join(__dirname, "tools/dev_update/publish.js"), "utf8");
+  const cospubSrc = fs.readFileSync(path.join(__dirname, "tools/dev_update/cos_publish.js"), "utf8");
+  const indexSrcMain = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+
+  check("MAIN-1 stable package id 正确（defaultConfig 无后缀，.dev 仅在 dev buildType）",
+    gradleSrc.includes('applicationId "com.jty.safetyquiz"') &&
+    gradleSrc.includes("applicationIdSuffix '.dev'") &&
+    !/applicationId\s+"com\.jty\.safetyquiz\.dev"/.test(gradleSrc));
+  check("MAIN-2 stable label 正确（main=营销安规刷题，dev overlay=营销安规刷题 DEV）",
+    mainStrings.includes(">营销安规刷题<") &&
+    !mainStrings.includes("营销安规刷题 DEV") &&
+    devStrings.includes(">营销安规刷题 DEV<"));
+  check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
+    MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
+    appSrc.includes('diagnosticsChannel(updateInfo.id) === "dev"'));
+  check("MAIN-4 sample config UI 不存在（stable 与 dev 共用同一收口后 UI）",
+    !indexSrcMain.includes("sample-panel") && !indexSrcMain.includes("自动上传测试样本") &&
+    !indexSrcMain.includes("测试连接") && !indexSrcMain.includes("sample-enabled"));
+  check("MAIN-5 AUTO sample collection 生效（shouldCollect 恒 ON）",
+    MSQSample.shouldCollect() === true);
+  {
+    const dbgStart = gradleSrc.indexOf("debug {");
+    const devStart = gradleSrc.indexOf("dev {");
+    const dcStart = gradleSrc.indexOf("defaultConfig {");
+    const dcEnd = gradleSrc.indexOf("buildFeatures {");
+    check("MAIN-6 DEV_ARM64_ONLY 仅作用于 dev buildType（stable 保持全 ABI）",
+      dbgStart > 0 && devStart > dbgStart &&
+      gradleSrc.slice(dbgStart, devStart).indexOf("DEV_ARM64_ONLY") < 0 &&
+      gradleSrc.slice(dbgStart, devStart).indexOf("abiFilters") < 0 &&
+      dcStart > 0 && dcEnd > dcStart &&
+      gradleSrc.slice(dcStart, dcEnd).indexOf("abiFilters") < 0 &&
+      gradleSrc.slice(devStart).indexOf('project.findProperty("DEV_ARM64_ONLY")') >= 0);
+    check("R8/shrinkResources 为共享能力（stable 发布路径 debug buildType 同样启用）",
+      gradleSrc.slice(dbgStart, devStart).includes("minifyEnabled true") &&
+      gradleSrc.slice(dbgStart, devStart).includes("shrinkResources true") &&
+      gradleSrc.slice(dbgStart, devStart).includes("proguardFiles"));
+  }
+  check("MAIN-7 stable updater 走 stable 渠道（updateChannelFor 映射正确）",
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz") === "stable" &&
+    MSQUpdater.updateChannelFor("com.jty.safetyquiz.dev") === "dev");
+  check("MAIN-8 当前 publisher 仅输出 dev 渠道（stable 发布路径未接线，不混用 /dev/）",
+    cospubSrc.includes('const APK_PREFIX = "dev"') &&
+    pubSrc.includes('release", "updates", "dev') &&
+    !pubSrc.includes("stable/") && !cospubSrc.includes("stable/"));
+}
+
+/* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
+section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
+{
+  const A = "20260924_100000_aa11aa";
+  const B = "20260924_100001_bb22bb";
+  let stA = MSQSample.feedbackInitialState();
+  check("FB-P1 新 sample 初始未反馈",
+    stA.pageTypes.length === 0 && Object.keys(stA.blocks).length === 0);
+  const opSet = MSQSample.buildPageFeedbackRequest(A, ["missing_question", "other"]);
+  check("FB-P set 请求结构（action/scope/issueTypes）",
+    opSet.action === "set" && opSet.scope === "page" &&
+    opSet.issueTypes.join() === "missing_question,other");
+  stA = MSQSample.applyFeedbackToState(stA, opSet);
+  check("FB-P2 提交后 A 已反馈（2 项，排序去重）",
+    stA.pageTypes.join() === "missing_question,other");
+  const stA2 = MSQSample.applyFeedbackToState(stA,
+    MSQSample.buildPageFeedbackRequest(A, ["missing_question", "other"]));
+  check("FB-P7 重复 set 同 issue 不产生重复",
+    stA2.pageTypes.join() === "missing_question,other");
+  const stB = MSQSample.feedbackInitialState();
+  check("FB-P3/P4 新 sample B 初始未反馈，A 的反馈不污染 B",
+    stB.pageTypes.length === 0 && stA.pageTypes.length === 2);
+  const stA3 = MSQSample.applyFeedbackToState(stA,
+    MSQSample.buildPageFeedbackRequest(A, ["other"]));
+  check("FB-P5 修改反馈 = 全量替换",
+    stA3.pageTypes.join() === "other" && stA.pageTypes.length === 2);
+  const stA4 = MSQSample.applyFeedbackToState(stA3, MSQSample.buildPageClearRequest(A));
+  check("FB-P6 清除反馈 → pageIssues 清空", stA4.pageTypes.length === 0);
+
+  const block = { screenNumber: "27", rawScreenNumber: "27", numberSource: "ocr",
+    type: "single", answer: "A", confidence: "low", bankId: 123,
+    matches: [{ id: 123 }, { id: 5 }, { id: 9 }], matchesAssisted: false };
+  block.matches.assistedByOptions = false;
+  const setOp = MSQSample.buildBlockFeedbackRequest(A, "set", 2, block);
+  check("FB-B4 block payload 字段完整且不猜正确答案",
+    setOp.action === "set" && setOp.scope === "block" && setOp.issue === "wrong_answer" &&
+    setOp.blockIndex === 2 && setOp.block.screenNumber === "27" &&
+    setOp.block.finalAnswer === "A" && setOp.block.confidence === "low" &&
+    setOp.block.finalBankId === 123 && setOp.block.matchedByOptions === false &&
+    setOp.block.rawScreenNumber === "27" && setOp.block.numberSource === "ocr");
+  check("FB-B4 不包含 Top2/candidate 等被猜测的真值字段",
+    setOp.block.expectedAnswer === undefined && setOp.block.expectedBankId === undefined);
+  let stB2 = MSQSample.feedbackInitialState();
+  stB2 = MSQSample.applyFeedbackToState(stB2, setOp);
+  check("FB-B1 block set 后状态已标错", stB2.blocks["2:wrong_answer"] === true);
+  stB2 = MSQSample.applyFeedbackToState(stB2,
+    MSQSample.buildBlockFeedbackRequest(A, "set", 3, block));
+  check("FB-B3 block3 标错不影响 block2",
+    stB2.blocks["2:wrong_answer"] === true && stB2.blocks["3:wrong_answer"] === true);
+  stB2 = MSQSample.applyFeedbackToState(stB2,
+    MSQSample.buildBlockFeedbackRequest(A, "remove", 2, null));
+  check("FB-B2 remove 撤销 block2",
+    stB2.blocks["2:wrong_answer"] === undefined && stB2.blocks["3:wrong_answer"] === true);
+  check("非法 op 被拒绝（不应用）",
+    !MSQSample.isValidFeedbackOp({ action: "set", scope: "page", sampleId: A, issueTypes: ["nope"] }) &&
+    !MSQSample.isValidFeedbackOp({ action: "set", scope: "block", sampleId: A, issue: "wrong_answer", blockIndex: -1, block: {} }) &&
+    !MSQSample.isValidFeedbackOp({ action: "nope", scope: "page", sampleId: A }));
+}
+
+section("持久化队列：公网固定 endpoint（源码守卫）");
+{
+  const joined = ["www/js/sample-collector.js", "www/js/updater.js", "www/js/app.js"]
+    .map((f) => fs.readFileSync(path.join(__dirname, f), "utf8")).join("\n");
+  check("业务 JS 无内网地址/端口残留",
+    !joined.includes("192.168.") && !joined.includes(":8787"));
+  check("业务 JS 无 LAN fallback / 自动发现逻辑",
+    !joined.includes("lanFallback") && !joined.includes("discoverLan"));
+  check("默认 sample/update endpoint 均为 update.shiinalab.top",
+    MSQSample.PUBLIC_BASE_URL === "https://update.shiinalab.top" &&
+    MSQUpdater.PUBLIC_BASE_URL === "https://update.shiinalab.top");
+}
+
+/* ---------- QUEUE_RECOVERY_AND_CLEANUP_V1：恢复与清理（源码/结构守卫） ---------- */
+section("队列恢复与清理：generation 与 cleanup 守卫");
+{
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  check("REC-S1 启动恢复调用 shouldAutoRecoverAuthFailed（generation 判定）",
+    pluginSrc.includes("shouldAutoRecoverAuthFailed(st, authGeneration())"));
+  check("CLEAN-S1 cleanupFailed 只允许 failed/auth_failed（源码白名单）",
+    pluginSrc.includes("STATUS_FAILED.equals(status)") &&
+    pluginSrc.includes("STATUS_AUTH_FAILED.equals(status)") &&
+    pluginSrc.indexOf("cleanupFailed") > 0);
+  const cleanupFn = pluginSrc.slice(pluginSrc.indexOf("public void cleanupFailed"));
+  check("CLEAN-S2 非失败状态不被清理路径触碰（cleanupEligible 白名单语义）",
+    cleanupFn.includes("cleanupEligible") &&
+    !cleanupFn.includes("STATUS_PENDING.equals(cleanupStatus)") &&
+    !cleanupFn.includes("STATUS_UPLOADING.equals(cleanupStatus)") &&
+    !cleanupFn.includes("STATUS_RETRY_WAIT.equals(cleanupStatus)"));
+  check("AUTH-GEN BuildConfig 字段已声明（非秘密整数）",
+    fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8")
+      .includes("MSQ_SAMPLE_AUTH_GENERATION"));
+}
+
+/* ---------- R2_FAST_TRANSFER_V1：大文件数据面迁移（源码/结构守卫） ---------- */
+section("R2 直传：客户端只用 init→PUT→commit，且不落盘 presigned URL");
+{
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  check("R2-Q1 新客户端不再调用 legacy POST /api/sample（只走 init/commit）",
+    !pluginSrc.includes('"/api/sample"') &&
+    pluginSrc.includes("/api/sample/init") &&
+    pluginSrc.includes("/api/sample/commit"));
+
+  const psStart = pluginSrc.indexOf("private void processSample");
+  const processSample = pluginSrc.slice(psStart, pluginSrc.indexOf("private String readRevision"));
+  check("R2-Q2 capture 以原生文件流直传（不整图进内存、不 base64）",
+    processSample.includes("httpPutFile(putUrl, capture") &&
+    !/readFile\(new File\(dir, CAPTURE_NAME\)\)/.test(processSample) &&
+    !processSample.includes("Base64"));
+  check("R2-Q3 presigned URL 只在内存使用，绝不写入 state.json",
+    !/put\("presigned/.test(pluginSrc));
+  check("R2-Q4 直传目标必须是 https（拒绝明文上传）",
+    pluginSrc.includes('startsWith("https://")'));
+  check("R2-Q5 直传 PUT 不附加 Authorization（会破坏 presigned 签名）",
+    !/httpPutFile[\s\S]{0,1600}Authorization/.test(pluginSrc));
+  check("R2-Q6 上传失败只改状态，绝不删除本地样本",
+    !/\.delete\(\)/.test(pluginSrc.slice(pluginSrc.indexOf("private void recordFailure"),
+      pluginSrc.indexOf("private void recordFailure") + 1200)));
+  check("R2-Q7 队列状态机含 R2 中间态与直传进度字段",
+    modelSrc.includes("STATUS_UPLOADING_CAPTURE") &&
+    modelSrc.includes("STATUS_CAPTURE_UPLOADED") &&
+    modelSrc.includes("captureObjectKey") &&
+    modelSrc.includes("captureUploaded") &&
+    modelSrc.includes("sampleCommitted"));
+  check("R2-Q8 启动恢复把 R2 中间态回落 pending（不假设 PUT 已完成）",
+    modelSrc.includes("STATUS_UPLOADING_CAPTURE.equals(status)") &&
+    modelSrc.includes("STATUS_CAPTURE_UPLOADED.equals(status)"));
+}
+
+section("R2 直传：Collector 侧 objectKey 由服务器派生 + 短时效 presign");
+{
+  const storeSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/r2_store.js"), "utf8");
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+  const r2Src = fs.readFileSync(path.join(__dirname, "tools/r2/r2.js"), "utf8");
+
+  check("R2-Q9 objectKey 由 sampleId 服务器派生（samples/<date>/<id>/capture.jpg）",
+    storeSrc.includes('"samples/" + date + "/" + sampleId + "/" + CAPTURE_NAME'));
+  check("R2-Q10 commit 校验 objectKey 必须等于服务器派生值",
+    storeSrc.includes("objectKey !== expectedKey"));
+  check("R2-Q11 commit 只做 HeadObject，不同步下载 JPEG 校验",
+    storeSrc.includes("headObject") &&
+    !/commitSample[\s\S]{0,4000}getObjectToFile/.test(storeSrc));
+  check("R2-Q12 presigned TTL 默认 300 秒（短时效）",
+    storeSrc.includes("DEFAULT_PRESIGN_TTL_SECONDS = 300"));
+  check("R2-Q13 presign 是 PUT-only 的 SigV4 query 签名",
+    r2Src.includes('"PUT", canonicalUri, canonicalQuery') &&
+    r2Src.includes("UNSIGNED-PAYLOAD"));
+  check("R2-Q14 R2 未配置时 init/commit FAIL CLOSED（503，不降级为隧道大文件）",
+    serverSrc.includes("sample upload backend unavailable"));
+  check("R2-Q15 legacy /api/sample 仍在（旧客户端平滑 OTA 兼容一代）",
+    serverSrc.includes('p === "/api/sample"'));
+  check("R2-Q16 镜像 worker 在 commit 响应路径之外（后台，不阻塞手机）",
+    storeSrc.includes("function kickMirror") &&
+    storeSrc.includes("setImmediate") &&
+    storeSrc.includes("function whenMirrorIdle"));
+}
+
+section("R2 直传：APK 发布路径与缓存策略守卫");
+{
+  const publishSrc = fs.readFileSync(path.join(__dirname,
+    "tools/dev_update/publish.js"), "utf8");
+  const r2PubSrc = fs.readFileSync(path.join(__dirname,
+    "tools/dev_update/r2_publish.js"), "utf8");
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+
+  check("R2-Q17 APK 对象 key 按 versionCode 唯一（无覆盖式固定名）",
+    r2PubSrc.includes('APK_PREFIX + "/vc" + vc + "/MarketingSafetyQuiz-dev-vc" + vc + ".apk"'));
+  check("R2-Q18 APK 使用 immutable 长缓存",
+    r2PubSrc.includes("public, max-age=31536000, immutable"));
+  check("R2-Q19 发布验证不整包下载（Range 冒烟上限 1MB）",
+    r2PubSrc.includes("SMOKE_RANGE_BYTES = 1024 * 1024") &&
+    r2PubSrc.includes("abortAfterBytes"));
+  check("R2-Q20 latest.json 在 R2 上传+验证之后才写（APK 先可用）",
+    publishSrc.indexOf("await r2publish.publishApk") > 0 &&
+    publishSrc.indexOf("writeAtomic(paths.latestJson") >
+      publishSrc.indexOf("await r2publish.publishApk"));
+  check("R2-Q21 prune 保留最新 3 个且保护 current latest",
+    publishSrc.includes("DEV_APK_KEEP_COUNT = 3") &&
+    r2PubSrc.includes("v.versionCode === Number(currentVersionCode)"));
+  check("R2-Q22 latest.json 仍由 Collector 提供且 no-store（不经 R2 缓存）",
+    serverSrc.includes('"Cache-Control": "no-store"'));
+}
+
+section("R2 secret 静态扫描：仓库内不得出现真实 credential");
+{
+  /* 只扫「形态」：AWS/R2 风格 access key id 与「被赋了真实值的 env 变量」。
+     命中时只报告文件名，绝不打印匹配到的值本身。 */
+  const roots = ["www", "tools", "android/app/src", "test_core.js", "README.md", ".gitignore"];
+  const files = [];
+  const walk = (p) => {
+    let st;
+    try { st = fs.statSync(p); } catch (e) { return; }
+    if (st.isDirectory()) {
+      if (/node_modules|[\\/]build[\\/]|[\\/]\.git|[\\/]_build|[\\/]release|[\\/]real_samples|[\\/]_local/.test(p)) { return; }
+      fs.readdirSync(p).forEach((n) => walk(path.join(p, n)));
+      return;
+    }
+    if (/\.(js|json|java|html|css|md|bat|txt|example)$/.test(p)) { files.push(p); }
+  };
+  roots.forEach((r) => walk(path.join(__dirname, r)));
+
+  const awsKeyHits = [];
+  const assignedSecretHits = [];
+  for (const f of files) {
+    let text;
+    try { text = fs.readFileSync(f, "utf8"); } catch (e) { continue; }
+    if (/\bAKIA[0-9A-Z]{16}\b/.test(text)) { awsKeyHits.push(path.relative(__dirname, f)); }
+    const m = /R2_SECRET_ACCESS_KEY\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{16,})/.exec(text);
+    if (m && !/^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1])) {
+      assignedSecretHits.push(path.relative(__dirname, f));
+    }
+  }
+  check("R2-P3b 无 AWS/R2 风格 access key id 硬编码", awsKeyHits.length === 0,
+    awsKeyHits.join(","));
+  check("R2-P3c 无被赋真实值的 R2_SECRET_ACCESS_KEY", assignedSecretHits.length === 0,
+    assignedSecretHits.join(","));
+  check("R2-P3d .env.r2.local 已被 .gitignore 排除",
+    fs.readFileSync(path.join(__dirname, ".gitignore"), "utf8").includes(".env.r2.local"));
+}
+
+section("COS_SAMPLE_TRANSFER_V1：provider 选择与客户端行为守卫");
+{
+  const serverSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+  const providerSrc = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/provider.js"), "utf8");
+  const pluginSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueuePlugin.java"), "utf8");
+  const modelSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/SampleQueueModel.java"), "utf8");
+
+  check("COS-Q1 provider 选择：COS 优先，R2 后备，可显式禁用（FAIL CLOSED 可测）",
+    providerSrc.includes('want === "cos"') &&
+    providerSrc.includes('want === "r2"') &&
+    providerSrc.includes('want === "none"'));
+  check("COS-Q2 presign TTL 300 秒（COS 路径与 R2 共用同一常量）",
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/r2_store.js"), "utf8")
+      .includes("DEFAULT_PRESIGN_TTL_SECONDS = 300"));
+  check("COS-Q3 legacy /api/sample 保留（ENABLED_COMPAT）",
+    serverSrc.includes('p === "/api/sample"'));
+  check("COS-Q4 mirror 在 commit 响应路径之外（后台 worker）",
+    fs.readFileSync(path.join(__dirname, "tools/sample_collector/r2_store.js"), "utf8")
+      .includes("function kickMirror"));
+  check("COS-Q5 手机端记录的是数字诊断（耗时/速率），不是 URL",
+    pluginSrc.includes("captureBytesPerSec") &&
+    pluginSrc.includes("captureUploadMs") &&
+    /* state 里绝不写入 presigned URL / 签名（setServer 的 serverUrl 是合法 API 字段） */
+    !/\.put\("(presignedPutUrl|presigned[A-Za-z]*|signature|sig)"/.test(pluginSrc));
+  check("COS-Q6 429 走 model 的 markRateLimited（尊重 Retry-After，可 JVM 单测）",
+    modelSrc.includes("markRateLimited") &&
+    modelSrc.includes("RATE_LIMIT_MAX_WAIT_MS") &&
+    pluginSrc.includes("recordRateLimited(dir, \"commit HTTP 429\"") &&
+    pluginSrc.includes("parseRetryAfterMs"));
+  check("COS-Q7 COS PUT 403/400 不进入永久 failed（会重新 init）",
+    /COS PUT HTTP " \+ putStatus \+ " \(will re-init\)"/.test(pluginSrc));
+  check("COS-Q8 手机 state.json 不落 presigned URL",
+    !/put\("presigned/.test(pluginSrc));
+}
+
+function finish() {
+  console.log("\n" + "=".repeat(46));
+  if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
+  console.log("结果：全部通过 ✓");
+}
+/* SUC 编排小节内部走 Promise 微任务（controller 的 getAppInfo/fetchLatest 是异步），
+   统一结论推迟到它完成后输出；异常按失败项记录。 */
+runSucOrchestrationTests().then(finish, function (e) {
+  console.error("\n[SUC] 编排测试异常：", e && e.stack || e);
+  fails.push("SUC 编排测试异常");
+  finish();
+});
