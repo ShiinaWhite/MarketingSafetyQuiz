@@ -1546,9 +1546,14 @@ function runSucOrchestrationTests() {
       check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
         !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
         !appSrc.includes("visibilitychange"));
-      check("SUC-1c 启动触发仅在首屏就绪后的调度点（loadBank 成功回调内，源码守卫）",
-        appSrc.includes("registerSystemBack();") &&
-        appSrc.indexOf("startupUpdateCtrl.trigger()") > appSrc.indexOf("registerSystemBack();"));
+      check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），就绪后才可展示",
+        appSrc.indexOf("startupUpdateCtrl.trigger();") > 0 &&
+        appSrc.indexOf("startupUpdateCtrl.trigger();") < appSrc.indexOf("loadBank().then(") &&
+        appSrc.includes("startupUiReady = true;") &&
+        appSrc.indexOf("startupUiReady = true;") > appSrc.indexOf("registerSystemBack();") &&
+        appSrc.includes("startupUpdateCtrl.markUiReady();"));
+      check("SUC17-2b canShowNow 含 startupUiReady 门（未就绪绝不展示）",
+        appSrc.includes("return startupUiReady && currentViewId() === \"view-menu\" && !Modal.isOpen();"));
     }
 
     /* SUC-9 dismiss 后同 session 不再自动弹（controller 一次性 + dismissed 双保险） */
@@ -1597,6 +1602,53 @@ function runSucOrchestrationTests() {
         dl.includes("MSQUpdater.fallbackApkUrlFor") && dl.includes("Update.downloadUpdate") &&
         dl.includes("sha256: updateManifest.sha256") &&
         dl.includes("expectedPackageName: updateInfo.id"));
+    }
+
+    /* ====== VC17：启动检查提前并行（fetch 与初始化重叠，就绪后才展示） ====== */
+    {
+      /* SUC17-3 fetch 先完成 → menu ready 后立即 Modal */
+      const ioA = makeIo(); ioA.manifest = sucManifest(15);   /* 对 current=14 为 available */
+      ioA.canShowNow = () => false;                            /* UI 未就绪 */
+      const cA = SU_CREATE(ioA);
+      cA.trigger(); await flush();
+      check("SUC17-3a fetch 先完成但 UI 未就绪 → 暂存不弹",
+        ioA.calls.prompt === 0 && cA.flags().pendingPrompt === true);
+      ioA.canShowNow = () => true;                             /* 主菜单就绪且空闲 */
+      cA.markUiReady(); await flush();
+      check("SUC17-3b menu ready → 立即弹（网络与初始化时间重叠）",
+        ioA.calls.prompt === 1 && cA.flags().pendingPrompt === false &&
+        cA.flags().uiReady === true);
+
+      /* SUC17-4 menu 先就绪 → fetch 返回后立即弹 */
+      const ioB = makeIo(); ioB.manifest = sucManifest(15);
+      const cB = SU_CREATE(ioB);
+      cB.markUiReady();
+      cB.trigger(); await flush();
+      check("SUC17-4 menu 先 ready → fetch 返回后立即 Modal",
+        ioB.calls.prompt === 1 && cB.flags().pendingPrompt === false);
+
+      /* SUC17-5 UI 已就绪但用户已离开首页 → 放弃（不抢弹、不暂存） */
+      const ioC = makeIo(); ioC.manifest = sucManifest(15);
+      ioC.canShowNow = () => false;
+      const cC = SU_CREATE(ioC);
+      cC.markUiReady();               /* 就绪，但 canShowNow=false = 用户在别处/弹窗中 */
+      cC.trigger(); await flush();
+      check("SUC17-5 user 已离开 menu → 直接放弃",
+        ioC.calls.prompt === 0 && cC.flags().pendingPrompt === false &&
+        ioC.logs.some((l) => l.includes("ui-busy")));
+
+      /* SUC17-8/9 一次性与 dismiss 语义在暂存态下依然成立 */
+      const ioD = makeIo(); ioD.manifest = sucManifest(15);
+      ioD.canShowNow = () => false;
+      const cD = SU_CREATE(ioD);
+      cD.trigger(); await flush();
+      const rD2 = cD.trigger(); await flush();
+      cD.markDismissed();
+      ioD.canShowNow = () => true;
+      cD.markUiReady(); await flush();
+      check("SUC17-8/9 暂存态下二次触发无效、dismiss 后即使就绪也不弹",
+        rD2.ran === false && ioD.calls.fetch === 1 && ioD.calls.prompt === 0 &&
+        cD.flags().dismissed === true && cD.flags().pendingPrompt === false);
     }
   });
 }
@@ -1707,6 +1759,41 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
   check("DIAG-7 首页不再存在诊断版本行（menu-version 全删）",
     !indexSrc.includes("menu-version") && !appSrc.includes("menu-version") &&
     !appSrc.includes("initDevDiagnostics"));
+
+  /* —— DIAG17：诊断页显示层全中文（VC17；底层 enum 不动） —— */
+  check("DIAG17-2 状态 enum 中文映射纯函数（内部值不变，含 auth_failed 别名）",
+    MSQSample.diagnosticStatusLabel("pending") === "待上传" &&
+    MSQSample.diagnosticStatusLabel("retry_wait") === "等待重试" &&
+    MSQSample.diagnosticStatusLabel("uploading") === "正在上传" &&
+    MSQSample.diagnosticStatusLabel("capture_uploaded") === "照片已上传" &&
+    MSQSample.diagnosticStatusLabel("synced") === "已同步" &&
+    MSQSample.diagnosticStatusLabel("failed") === "失败" &&
+    MSQSample.diagnosticStatusLabel("auth_failed") === "需要重新绑定" &&
+    MSQSample.diagnosticStatusLabel("auth_required") === "需要重新绑定");
+  check("DIAG17-2b 反馈同步状态中文映射", MSQSample.feedbackSyncLabel(0) === "已同步" &&
+    MSQSample.feedbackSyncLabel(2) === "待上传 ×2");
+  {
+    const ddIdx = appSrc.indexOf("function renderDevDiagnostics()");
+    const dd = appSrc.slice(ddIdx, appSrc.indexOf("/* ---------------- 应用内自更新", ddIdx));
+    check("DIAG17-1 诊断页渲染仅中文标签（旧英文标签全删）",
+      dd.includes('"待上传样本"') && dd.includes('"等待重试"') && dd.includes('"上传失败"') &&
+      dd.includes('"需要重新绑定"') && dd.includes('"队列占用空间"') &&
+      dd.includes('"最老样本等待时间"') && dd.includes('"最近上传速度"') &&
+      dd.includes('"上次自动清理"') && dd.includes('"上次清理样本数"') &&
+      dd.includes('"上次释放空间"') && dd.includes('"最近反馈同步状态"') &&
+      !dd.includes('"pending"') && !dd.includes('"retry_wait"') &&
+      !dd.includes('"failed"') && !dd.includes('"queue total bytes"') &&
+      !dd.includes('"oldest sample age"') && !dd.includes('"last janitor"') &&
+      !dd.includes('"last feedback sync"') && !dd.includes('"Run janitor now"') &&
+      !dd.includes('"Retry queue now"'));
+    check("DIAG17-3 两个操作按钮中文（立即清理/立即重试）",
+      dd.includes('"立即清理"') && dd.includes('"立即重试"'));
+    check("DIAG17-1b 诊断页标题中文（开发者诊断）",
+      indexSrc.includes("开发者诊断") && !indexSrc.includes("Developer Diagnostics"));
+    check("DIAG17 诊断页不渲染任何域名/endpoint/objectKey",
+      !dd.includes("shiinalab") && !dd.includes("objectKey") &&
+      !dd.includes("presigned") && !dd.includes("serverUrl"));
+  }
 
   /* —— UI16-4~9/13 启动更新 Modal（源码守卫；行为在 nav_test 实测） —— */
   {

@@ -80,6 +80,28 @@
     return null;
   }
 
+  /* ---------------- 诊断显示层中文映射（VC17，仅 UI 层） ----------------
+     底层 enum/value/schema 一律不动；键为内部状态值（含 native 的 auth_failed
+     与任务书措辞 auth_required 两个别名），值为中文显示文案。 */
+  var DIAG_STATUS_LABELS = {
+    pending: "待上传",
+    retry_wait: "等待重试",
+    uploading: "正在上传",
+    capture_uploaded: "照片已上传",
+    synced: "已同步",
+    failed: "失败",
+    auth_failed: "需要重新绑定",
+    auth_required: "需要重新绑定"
+  };
+
+  function diagnosticStatusLabel(status) {
+    return DIAG_STATUS_LABELS[status] || String(status == null ? "" : status);
+  }
+
+  function feedbackSyncLabel(pendingCount) {
+    return (pendingCount > 0) ? ("待上传 ×" + pendingCount) : "已同步";
+  }
+
   /* ---------------- sampleId：YYYYMMDD_HHMMSS_xxxxxx（6 位小写 hex） ---------------- */
 
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
@@ -447,6 +469,8 @@
     saveSettings: saveSettings,
     shouldCollect: shouldCollect,
     diagnosticsChannel: diagnosticsChannel,
+    diagnosticStatusLabel: diagnosticStatusLabel,
+    feedbackSyncLabel: feedbackSyncLabel,
     makeSampleId: makeSampleId,
     joinUrl: joinUrl,
     buildRunManifest: buildRunManifest,

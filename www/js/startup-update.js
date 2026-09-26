@@ -38,6 +38,28 @@
   function createController(io) {
     var started = false;    /* 每个 App process / WebView 生命周期只自动检查一次（纯内存） */
     var dismissed = false;  /* 用户关闭启动提示后，本次 session 不再自动弹 */
+    var uiReady = false;    /* VC17：主菜单就绪（由 app 在首屏渲染完成后 markUiReady） */
+    var deferred = null;    /* 已发现新版但 UI 未就绪：{ info, manifest }，就绪后立即弹 */
+
+    /* 展示尝试：仅 available 且未 dismissed。canShowNow=false 时区分两种情况——
+       UI 尚未就绪（!uiReady）→ 暂存等 markUiReady；UI 已就绪但用户在别处 → 放弃。 */
+    function tryShow(info, manifest) {
+      var decision = decideStartupPrompt(
+        { ok: true, state: "available" },
+        { dismissed: dismissed, canShowNow: !!io.canShowNow() });
+      if (decision.prompt) {
+        deferred = null;
+        io.showPrompt(info, manifest); /* 既有更新提示 UI，manifest 原样传递 */
+        return true;
+      }
+      if (!uiReady && decision.reason === "ui-busy") {
+        deferred = { info: info, manifest: manifest };
+        io.debug("startup update check: newer version deferred until ui ready");
+        return false;
+      }
+      io.debug("startup update check skipped: " + decision.reason);
+      return false;
+    }
 
     function trigger() {
       if (started) {
@@ -58,16 +80,14 @@
         io.fetchLatest(channel).then(function (manifest) {
           var v = io.validate(manifest, { channel: channel, packageName: info.id });
           var state = v.ok ? io.compare(info.versionCode, manifest) : null;
-          var decision = decideStartupPrompt(
-            v.ok ? { ok: true, state: state } : { ok: false },
-            { dismissed: dismissed, canShowNow: !!io.canShowNow() });
-          if (decision.prompt) {
-            io.showPrompt(info, manifest); /* 既有更新提示 UI，manifest 原样传递 */
-          } else {
-            io.debug("startup update check skipped/failed: " + decision.reason);
+          if (v.ok && state === "available") {
+            tryShow(info, manifest);
+            return;
           }
+          /* offline/DNS/超时/5xx/解析失败/无新版：完全静默，仅 debug log */
+          io.debug("startup update check skipped/failed: " +
+            (!v.ok ? "check-failed" : "not-newer:" + state));
         }, function () {
-          /* offline / DNS / 超时 / 5xx / JSON 解析失败：完全静默，仅 debug log */
           io.debug("startup update check failed: network/transport");
         });
       }, function () {
@@ -78,8 +98,20 @@
 
     return {
       trigger: trigger,
-      markDismissed: function () { dismissed = true; },
-      flags: function () { return { started: started, dismissed: dismissed }; }
+      markDismissed: function () { dismissed = true; deferred = null; },
+      /* VC17：主菜单就绪后调用；若检查已完成且暂存了新版提示，立即展示 */
+      markUiReady: function () {
+        uiReady = true;
+        if (deferred) {
+          var d = deferred;
+          deferred = null;
+          tryShow(d.info, d.manifest);
+        }
+      },
+      flags: function () {
+        return { started: started, dismissed: dismissed, uiReady: uiReady,
+          pendingPrompt: !!deferred };
+      }
     };
   }
 

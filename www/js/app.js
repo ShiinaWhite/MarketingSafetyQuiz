@@ -1832,30 +1832,48 @@
     if (!box || !(Queue && typeof Queue.stats === "function")) { return; }
     var rows = [];
     var add = function (k, v) { rows.push(k + "：" + v); };
+    /* VC17：仅显示层中文化（底层 enum/value/schema 不变）。
+       数值格式化只用数字与单位，不出现任何英文标签。 */
+    var fmtBytes = function (n) {
+      return (typeof MSQUpdater !== "undefined" && MSQUpdater && MSQUpdater.formatBytes)
+        ? MSQUpdater.formatBytes(n) : String(n) + " 字节";
+    };
+    var fmtAge = function (ms) {
+      if (ms == null || ms < 0) { return "暂无样本"; }
+      var min = Math.round(ms / 60000);
+      if (min < 1) { return "不足 1 分钟"; }
+      if (min < 60) { return min + " 分钟"; }
+      return (Math.round(min / 6) / 10) + " 小时";
+    };
+    var fmtSpeed = function (bytesPerSec) {
+      return bytesPerSec > 0 ? Math.round(bytesPerSec / 1024) + " KB/s" : "暂无记录";
+    };
+    var fmtTime = function (ts) {
+      var d = new Date(ts);
+      var p2 = function (n) { return (n < 10 ? "0" : "") + n; };
+      return p2(d.getMonth() + 1) + "-" + p2(d.getDate()) + " " +
+        p2(d.getHours()) + ":" + p2(d.getMinutes());
+    };
     Queue.stats().then(function (st) {
       var diagPromise = (typeof Queue.getDiagnostics === "function")
         ? Queue.getDiagnostics() : Promise.resolve(null);
       return diagPromise.then(function (d) {
         if (st) {
-          add("pending", st.pending || 0);
-          add("retry_wait", st.retryWait || 0);
-          add("failed", st.failed || 0);
-          add("auth_required", st.authFailed || 0);
-          add("queue total bytes", st.pendingBytes || 0);
+          add("待上传样本", st.pending || 0);
+          add("等待重试", st.retryWait || 0);
+          add("上传失败", st.failed || 0);
+          add("需要重新绑定", st.authFailed || 0);
+          add("队列占用空间", fmtBytes(st.pendingBytes || 0));
         }
         if (d) {
-          add("oldest sample age", (d.oldestSampleAgeMs != null)
-            ? Math.round(d.oldestSampleAgeMs / 60000) + " min" : "-");
-          add("last sample upload speed", (d.lastUploadBytesPerSec > 0)
-            ? Math.round(d.lastUploadBytesPerSec / 1024) + " KB/s" : "-");
-          add("last janitor time", (d.lastJanitorAt > 0)
-            ? new Date(d.lastJanitorAt).toISOString().replace("T", " ").slice(0, 16) : "never");
-          add("janitor deleted", (d.deletedSamples || 0) + " / " + (d.deletedBytes || 0) + " B");
-          add("janitor bytes before/after", (d.queueBytesBefore || 0) + " / " + (d.queueBytesAfter || 0));
-          add("last feedback sync", (d.feedbackPendingCount > 0)
-            ? "pending ×" + d.feedbackPendingCount : "synced");
+          add("最老样本等待时间", fmtAge(d.oldestSampleAgeMs));
+          add("最近上传速度", fmtSpeed(d.lastUploadBytesPerSec));
+          add("上次自动清理", d.lastJanitorAt > 0 ? fmtTime(d.lastJanitorAt) : "尚未运行");
+          add("上次清理样本数", d.deletedSamples || 0);
+          add("上次释放空间", fmtBytes(d.deletedBytes || 0));
+          add("最近反馈同步状态", MSQSample.feedbackSyncLabel(d.feedbackPendingCount));
         } else {
-          add("diagnostics", "需升级安装包以获取 janitor 诊断");
+          add("诊断数据", "需升级安装包");
         }
         box.innerHTML = "";
         rows.forEach(function (line) {
@@ -1868,7 +1886,7 @@
         bj.type = "button";
         bj.className = "barbtn";
         bj.style.marginTop = "14px";
-        bj.textContent = "Run janitor now";
+        bj.textContent = "立即清理";
         bj.addEventListener("click", function () {
           if (typeof Queue.runJanitorNow === "function") {
             Queue.runJanitorNow().then(renderDevDiagnostics, function () { });
@@ -1879,7 +1897,7 @@
         br.type = "button";
         br.className = "barbtn";
         br.style.marginTop = "10px";
-        br.textContent = "Retry queue now";
+        br.textContent = "立即重试";
         br.addEventListener("click", function () {
           Queue.retryFailed().then(renderDevDiagnostics, function () { });
         });
@@ -2144,10 +2162,13 @@
     });
   }
 
-  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1） ----------------
+  /* ---------------- 启动自动检查更新（STARTUP_UPDATE_CHECK_V1 + VC17 提前并行） ----------------
      编排与决策在 startup-update.js（可测纯逻辑）；manifest 获取/校验/版本比较/
      更新提示 UI/下载/校验/安装全部复用手动"检查更新"的同一条路径，无第二套 updater。
-     每个 App process / WebView 生命周期只自动检查一次；任何失败完全静默。 */
+     每个 App process / WebView 生命周期只自动检查一次；任何失败完全静默。
+     VC17：trigger 在 bootstrap 期立即执行（与 loadBank 并行）；startupUiReady 在
+     主菜单渲染完成后置位，此前检查结果暂存在 controller 内，就绪后立即展示。 */
+  var startupUiReady = false;
   var startupUpdateCtrl = (typeof MSQStartupUpdate !== "undefined" && MSQStartupUpdate)
     ? MSQStartupUpdate.createController({
         getAppInfo: function () {
@@ -2177,11 +2198,11 @@
         compare: function (currentVersionCode, manifest) {
           return MSQUpdater.checkUpdateState(currentVersionCode, manifest);
         },
-        /* 只在用户仍停在首屏且无弹窗时提示，绝不抢正在进行的操作 */
+        /* 只在主菜单就绪、用户仍停在首屏且无弹窗时提示，绝不抢正在进行的操作 */
         canShowNow: function () {
-          return currentViewId() === "view-menu" && !Modal.isOpen();
+          return startupUiReady && currentViewId() === "view-menu" && !Modal.isOpen();
         },
-        /* VC16_UI_POLISH_V1：不再自动跳转更新页，改为首页上的轻量 Modal。
+        /* VC16：不再自动跳转更新页，改为首页上的轻量 Modal。
            稍后/立即更新/系统 Back 都经 Modal.close → onClose 标记 dismissed，
            本次 session 不再自动弹；真正 cold start 才会重新提醒。 */
         showPrompt: function (info, manifest) {
@@ -2190,6 +2211,11 @@
         debug: function (msg) { console.log("[startup-update] " + msg); }
       })
     : null;
+
+  /* VC17_STARTUP_SPEED_AND_DIAG_ZH_V1：bootstrap 一开始就发起检查（与 loadBank/
+     UI 初始化/队列恢复并行，绝不 await），网络耗时与初始化耗时重叠而非串行相加。
+     主菜单渲染完成后 markUiReady 才允许展示 Modal（见 boot 段 startupUiReady）。 */
+  if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
 
   /* 启动更新提示 Modal（VC16_UI_POLISH_V1）：复用现有 HTML/CSS Modal 组件，
      不是系统 AlertDialog，也不新增 native plugin。
@@ -2368,11 +2394,10 @@
     renderMenu();
     registerSW();
     registerSystemBack();
-    /* STARTUP_UPDATE_CHECK_V1：首屏渲染与监听器注册完成后短异步调度一次自动检查。
-       绝不 await、不阻塞首屏；后台→前台/相机返回/安装器返回不会再次进入本路径。 */
-    setTimeout(function () {
-      if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
-    }, 0);
+    /* VC17：主界面就绪 —— 启动检查早已在跑，此刻起才允许展示 Modal；
+       若检查已先完成并发现新版，markUiReady 会立即弹（不等待、不再串行）。 */
+    startupUiReady = true;
+    if (startupUpdateCtrl) { startupUpdateCtrl.markUiReady(); }
   }).catch(function (err) {
     document.body.innerHTML = "";
     var box = document.createElement("div");

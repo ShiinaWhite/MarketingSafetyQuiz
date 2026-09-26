@@ -137,11 +137,11 @@
     <main id="search-detail-body" class="pad"></main>
   </section>
 
-  <!-- DEV 隐藏诊断（入口 = 检查更新页当前版本行 7 连击，仅 DEV 构建） -->
+  <!-- DEV 隐藏诊断（VC17：显示层全中文；入口 = 检查更新页当前版本行 7 连击，仅 DEV 构建） -->
   <section id="view-devdiag" class="view hidden">
     <header class="quiz-head">
       <button id="btn-devdiag-back" class="backbtn">‹ 返回</button>
-      <div class="qtitle">Developer Diagnostics</div>
+      <div class="qtitle">开发者诊断</div>
     </header>
     <main id="devdiag-body" class="pad"></main>
   </section>
@@ -225,6 +225,7 @@
 
   const Q = new URLSearchParams(location.search);
   window.__c = { ocr: 0, match: 0, split: 0, auto: 0, http: 0 };
+  window.__order = [];   /* SUC17 时序观测：getInfo / update-fetch / menu-ready */
   window.__feedbackCalls = [];
   window.__httpFail = 0;
   window.__queuePersisted = [];
@@ -236,7 +237,10 @@
   window.__updateFetches = 0;   /* fake OTA latest 请求计数（UI16-7 一次性验证） */
   window.Capacitor = { Plugins: {
     App: {
-      getInfo: async () => ({ id: "com.jty.safetyquiz.dev", version: "1.0.15-dev", build: "15" }),
+      getInfo: async () => {
+        window.__order.push("getInfo");   /* SUC17-1：trigger 在 bootstrap 期即调用 */
+        return { id: "com.jty.safetyquiz.dev", version: "1.0.15-dev", build: "15" };
+      },
       addListener: () => ({ remove: () => {} }),
       exitApp: () => {}
     },
@@ -252,7 +256,8 @@
     CapacitorHttp: { request: async (opts) => {
         const url = (opts && opts.url) || "";
         if (url.indexOf("/api/update/") >= 0 && url.indexOf("/latest") >= 0) {
-          /* fake OTA latest 服务：URL 参数控制版本/延迟/失败（VC16 测试驱动） */
+          /* fake OTA latest 服务：URL 参数控制版本/延迟/失败（VC16/VC17 测试驱动） */
+          window.__order.push("update-fetch");
           window.__updateFetches += 1;
           const vc = parseInt(Q.get("latestvc") || "15", 10);
           const delay = parseInt(Q.get("updatedelay") || "0", 10) || 0;
@@ -312,6 +317,17 @@
       runJanitorNow: async () => { window.__janitorRuns.push(1); return { ok: true }; }
     }
   } };
+
+  /* SUC17：观测主菜单渲染完成（renderMenu 向 menu-buttons 填充按钮） */
+  (function () {
+    const mb = document.getElementById("menu-buttons");
+    const mo = new MutationObserver(() => {
+      if (mb.children.length > 0 && window.__order.indexOf("menu-ready") < 0) {
+        window.__order.push("menu-ready");
+      }
+    });
+    mo.observe(mb, { childList: true });
+  })();
 </script>
 <script src="../www/js/core.js"></script>
 <script src="../www/js/sample-collector.js"></script>
@@ -357,6 +373,8 @@
       await sleep(80);
       document.getElementById("btn-search-entry").click();   /* 检查返回前就离开首页 */
       check("UI16-13a 已进入搜题页", vis("view-search"));
+      check("SUC17-1b 此时 fetch 早已发出、响应未回（请求与初始化并行）",
+        window.__updateFetches === 1);
       await sleep(3200);   /* fake latest 2.5s 后返回 vc16 */
       check("UI16-13b 结果返回时不弹 Modal、不打断操作",
         !modalVisible() && vis("view-search") && !vis("view-update"));
@@ -427,6 +445,13 @@
       check("UI16-11 无新版 → 启动完全静默（无 Modal、不跳更新页）",
         !modalVisible() && vis("view-menu") && !vis("view-update") &&
         window.__updateFetches === 1);
+      check("SUC17-1 启动 fetch 在主菜单渲染完成前已发起（getInfo 先于 menu-ready）",
+        window.__order.indexOf("getInfo") >= 0 &&
+        window.__order.indexOf("menu-ready") >= 0 &&
+        window.__order.indexOf("getInfo") < window.__order.indexOf("menu-ready"),
+        JSON.stringify(window.__order));
+      check("SUC17-2 fetch 不阻塞 loadBank（菜单照常渲染，boot 正常完成）",
+        document.querySelectorAll("#menu-buttons button").length >= 3);
 
       /* —— NAV-A：search → detail → 返回 —— */
       const searchBtn = document.getElementById("btn-search-entry");
@@ -544,8 +569,23 @@
       for (let i = 0; i < 7; i++) { verLine.click(); }
       await sleep(120);
       check("DIAG-1 DEV 更新页当前版本 7 连击进入诊断页",
-        vis("view-devdiag") &&
-        document.getElementById("devdiag-body").innerText.indexOf("pending") >= 0);
+        vis("view-devdiag"));
+      const ddText = document.getElementById("devdiag-body").innerText;
+      check("DIAG17-1/2/3 诊断页全中文：中文状态项+状态映射+中文按钮，无英文标签",
+        ddText.indexOf("待上传样本") >= 0 && ddText.indexOf("等待重试") >= 0 &&
+        ddText.indexOf("上传失败") >= 0 && ddText.indexOf("需要重新绑定") >= 0 &&
+        ddText.indexOf("队列占用空间") >= 0 && ddText.indexOf("最老样本等待时间") >= 0 &&
+        ddText.indexOf("最近上传速度") >= 0 && ddText.indexOf("上次自动清理") >= 0 &&
+        ddText.indexOf("上次清理样本数") >= 0 && ddText.indexOf("上次释放空间") >= 0 &&
+        ddText.indexOf("最近反馈同步状态") >= 0 && ddText.indexOf("已同步") >= 0 &&
+        Array.from(document.querySelectorAll("#devdiag-body .barbtn"))
+          .map((b) => b.textContent).indexOf("立即清理") >= 0 &&
+        Array.from(document.querySelectorAll("#devdiag-body .barbtn"))
+          .map((b) => b.textContent).indexOf("立即重试") >= 0 &&
+        !/pending|retry|failed|auth|synced|janitor|queue total|Run |Retry |never/i.test(ddText),
+        ddText.slice(0, 100));
+      check("DIAG17-1b 标题为「开发者诊断」",
+        document.querySelector("#view-devdiag .qtitle").textContent === "开发者诊断");
       check("DIAG-2b 整行点击均有效（同一行上 7 次点击全部计数）",
         vis("view-devdiag"));
       /* DIAG-6：Back → 检查更新页（按钮 + 系统 Back 双路） */
