@@ -291,6 +291,170 @@ async function main() {
         pruned.total >= 1);
     }
 
+    /* ================= STP：STABLE channel（STABLE_RELEASE_PIPELINE_V1） =================
+       与 dev 完全隔离：/stable/ 对象前缀、channel=stable manifest、
+       /api/update/stable/apk fallback；fail-closed 语义逐场景复验。 */
+    section("STP：stable channel 泛化（对象隔离 + latest 隔离 + fail-closed）");
+    {
+      /* STP-4 stable object key 只允许 /stable/ */
+      check("STP-4a stable key = stable/v3/msq-stable-v3.apk",
+        cospublish.apkObjectKey(3, "stable") === "stable/v3/msq-stable-v3.apk",
+        cospublish.apkObjectKey(3, "stable"));
+      check("STP-4b stable key 禁固定名 / 与 dev key 互异",
+        !/(^|\/)(app|latest|update)\.apk$/.test(cospublish.apkObjectKey(3, "stable")) &&
+        cospublish.apkObjectKey(3, "stable") !== cospublish.apkObjectKey(3));
+      check("STP-4c stable CDN URL = base + / + stable key",
+        cospublish.apkPublicUrl("https://apk.shiinalab.top", 3, "stable") ===
+          "https://apk.shiinalab.top/stable/v3/msq-stable-v3.apk");
+
+      /* STP-5/6：stable latest/manifest 禁止指向 dev */
+      const stableApk = fakeApk(3, 1 * 1024 * 1024);
+      const stableSha = cospublish.sha256Hex(stableApk);
+      const cdnStable = await createCdnMock(() => ({ bytes: stableApk }));
+      const stablePaths = (() => {
+        const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "msq-stable-paths-")),
+          "updates", "stable");
+        fs.mkdirSync(dir, { recursive: true });
+        return {
+          updatesDir: dir,
+          updatesApk: path.join(dir, "营销安规刷题.apk"),
+          latestJson: path.join(dir, "latest.json"),
+          devApk: path.join(dir, "shipped-stable.apk")
+        };
+      })();
+      const relStable = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable",
+        config: config, cdnBaseUrl: cdnStable.base,
+        versionCode: 3, versionName: "1.1",
+        packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha,
+        fallbackApkUrl: "/api/update/stable/apk",
+        notes: "stable pipeline", keepCount: 3, prevCode: 0,
+        paths: stablePaths, client: client, pruneClient: client, log: function () { }
+      });
+      check("STP-5a stable 发布成功且 manifest.channel=stable",
+        relStable.ok === true && relStable.manifest.channel === "stable", relStable.error || "");
+      check("STP-5b stable latest apkUrl 指向 /stable/ 且不含 /dev/",
+        relStable.manifest.apkUrl.indexOf("/stable/") >= 0 &&
+        relStable.manifest.apkUrl.indexOf("/dev/") < 0, relStable.manifest.apkUrl);
+      check("STP-5c stable manifest.packageName = com.jty.safetyquiz（无 .dev）",
+        relStable.manifest.packageName === "com.jty.safetyquiz");
+      check("STP-6 stable fallback = /api/update/stable/apk（禁 dev endpoint）",
+        relStable.manifest.fallbackApkUrl === "/api/update/stable/apk" &&
+        relStable.manifest.fallbackApkUrl.indexOf("/api/update/dev/") < 0);
+      const stableSentinel = Buffer.from(JSON.stringify({ versionCode: 2, ch: "stable" }));
+      fs.writeFileSync(stablePaths.latestJson, stableSentinel);
+      const stableSentinelIntact = () => {
+        try { return fs.readFileSync(stablePaths.latestJson).equals(stableSentinel); }
+        catch (e) { return false; }
+      };
+
+      /* STP-8 COS PUT 失败 → latest 不变 */
+      const cdnStablePutFail = await createCdnMock(() => ({ bytes: stableApk }));
+      const failClient = {
+        putObject: async () => ({ ok: false, status: 503, error: "mock put failure" }),
+        headObject: r2.headObject, deleteObject: r2.deleteObject,
+        listAllObjects: r2.listAllObjects
+      };
+      const relPutFail = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdnStablePutFail.base,
+        versionCode: 4, versionName: "1.2", packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: failClient, pruneClient: client, log: function () { }
+      });
+      check("STP-8 COS PUT 失败 → ok:false 且 latest byte-for-byte 不变",
+        relPutFail.ok === false && relPutFail.wroteManifest === false && stableSentinelIntact());
+      await cdnStablePutFail.close();
+
+      /* STP-9 Head verify 失败（metadata.versionCode 篡改）→ latest 不变 */
+      const headTamper = {
+        putObject: async (c, b, k, body, opts) => await r2.putObject(c, b, k, body, opts),
+        headObject: async (c, b, k) => {
+          const h = await r2.headObject(c, b, k);
+          if (h.ok && h.metadata) { h.metadata.versioncode = "999"; }
+          return h;
+        },
+        deleteObject: r2.deleteObject, listAllObjects: r2.listAllObjects
+      };
+      const relHeadFail = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdnStable.base,
+        versionCode: 5, versionName: "1.3", packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: headTamper, pruneClient: client, log: function () { }
+      });
+      check("STP-9 Head metadata 失败 → ok:false 且 latest 不变",
+        relHeadFail.ok === false && relHeadFail.stage === "head" && stableSentinelIntact());
+
+      /* STP-10 CDN 404/5xx → latest 不变 */
+      const cdn404 = await createCdnMock(() => ({ status: 404, body: "no object" }));
+      const rel404 = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdn404.base,
+        versionCode: 6, versionName: "1.4", packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: client, pruneClient: client, log: function () { }
+      });
+      check("STP-10a CDN 404 → ok:false 且 latest 不变",
+        rel404.ok === false && stableSentinelIntact());
+      await cdn404.close();
+      const cdn5xx = await createCdnMock(() => ({ status: 503, body: "upstream error" }));
+      const rel5xx = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdn5xx.base,
+        versionCode: 7, versionName: "1.5", packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: client, pruneClient: client, log: function () { }
+      });
+      check("STP-10b CDN 5xx → ok:false 且 latest 不变",
+        rel5xx.ok === false && stableSentinelIntact());
+      await cdn5xx.close();
+
+      /* STP-11 CDN SHA mismatch → latest 不变（返回别的字节） */
+      const cdnBad = await createCdnMock(() => ({ bytes: fakeApk(3, 999999) }));
+      const relBad = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdnBad.base,
+        versionCode: 8, versionName: "1.6", packageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: client, pruneClient: client, log: function () { }
+      });
+      check("STP-11 CDN SHA mismatch → ok:false 且 latest 不变",
+        relBad.ok === false && stableSentinelIntact());
+      await cdnBad.close();
+
+      /* STP-12/13 wrong package / wrong signer */
+      const wrongPkg = await publish.releaseApk({
+        mode: "cos-cdn", channel: "stable", config: config, cdnBaseUrl: cdnStable.base,
+        versionCode: 9, versionName: "1.7", packageName: "com.other.app",
+        expectedPackageName: "com.jty.safetyquiz",
+        apkBytes: stableApk, sha256: stableSha, fallbackApkUrl: "/api/update/stable/apk",
+        paths: stablePaths, client: client, pruneClient: client, log: function () { }
+      });
+      check("STP-12 wrong package → 期望包名校验在上传前拒绝（ok:false, stage=package）",
+        wrongPkg.ok === false && wrongPkg.stage === "package" &&
+        /packageName mismatch/.test(wrongPkg.error) && stableSentinelIntact());
+      check("STP-13 wrong signer：publish.js 保留 --allow-new-signer 前的签名一致性拒绝（源码守卫）",
+        /签名证书与现有 .* APK 不一致/.test(
+          fs.readFileSync(path.join(__dirname, "publish.js"), "utf8")) &&
+        fs.readFileSync(path.join(__dirname, "publish.js"), "utf8")
+          .includes("args.allowNewSigner"));
+
+      /* STP-14 secret scan：含凭据字节 → fail */
+      const scanForbidden = ["MSQTESTSECRETVALUE0123456789"];
+      const scanBad = publish.secretScanApk(
+        Buffer.concat([stableApk, Buffer.from("MSQTESTSECRETVALUE0123456789")]), scanForbidden);
+      const scanOk = publish.secretScanApk(stableApk, scanForbidden);
+      check("STP-14a secret scan：含凭据 → fail（hits 不含凭据内容）",
+        scanBad.ok === false && scanBad.hits.length === 1 &&
+        scanBad.hits[0].indexOf("MSQTEST") < 0);
+      check("STP-14b 干净 APK → pass", scanOk.ok === true);
+
+      /* STP-7 dev 渠道不受 stable 泛化影响（dev 32 项 + 关键行为锚点） */
+      check("STP-7 dev 行为锚点：默认 key/fallback/manifest.channel 全部保持 dev",
+        cospublish.apkObjectKey(13) === "dev/vc13/msq-dev-vc13.apk" &&
+        cospublish.channelCosPrefix("dev") === "dev" &&
+        publish.CHANNELS.dev.fallbackApkUrl === "/api/update/dev/apk" &&
+        publish.CHANNELS.dev.packageName === "com.jty.safetyquiz.dev");
+      await cdnStable.close();
+    }
+
   } catch (e) {
     console.error("\n[异常] " + (e && e.stack || e));
     fails.push("unexpected exception");

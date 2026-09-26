@@ -23,6 +23,16 @@ const cos = require("../cos/cos.js");
 const r2publish = require("./r2_publish.js");
 
 const APK_PREFIX = "dev";   /* 对象前缀；完整 key = dev/vc<N>/msq-dev-vc<N>.apk */
+/* STABLE_RELEASE_PIPELINE_V1：channel-aware 对象布局。
+   dev    → dev/vc<N>/msq-dev-vc<N>.apk      （历史键格式，绝不改变）
+   stable → stable/v<N>/msq-stable-v<N>.apk  （独立前缀，与 /dev/ 完全隔离）
+   两者都禁止 latest.apk / update.apk 等可覆盖固定名。 */
+const CHANNEL_COS_PREFIX = { dev: "dev", stable: "stable" };
+const CHANNEL_KEY_RE = { dev: /^dev\/vc(\d+)\//, stable: /^stable\/v(\d+)\// };
+
+function channelCosPrefix(channel) {
+  return CHANNEL_COS_PREFIX[channel === "stable" ? "stable" : "dev"];
+}
 const APK_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const APK_CONTENT_TYPE = "application/vnd.android.package-archive";
 const DEFAULT_CDN_BASE_URL = "https://apk.shiinalab.top";
@@ -35,14 +45,17 @@ function sha256Hex(buf) {
 }
 
 /* 对象 key：每个 versionCode 一个唯一路径；ASCII 文件名（避免 URL 编码歧义）；
-   禁止 app.apk / latest.apk / update.apk 等可覆盖固定名。 */
-function apkObjectKey(versionCode) {
+   禁止 app.apk / latest.apk / update.apk 等可覆盖固定名。
+   channel 参数缺省 = "dev"，历史调用（apkObjectKey(13)）行为逐字节不变。 */
+function apkObjectKey(versionCode, channel) {
   const vc = Number(versionCode);
+  if (channel === "stable") { return "stable/v" + vc + "/msq-stable-v" + vc + ".apk"; }
   return APK_PREFIX + "/vc" + vc + "/msq-dev-vc" + vc + ".apk";
 }
 
-function apkFileName(versionCode) {
+function apkFileName(versionCode, channel) {
   const vc = Number(versionCode);
+  if (channel === "stable") { return "msq-stable-v" + vc + ".apk"; }
   return "msq-dev-vc" + vc + ".apk";
 }
 
@@ -52,15 +65,17 @@ function normalizeCdnBase(cdnBase) {
   return "https://" + raw;
 }
 
-function apkPublicUrl(cdnBase, versionCode) {
-  return normalizeCdnBase(cdnBase) + "/" + apkObjectKey(versionCode);
+function apkPublicUrl(cdnBase, versionCode, channel) {
+  return normalizeCdnBase(cdnBase) + "/" + apkObjectKey(versionCode, channel);
 }
 
-/* 从对象列表提取 { versionCode, key, size }，vc 降序（prune 用） */
-function parseApkVersions(contents) {
+/* 从对象列表提取 { versionCode, key, size }，vc 降序（prune 用）。
+   channel 决定 key 模式与过滤：dev 模式绝不匹配 stable 键（反之亦然）。 */
+function parseApkVersions(contents, channel) {
+  const re = CHANNEL_KEY_RE[channel === "stable" ? "stable" : "dev"];
   const out = [];
   for (const c of contents || []) {
-    const m = /^dev\/vc(\d+)\//.exec(c.key || "");
+    const m = re.exec(c.key || "");
     if (!m) { continue; }
     out.push({ versionCode: Number(m[1]), key: c.key, size: c.size });
   }
@@ -105,7 +120,7 @@ function loadUpdatesConfig(opts) {
    3) HeadObject：Content-Length + 全部关键 metadata 回读一致
    任何一步失败返回 ok:false —— 调用方不得更新 latest.json。 */
 async function uploadApk(client, config, spec) {
-  const key = apkObjectKey(spec.versionCode);
+  const key = apkObjectKey(spec.versionCode, spec.channel);
   const actualSha = sha256Hex(spec.apkBytes);
   if (actualSha !== String(spec.sha256 || "").toLowerCase()) {
     return {
@@ -124,7 +139,7 @@ async function uploadApk(client, config, spec) {
   const put = await client.putObject(config, config.bucket, key, spec.apkBytes, {
     contentType: APK_CONTENT_TYPE,
     cacheControl: APK_CACHE_CONTROL,
-    contentDisposition: 'attachment; filename="' + apkFileName(spec.versionCode) + '"',
+    contentDisposition: 'attachment; filename="' + apkFileName(spec.versionCode, spec.channel) + '"',
     metadata: metadata,
     payloadHash: actualSha
   });
@@ -186,11 +201,21 @@ async function verifyCdnFullDownload(cdnUrl, localBytes, options) {
 async function publishApk(deps) {
   const { client, config, cdnBaseUrl, versionCode, versionName, packageName,
     apkBytes, sha256, verifyCdn } = deps;
-  const objectKey = apkObjectKey(versionCode);
-  const publicUrl = apkPublicUrl(cdnBaseUrl, versionCode);
+  const channel = deps.channel === "stable" ? "stable" : "dev";
+  /* STP-12：packageName 必须与期望渠道包名一致（期望值来自渠道配置，
+     实际值来自 aapt 实测）——不一致在上传前拒绝，绝不写入任何对象。 */
+  if (deps.expectedPackageName && packageName !== deps.expectedPackageName) {
+    return {
+      ok: false, stage: "package",
+      error: "packageName mismatch (expected " + deps.expectedPackageName +
+        ", got " + packageName + ")"
+    };
+  }
+  const objectKey = apkObjectKey(versionCode, channel);
+  const publicUrl = apkPublicUrl(cdnBaseUrl, versionCode, channel);
 
   const up = await uploadApk(client, config, {
-    versionCode, versionName, packageName, apkBytes, sha256
+    versionCode, versionName, packageName, apkBytes, sha256, channel
   });
   if (!up.ok) {
     return { ok: false, objectKey, publicUrl, stage: up.stage, error: up.error };
@@ -210,15 +235,18 @@ async function publishApk(deps) {
   };
 }
 
-/* ---- prune：保留最新 N 个 vc + current latest 绝不删 ---- */
+/* ---- prune：保留最新 N 个 vc + current latest 绝不删。
+   channel 决定 list 前缀与 key 解析：dev prune 只看 dev/ 键，
+   stable prune 只看 stable/ 键 —— 两个渠道的对象互不触碰。 ---- */
 async function pruneOldApks(deps) {
   const { client, config, keepCount, currentVersionCode } = deps;
+  const channel = deps.channel === "stable" ? "stable" : "dev";
   const keep = Number.isInteger(keepCount) ? keepCount : 3;
-  const listed = await client.listAllObjects(config, config.bucket, APK_PREFIX + "/");
+  const listed = await client.listAllObjects(config, config.bucket, channelCosPrefix(channel) + "/");
   if (!listed.ok) {
     return { ok: false, error: "list failed", status: listed.status };
   }
-  const versions = parseApkVersions(listed.contents);
+  const versions = parseApkVersions(listed.contents, channel);
   const survivors = versions.slice(0, Math.max(keep, 1));
   const survivorKeys = {};
   survivors.forEach(function (v) { survivorKeys[v.key] = true; });
@@ -241,6 +269,8 @@ async function pruneOldApks(deps) {
 
 module.exports = {
   APK_PREFIX: APK_PREFIX,
+  CHANNEL_COS_PREFIX: CHANNEL_COS_PREFIX,
+  channelCosPrefix: channelCosPrefix,
   APK_CONTENT_TYPE: APK_CONTENT_TYPE,
   APK_CACHE_CONTROL: APK_CACHE_CONTROL,
   DEFAULT_CDN_BASE_URL: DEFAULT_CDN_BASE_URL,

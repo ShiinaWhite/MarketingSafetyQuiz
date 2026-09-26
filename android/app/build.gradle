@@ -101,6 +101,17 @@ androidComponents {
             if (devNameProp) { output.versionName.set(devNameProp.toString() + "-dev") }
         }
     }
+    /* STABLE_RELEASE_PIPELINE_V1：stable 版本注入（仅 debug buildType，且只在
+       显式传 -P 时生效——日常 assembleDebug 不传参数则保持 versionCode 1 / 1.0）。
+       stable versionName 无 -dev 后缀。 */
+    onVariants(selector().withBuildType("debug")) { variant ->
+        def stableCodeProp = project.findProperty("STABLE_VERSION_CODE")
+        def stableNameProp = project.findProperty("STABLE_VERSION_NAME")
+        variant.outputs.each { output ->
+            if (stableCodeProp) { output.versionCode.set(stableCodeProp.toString().toInteger()) }
+            if (stableNameProp) { output.versionName.set(stableNameProp.toString()) }
+        }
+    }
 }
 
 /* APK_SIZE_OPTIMIZATION_V1：三个非运行路径 JSON 不进 APK（APK_SIZE_AUDIT_V1 实测：

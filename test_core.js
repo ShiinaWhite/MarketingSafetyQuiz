@@ -2017,10 +2017,48 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("MAIN-7 stable updater 走 stable 渠道（updateChannelFor 映射正确）",
     MSQUpdater.updateChannelFor("com.jty.safetyquiz") === "stable" &&
     MSQUpdater.updateChannelFor("com.jty.safetyquiz.dev") === "dev");
-  check("MAIN-8 当前 publisher 仅输出 dev 渠道（stable 发布路径未接线，不混用 /dev/）",
-    cospubSrc.includes('const APK_PREFIX = "dev"') &&
-    pubSrc.includes('release", "updates", "dev') &&
-    !pubSrc.includes("stable/") && !cospubSrc.includes("stable/"));
+  check("MAIN-8 stable 发布路径不使用 /dev/（渠道配置互相隔离）",
+    pubSrc.includes('cosPrefix: "stable"') && pubSrc.includes('cosPrefix: "dev"') &&
+    pubSrc.includes('fallbackApkUrl: "/api/update/stable/apk"') &&
+    pubSrc.includes('fallbackApkUrl: "/api/update/dev/apk"') &&
+    pubSrc.includes('updatesDir: path.join(ROOT, "release", "updates", "stable")') &&
+    cospubSrc.includes("channelCosPrefix") &&
+    cospubSrc.includes('"stable/v" + vc + "/msq-stable-v" + vc + ".apk"'));
+  const serverSrcMain = fs.readFileSync(path.join(__dirname,
+    "tools/sample_collector/server.js"), "utf8");
+  check("MAIN-8b server 双渠道隔离（stable 读 updates/stable/营销安规刷题.apk）",
+    serverSrcMain.includes('dev: "营销安规刷题-DEV.apk"') &&
+    serverSrcMain.includes('stable: "营销安规刷题.apk"'));
+
+  /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1，源码守卫） —— */
+  check("STP-1/2 publisher 渠道配置：stable package/label 正确且与 dev 隔离",
+    pubSrc.includes('packageName: "com.jty.safetyquiz"') &&
+    pubSrc.includes('label: "营销安规刷题"') &&
+    pubSrc.includes('packageName: "com.jty.safetyquiz.dev"') &&
+    pubSrc.includes('label: EXPECTED_LABEL'));
+  check("STP-3 stable ABI 核验要求全 4 ABI（build 后 aapt 实测）",
+    pubSrc.includes("REQUIRED_STABLE_ABIS = [\"'arm64-v8a'\", \"'armeabi-v7a'\", \"'x86'\", \"'x86_64'\"]") &&
+    pubSrc.includes("stable 全 ABI 核验失败"));
+  check("STP 版本注入：STABLE_VERSION_CODE/NAME 仅 debug buildType，无 -dev 后缀追加",
+    gradleSrc.includes('withBuildType("debug")') &&
+    gradleSrc.includes("STABLE_VERSION_CODE") &&
+    !/STABLE_VERSION_NAME[^\n]*-dev/.test(gradleSrc));
+  check("STP-8~11 fail-closed：stable 复用同一 releaseApk/cospublish 状态机",
+    pubSrc.includes('channel: o.channel === "stable" ? "stable" : "dev"') &&
+    cospubSrc.includes('deps.channel === "stable"') &&
+    pubSrc.includes("stable versionCode 必须 > 现有 latest 的"));
+  check("STP-12 期望包名前置校验在发布主链",
+    pubSrc.includes("expectedPackageName: channel.packageName") &&
+    cospubSrc.includes("packageName mismatch"));
+  check("STP-14 secret scan 在发布主链（失败即拒绝，凭据值不打印）",
+    pubSrc.includes("loadSecretScanForbidden()") &&
+    pubSrc.includes("secretScanApk(apkBytes") &&
+    pubSrc.includes("secret scan 失败") &&
+    /* 只允许打印模式数量（scanForbidden.length），禁止打印任何单个凭据值 */
+    !/console\.(log|error)\([^)]*scanForbidden\[[^\]]*\]/.test(pubSrc));
+  check("STP dry-run：不上传、不写 latest.json（本地校验完成后即返回）",
+    pubSrc.includes("args.dryRun") && pubSrc.includes("== DRY-RUN 完成 ==") &&
+    pubSrc.indexOf("args.dryRun") < pubSrc.indexOf("const rel = await releaseApk"));
 }
 
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */

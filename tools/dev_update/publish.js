@@ -48,6 +48,50 @@ const DEV_APK = path.join(ROOT, "release", "营销安规刷题-DEV.apk");
 
 const EXPECTED_PACKAGE = "com.jty.safetyquiz.dev";
 const EXPECTED_LABEL = "营销安规刷题 DEV";
+
+/* STABLE_RELEASE_PIPELINE_V1：channel 配置 —— 发布行为只由本配置与命令行参数决定，
+   绝不读取 git branch 名。DEV 路径/文件名/默认行为与历史版本逐字节兼容；
+   stable 为新增独立渠道（/stable/ 对象前缀、独立 latest、独立 fallback endpoint）。 */
+const CHANNELS = {
+  dev: {
+    id: "dev",
+    title: "DEV",
+    packageName: "com.jty.safetyquiz.dev",
+    label: EXPECTED_LABEL,
+    gradleTask: ":app:assembleDev",
+    versionProps: { code: "DEV_VERSION_CODE", name: "DEV_VERSION_NAME" },
+    versionNameSuffix: "-dev",
+    cosPrefix: "dev",
+    updatesDir: UPDATES_DIR,
+    updatesApk: UPDATES_APK,
+    latestJson: LATEST_JSON,
+    baselineApk: DEV_APK,
+    shippedApk: DEV_APK,
+    fallbackApkUrl: "/api/update/dev/apk",
+    outApk: OUT_APK,
+    requireCosCdn: false,
+    requireExplicitVersion: false
+  },
+  stable: {
+    id: "stable",
+    title: "STABLE",
+    packageName: "com.jty.safetyquiz",
+    label: "营销安规刷题",
+    gradleTask: ":app:assembleDebug",
+    versionProps: { code: "STABLE_VERSION_CODE", name: "STABLE_VERSION_NAME" },
+    versionNameSuffix: "",
+    cosPrefix: "stable",
+    updatesDir: path.join(ROOT, "release", "updates", "stable"),
+    updatesApk: path.join(ROOT, "release", "updates", "stable", "营销安规刷题.apk"),
+    latestJson: path.join(ROOT, "release", "updates", "stable", "latest.json"),
+    baselineApk: path.join(ROOT, "release", "updates", "stable", "营销安规刷题.apk"),
+    shippedApk: path.join(ROOT, "release", "营销安规刷题.apk"),
+    fallbackApkUrl: "/api/update/stable/apk",
+    outApk: path.join(ANDROID, "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+    requireCosCdn: true,
+    requireExplicitVersion: true
+  }
+};
 const SECRET_FILE = path.join(ROOT, ".secrets", "sample-write-token");
 /* APK 公网下载域（R2 Custom Domain，不经 Tunnel）。可用环境变量覆盖。 */
 const DOWNLOAD_DOMAIN = (process.env.R2_DOWNLOAD_DOMAIN || r2publish.DEFAULT_DOMAIN).trim();
@@ -67,9 +111,40 @@ function fail(msg) {
   process.exit(1);
 }
 
+/* STABLE_RELEASE_PIPELINE_V1：发布前 secret scan —— APK 字节不得包含任何凭据。
+   forbidden 来源：sample write token、.env.cos.updates.local 的 SECRET/TOKEN/KEY 值、
+   通用 private key 标记。凭据值只进内存参与匹配，绝不打印、绝不写入任何输出。 */
+function loadSecretScanForbidden() {
+  const list = ["BEGIN RSA PRIVATE KEY", "BEGIN PRIVATE KEY"];
+  const tok = loadSampleWriteToken();
+  if (tok && tok.length >= 32) { list.push(tok); }
+  try {
+    const env = r2.parseEnvFile(fs.readFileSync(
+      path.join(ROOT, ".env.cos.updates.local"), "utf8"));
+    Object.keys(env).forEach(function (k) {
+      const v = String(env[k] || "").trim();
+      if (/SECRET|TOKEN|KEY/i.test(k) && v.length >= 16) { list.push(v); }
+    });
+  } catch (e) { /* env 文件不存在：跳过（cos-cdn 发布时本就需要它） */ }
+  return list;
+}
+
+/* 返回 { ok, hits }；hits 只含编号与长度（如 "forbidden[1](48B)"），绝不含内容。 */
+function secretScanApk(apkBytes, forbidden) {
+  const hits = [];
+  const list = forbidden || [];
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    if (f && f.length >= 8 && apkBytes.includes(Buffer.from(f, "utf8"))) {
+      hits.push("forbidden[" + i + "](" + f.length + "B)");
+    }
+  }
+  return { ok: hits.length === 0, hits: hits };
+}
+
 function parseArgs(argv) {
   const a = { notes: "", skipSync: false, allowNewSigner: false, r2: false,
-    arm64Only: false, cosCdn: false };
+    arm64Only: false, cosCdn: false, channel: "dev", dryRun: false };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
     if (k === "--notes") { a.notes = argv[++i] || ""; }
@@ -80,6 +155,12 @@ function parseArgs(argv) {
     else if (k === "--r2") { a.r2 = true; }
     else if (k === "--arm64-only") { a.arm64Only = true; }
     else if (k === "--cos-cdn") { a.cosCdn = true; }
+    else if (k === "--channel") {
+      const c = argv[++i];
+      if (c !== "dev" && c !== "stable") { fail("未知 channel：" + c + "（仅 dev | stable）"); }
+      a.channel = c;
+    }
+    else if (k === "--dry-run") { a.dryRun = true; }
     else fail("未知参数：" + k);
   }
   return a;
@@ -152,46 +233,62 @@ function writeAtomic(target, data) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  console.log("== MSQ DEV 更新发布 ==");
+  const channel = CHANNELS[args.channel] || CHANNELS.dev;
+  console.log("== MSQ " + channel.title + " 更新发布 ==");
+  if (channel.id === "stable") {
+    if (args.arm64Only) { fail("stable 发布不支持 --arm64-only（stable 保持全 ABI 兼容）"); }
+    if (!args.cosCdn) { fail("stable 发布必须 --cos-cdn（stable 走 CDN 数据面，禁止 local/Tunnel 模式）"); }
+    if (args.r2) { fail("stable 发布不支持 --r2（仅 --cos-cdn）"); }
+  }
 
-  /* 1) 下一 versionCode：显式指定 > max(现有 latest.json, 现有 DEV APK, R2 已有 vc) + 1 */
+  /* 1) 版本确定：DEV = 显式指定 > max(现有 latest/DEV APK/R2 已有 vc) + 1；
+     STABLE = 必须显式 --version-code/--version-name（禁止自动选号），且不得降级 */
   let prevCode = 0;
   try {
-    const prev = JSON.parse(fs.readFileSync(LATEST_JSON, "utf8"));
+    const prev = JSON.parse(fs.readFileSync(channel.latestJson, "utf8"));
     if (prev && typeof prev.versionCode === "number") { prevCode = prev.versionCode; }
   } catch (e) { /* 无上一版 */ }
-  if (fs.existsSync(DEV_APK)) {
-    const prevApk = aaptBadging(DEV_APK);
-    if (prevApk.versionCode && prevApk.versionCode > prevCode) { prevCode = prevApk.versionCode; }
-  }
-  /* R2 上已有的 vc 也参与：本地 release/ 被清掉时不会重发同一 vc（内容不可变，重发会失败） */
-  if (!args.versionCode) {
-    const loadedForVersion = r2.loadConfig({ root: ROOT });
-    if (loadedForVersion.ok) {
-      try {
-        const listed = await r2.listAllObjects(loadedForVersion.config,
-          loadedForVersion.config.downloadBucket, r2publish.APK_PREFIX + "/");
-        if (listed.ok) {
-          const versions = r2publish.parseApkVersions(listed.contents);
-          if (versions.length && versions[0].versionCode > prevCode) {
-            prevCode = versions[0].versionCode;
-            console.log("（R2 已有更高版本 vc" + prevCode + "，据此递增）");
-          }
-        }
-      } catch (e) { /* R2 暂不可达：本地信息足够，后续上传会再校验 */ }
+  if (channel.id === "dev") {
+    if (fs.existsSync(DEV_APK)) {
+      const prevApk = aaptBadging(DEV_APK);
+      if (prevApk.versionCode && prevApk.versionCode > prevCode) { prevCode = prevApk.versionCode; }
     }
+    /* R2 上已有的 vc 也参与：本地 release/ 被清掉时不会重发同一 vc（内容不可变，重发会失败） */
+    if (!args.versionCode) {
+      const loadedForVersion = r2.loadConfig({ root: ROOT });
+      if (loadedForVersion.ok) {
+        try {
+          const listed = await r2.listAllObjects(loadedForVersion.config,
+            loadedForVersion.config.downloadBucket, r2publish.APK_PREFIX + "/");
+          if (listed.ok) {
+            const versions = r2publish.parseApkVersions(listed.contents);
+            if (versions.length && versions[0].versionCode > prevCode) {
+              prevCode = versions[0].versionCode;
+              console.log("（R2 已有更高版本 vc" + prevCode + "，据此递增）");
+            }
+          }
+        } catch (e) { /* R2 暂不可达：本地信息足够，后续上传会再校验 */ }
+      }
+    }
+  }
+  if (channel.requireExplicitVersion && (!args.versionCode || !args.versionName)) {
+    fail("stable 发布必须显式 --version-code 与 --version-name（禁止自动选号）");
   }
   const versionCode = args.versionCode || (prevCode + 1);
   if (!(Number.isInteger(versionCode) && versionCode > 0)) { fail("versionCode 无效"); }
   const versionNameBase = args.versionName || ("1.0." + versionCode);
-  const versionName = versionNameBase + "-dev";
-  console.log("目标版本：versionCode=" + versionCode + " versionName=" + versionName);
+  const versionName = channel.versionNameSuffix
+    ? versionNameBase + channel.versionNameSuffix
+    : versionNameBase;
+  if (channel.id === "stable" && prevCode > 0 && versionCode <= prevCode) {
+    fail("stable versionCode 必须 > 现有 latest 的 " + prevCode + "（禁止降级/重发）");
+  }
+  console.log("目标版本：versionCode=" + versionCode + " versionName=" + versionName +
+    "（channel=" + channel.id + "）");
 
   /* 2) APK 数据面选择（COS_SAMPLE_TRANSFER_V1 约定）：
-     本轮 APK 下载**不走** COS，仍用现有 SELF_UPDATE 链路（Collector 经 Tunnel 提供
-     /api/update/dev/apk，apkUrl 保持相对路径）。R2 发布路径保留为可选 --r2，
-     只有显式传 --r2 才要求 R2 credential —— R2 不是默认，也不再是阻塞项。 */
-  const useR2 = args.r2 === true;
+     dev 默认仍走 SELF_UPDATE 链路（--cos-cdn 切 CDN 数据面）；stable 必须 --cos-cdn。 */
+  const useR2 = args.r2 === true && channel.id === "dev";
   /* APK_DELIVERY_COS_CDN_VC13_V1：--cos-cdn 数据面（腾讯 COS 私有桶 + CDN）。
      与 --r2 / local 互斥；凭据来自仓库根 .env.cos.updates.local（gitignored）。 */
   const useCosCdn = args.cosCdn === true;
@@ -218,7 +315,7 @@ async function main() {
     r2config = loaded.config;
     console.log("APK 数据面：R2 Custom Domain（显式 --r2），bucket=" +
       r2config.downloadBucket + " domain=" + DOWNLOAD_DOMAIN);
-  } else {
+  } else if (!useCosCdn) {
     console.log("APK 数据面：现有 SELF_UPDATE 链路（Collector/Tunnel，apkUrl 相对路径）");
     console.log("  （样本 capture.jpg 的 COS 直传与 APK 下载是两条独立链路，本轮只动前者）");
   }
@@ -234,71 +331,115 @@ async function main() {
     fail("sample write secret missing —— 拒绝发布无法认证上传的 APK" +
       "（运行 node tools/sample_auth/init_secret.js 生成）");
   }
-  const gradleArgs = [":app:assembleDev",
-    "-PDEV_VERSION_CODE=" + versionCode,
-    "-PDEV_VERSION_NAME=" + versionNameBase,
+  const gradleArgs = [channel.gradleTask,
+    "-P" + channel.versionProps.code + "=" + versionCode,
+    "-P" + channel.versionProps.name + "=" + versionNameBase,
     "-PMSQ_SAMPLE_WRITE_TOKEN=" + writeToken];
   if (args.arm64Only) {
     gradleArgs.push("-PDEV_ARM64_ONLY=1");
     console.log("→ DEV_ARM64_ONLY：本发布仅保留 arm64-v8a");
   }
-  console.log("→ gradlew :app:assembleDev（样本写接口 token 已注入构建，值不打印）");
+  console.log("→ gradlew " + channel.gradleTask + "（样本写接口 token 已注入构建，值不打印）");
   const g = run(GRADLEW, gradleArgs, ANDROID);
   if (g.status !== 0) { fail("构建失败：" + (g.stderr || g.stdout).slice(-600)); }
-  if (!fs.existsSync(OUT_APK)) { fail("构建产物缺失：" + OUT_APK); }
+  if (!fs.existsSync(channel.outApk)) { fail("构建产物缺失：" + channel.outApk); }
 
   /* 4) 实测校验构建产物（不信文件名） */
-  const info = aaptBadging(OUT_APK);
+  const info = aaptBadging(channel.outApk);
   console.log("构建产物：", JSON.stringify(info));
-  if (info.packageName !== EXPECTED_PACKAGE) { fail("packageName 不符：" + info.packageName); }
+  if (info.packageName !== channel.packageName) { fail("packageName 不符：" + info.packageName); }
   if (info.versionCode !== versionCode) { fail("versionCode 不符：" + info.versionCode); }
   if (info.versionName !== versionName) { fail("versionName 不符：" + info.versionName); }
-  if (info.label !== EXPECTED_LABEL) { fail("app label 不符：" + info.label); }
+  if (info.label !== channel.label) { fail("app label 不符：" + info.label); }
   /* APK_SIZE_OPTIMIZATION_V1：ABI 布局实测核验（aapt native-code，不信构建参数）。
-     --arm64-only 时必须恰好 arm64-v8a，否则 30~50MB 级体积回退没人发现 */
-  const nativeBadging = withAsciiCopy(OUT_APK, (p) => run(AAPT, ["dump", "badging", p]));
+     --arm64-only 时必须恰好 arm64-v8a；stable 必须包含全部 4 个 ABI（全兼容策略）。 */
+  const nativeBadging = withAsciiCopy(channel.outApk, (p) => run(AAPT, ["dump", "badging", p]));
   const nativeCodes = /^native-code: *(.*)$/m.exec(nativeBadging.stdout || "");
   const nativeCodeStr = nativeCodes ? nativeCodes[1] : null;
   if (args.arm64Only && nativeCodeStr !== "'arm64-v8a'") {
     fail("DEV_ARM64_ONLY 核验失败：native-code=" + nativeCodeStr +
       "（期望只有 'arm64-v8a'）。拒绝发布。");
   }
+  if (channel.id === "stable") {
+    const abis = nativeCodeStr ? (nativeCodeStr.match(/'[a-z0-9_-]+'/g) || []) : [];
+    const REQUIRED_STABLE_ABIS = ["'arm64-v8a'", "'armeabi-v7a'", "'x86'", "'x86_64'"];
+    if (!REQUIRED_STABLE_ABIS.every((a) => abis.indexOf(a) >= 0)) {
+      fail("stable 全 ABI 核验失败：native-code=" + nativeCodeStr +
+        "（期望包含 " + REQUIRED_STABLE_ABIS.join(" ") + "）。拒绝发布。");
+    }
+  }
   console.log("native-code：" + nativeCodeStr);
 
-  /* 5) 签名证书与现有 DEV APK 一致性 */
-  const newSigner = signerSha256(OUT_APK);
+  /* 5) 签名证书与该渠道现有 APK 一致性 */
+  const newSigner = signerSha256(channel.outApk);
   if (!newSigner) { fail("无法读取新 APK 签名证书"); }
   let baselineSigner = null;
-  if (fs.existsSync(DEV_APK)) {
-    baselineSigner = signerSha256(DEV_APK);
+  if (fs.existsSync(channel.baselineApk)) {
+    baselineSigner = signerSha256(channel.baselineApk);
   }
   if (baselineSigner && baselineSigner !== newSigner && !args.allowNewSigner) {
-    fail("签名证书与现有 DEV APK 不一致（old=" + baselineSigner + " new=" + newSigner +
+    fail("签名证书与现有 " + channel.title + " APK 不一致（old=" + baselineSigner + " new=" + newSigner +
       "）。禁止发布，否则手机无法覆盖安装。如确需换签请加 --allow-new-signer。");
   }
   console.log("签名证书 SHA-256：" + newSigner + (baselineSigner ? "（与上一版一致）" : "（作为基准记录）"));
 
   /* 6) SHA256 / size（本地一次算好：既做 payload hash，也写进 R2 metadata） */
-  const apkBytes = fs.readFileSync(OUT_APK);
+  const apkBytes = fs.readFileSync(channel.outApk);
   const sha256 = crypto.createHash("sha256").update(apkBytes).digest("hex");
   const size = apkBytes.length;
+
+  /* 6.5) secret scan（STABLE_RELEASE_PIPELINE_V1 / STP-14）：APK 内含凭据即拒绝 */
+  const scanForbidden = loadSecretScanForbidden();
+  const scan = secretScanApk(apkBytes, scanForbidden);
+  if (!scan.ok) {
+    fail("secret scan 失败：APK 内检测到疑似凭据（" + scan.hits.join(", ") +
+      "）。拒绝发布，latest.json 未改动。");
+  }
+  console.log("→ secret scan：通过（" + scanForbidden.length + " 项模式，APK 无凭据）");
+
+  /* dry-run（STABLE_RELEASE_PIPELINE_V1）：完成全部本地校验后停止，
+     绝不上传 COS、绝不写 latest.json —— 用于正式发布前的机械验证。 */
+  if (args.dryRun) {
+    console.log("\n== DRY-RUN（未上传、未写 latest.json）==");
+    console.log("channel        :", channel.id);
+    console.log("gradleTask     :", channel.gradleTask);
+    console.log("objectKey(将写):", cospublish.apkObjectKey(versionCode, channel.id));
+    console.log("apkUrl(将写)   :", useCosCdn
+      ? cospublish.apkPublicUrl(cosCdnBase, versionCode, channel.id)
+      : channel.fallbackApkUrl + "（相对路径）");
+    console.log("fallbackApkUrl :", channel.fallbackApkUrl);
+    console.log("latest.json    :", channel.latestJson);
+    console.log("manifest 预览 :", JSON.stringify({
+      schemaVersion: 1, channel: channel.id, packageName: channel.packageName,
+      versionCode: versionCode, versionName: versionName,
+      sha256: sha256.slice(0, 16) + "…", size: size, notes: args.notes || ""
+    }, null, 2));
+    console.log("== DRY-RUN 完成 ==");
+    return;
+  }
 
   /* 7-9) 原子发布 latest.json（local 默认 / --r2 可选）
      全部顺序保证集中在 releaseApk()（可单测：失败绝不写 latest）。 */
   const rel = await releaseApk({
     mode: useR2 ? "r2" : (useCosCdn ? "cos-cdn" : "local"),
+    channel: channel.id,
     config: useCosCdn ? cosConfig : r2config,
     domain: DOWNLOAD_DOMAIN,
     cdnBaseUrl: useCosCdn ? cosCdnBase : null,
-    fallbackApkUrl: useCosCdn ? "/api/update/dev/apk" : null,
+    fallbackApkUrl: useCosCdn ? channel.fallbackApkUrl : null,
+    expectedPackageName: channel.packageName,
     versionCode: versionCode,
     versionName: versionName,
-    packageName: EXPECTED_PACKAGE,
+    packageName: channel.packageName,
     apkBytes: apkBytes,
     sha256: sha256,
     notes: args.notes || "",
     keepCount: DEV_APK_KEEP_COUNT,
     prevCode: prevCode,
+    paths: {
+      updatesDir: channel.updatesDir, updatesApk: channel.updatesApk,
+      latestJson: channel.latestJson, devApk: channel.shippedApk
+    },
     log: console.log
   });
   if (!rel.ok) {
@@ -307,9 +448,9 @@ async function main() {
   }
 
   console.log("\n== 发布完成 ==");
-  console.log("latest.json :", LATEST_JSON);
-  console.log("updates APK :", UPDATES_APK);
-  console.log("DEV APK     :", DEV_APK);
+  console.log("latest.json :", channel.latestJson);
+  console.log("updates APK :", channel.updatesApk);
+  console.log(channel.title + " APK     :", channel.shippedApk);
   console.log("versionCode :", versionCode);
   console.log("versionName :", versionName);
   console.log("size        :", size);
@@ -356,6 +497,8 @@ async function releaseApk(opts) {
     };
     const pub = await cospublish.publishApk({
       client: client, config: o.config, cdnBaseUrl: o.cdnBaseUrl,
+      channel: o.channel === "stable" ? "stable" : "dev",
+      expectedPackageName: o.expectedPackageName || o.packageName,
       versionCode: o.versionCode, versionName: o.versionName,
       packageName: o.packageName, apkBytes: o.apkBytes, sha256: o.sha256,
       verifyCdn: o.verifyCdn
@@ -421,11 +564,12 @@ async function releaseApk(opts) {
 async function writeManifestAndPrune(o, paths, pruneClient, log, info) {
   const manifest = {
     schemaVersion: 1,
-    channel: "dev",
+    channel: o.channel === "stable" ? "stable" : "dev",
     packageName: o.packageName,
     versionCode: o.versionCode,
     versionName: o.versionName,
-    apkUrl: info.apkUrl || "/api/update/dev/apk",
+    apkUrl: info.apkUrl || (o.channel === "stable"
+      ? "/api/update/stable/apk" : "/api/update/dev/apk"),
     fallbackApkUrl: info.fallbackApkUrl || undefined,
     sha256: o.sha256,
     size: o.apkBytes.length,
@@ -444,7 +588,8 @@ async function writeManifestAndPrune(o, paths, pruneClient, log, info) {
       client: pruneClient,
       config: o.config,
       keepCount: o.keepCount,
-      currentVersionCode: o.versionCode
+      currentVersionCode: o.versionCode,
+      channel: o.channel === "stable" ? "stable" : "dev"
     });
     if (!pruned.ok) {
       log("[警告] 旧 APK 清理失败（不影响本次发布）：" + pruned.error);
@@ -490,6 +635,9 @@ if (require.main === module) {
 module.exports = {
   main: main,
   releaseApk: releaseApk,
+  CHANNELS: CHANNELS,
+  secretScanApk: secretScanApk,
+  loadSecretScanForbidden: loadSecretScanForbidden,
   apkObjectKey: r2publish.apkObjectKey,
   apkPublicUrl: r2publish.apkPublicUrl,
   DEV_APK_KEEP_COUNT: DEV_APK_KEEP_COUNT,
