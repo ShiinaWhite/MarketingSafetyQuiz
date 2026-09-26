@@ -1843,6 +1843,122 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     modelSrc.includes("JANITOR_PENDING_RETENTION_MS = 14L * 24 * 3600 * 1000"));
 }
 
+/* ---------- APK_CDN_STABILITY_DIAG_V1：下载链路诊断（CDN-D 系列） ---------- */
+section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
+{
+  const MSQDownloadDiag = require("./www/js/apk-download-diag.js");
+  const st = memStore();
+
+  /* CDN-D1 primary CDN success → transport=cdn */
+  const d1 = MSQDownloadDiag.buildSuccessRecord({
+    transport: "cdn", fallbackUsed: false, fallbackReason: null,
+    result: { httpStatus: 200, bytes: 17211763, downloadMs: 12345, cacheStatus: "Cache Hit" }
+  });
+  check("CDN-D1 primary 成功 → transport=cdn / finalHost=CDN / cache=hit / ok=true",
+    d1.apkDownloadTransport === "cdn" && d1.apkFinalHost === "CDN" &&
+    d1.apkCacheStatus === "hit" && d1.downloadOk === true &&
+    d1.apkHttpStatus === 200 && d1.apkFallbackUsed === false);
+
+  /* CDN-D2 transport error → fallbackUsed=true（legacy 成功覆盖为最终态） */
+  const d2fail = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "DOWNLOAD_FAILED", message: "下载失败：connect timeout" }
+  });
+  const d2ok = MSQDownloadDiag.buildSuccessRecord({
+    transport: "legacy", fallbackUsed: true, fallbackReason: d2fail.apkFallbackReason,
+    result: { httpStatus: 200, bytes: 17211763, downloadMs: 45678, cacheStatus: "Cache Hit" }
+  });
+  check("CDN-D2 回退链：cdn 失败后 legacy 成功 → transport=legacy / fallbackUsed=true",
+    d2fail.downloadOk === false && d2ok.apkDownloadTransport === "legacy" &&
+    d2ok.apkFallbackUsed === true && d2ok.apkFallbackReason === "DOWNLOAD_FAILED" &&
+    d2ok.apkFinalHost === "Legacy");
+  MSQDownloadDiag.save(st, d2ok);
+  const d2loaded = MSQDownloadDiag.load(st);
+  check("CDN-D2b 保存/加载往返一致（同 store key，最终态可回读）",
+    d2loaded && d2loaded.apkDownloadTransport === "legacy" &&
+    d2loaded.apkFallbackUsed === true && d2loaded.downloadOk === true);
+
+  /* CDN-D3 HTTP 5xx → fallback reason recorded（仅 code+状态，无原始消息） */
+  const d3 = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "HTTP_ERROR", message: "下载失败 HTTP 503" }
+  });
+  check("CDN-D3 HTTP 5xx → 原因记录含状态码（HTTP_ERROR HTTP 503），原始消息不留存",
+    d3.apkFallbackReason === "HTTP_ERROR HTTP 503" && d3.apkHttpStatus === 503 &&
+    d3.downloadOk === false && d3.apkDownloadBytes === null);
+
+  /* CDN-D4 security mismatch → no fallback（记录保持 cdn + 失败） */
+  const d4 = MSQDownloadDiag.buildFailureRecord({
+    transport: "cdn", fallbackUsed: false,
+    error: { code: "SHA_MISMATCH", message: "更新包校验失败（SHA256 不一致）" }
+  });
+  check("CDN-D4 安全校验失败 → 不回退（fallbackUsed=false，原因=SHA_MISMATCH）",
+    d4.apkDownloadTransport === "cdn" && d4.apkFallbackUsed === false &&
+    d4.apkFallbackReason === "SHA_MISMATCH" && d4.apkHttpStatus === null &&
+    d4.apkFinalHost === "CDN");
+
+  /* CDN-D5 legacy success → transport=legacy */
+  const d5 = MSQDownloadDiag.buildSuccessRecord({
+    transport: "legacy", fallbackUsed: true, fallbackReason: "DOWNLOAD_FAILED",
+    result: { httpStatus: 200, bytes: 17193159, downloadMs: 30000, cacheStatus: undefined }
+  });
+  check("CDN-D5 legacy 成功 → transport=legacy / finalHost=Legacy",
+    d5.apkDownloadTransport === "legacy" && d5.apkFinalHost === "Legacy" &&
+    d5.downloadOk === true);
+
+  /* CDN-D6 speed calculation correct */
+  check("CDN-D6 速度计算：17211763B / 12345ms → 1394229 B/s",
+    d1.apkBytesPerSec === Math.round(17211763 * 1000 / 12345) &&
+    d1.apkBytesPerSec === 1394229);
+  check("CDN-D6b 无耗时/零耗时 → 速度为 null（不伪造）",
+    MSQDownloadDiag.buildSuccessRecord({
+      transport: "cdn", fallbackUsed: false, fallbackReason: null,
+      result: { httpStatus: 200, bytes: 100, downloadMs: 0, cacheStatus: "Cache Hit" }
+    }).apkBytesPerSec === null);
+
+  /* CDN-D7 diagnostics contains no credential / domain */
+  const d7 = MSQDownloadDiag.sanitize({
+    schemaVersion: 1, updatedAt: "2026-09-26T09:00:00.000Z", downloadOk: true,
+    apkDownloadTransport: "cdn",
+    apkFallbackReason: "Unknown host apk.shiinalab.top with token=abc",
+    apkHttpStatus: "https://evil.example/snimische",
+    someUnknownKey: "should be dropped",
+    apkFinalHost: "CDN"
+  });
+  const d7text = JSON.stringify(d7);
+  check("CDN-D7 黑名单子串（域名/URL/token）全部过滤，未知键丢弃",
+    !d7text.includes("shiinalab") && !d7text.includes("https://") &&
+    !d7text.includes("token") && !("someUnknownKey" in d7) &&
+    d7.apkFallbackReason === "[filtered]" && d7.apkHttpStatus === "[filtered]");
+  check("CDN-D7b FORBIDDEN 黑名单覆盖任务要求项",
+    ["apk.shiinalab.top", "update.shiinalab.top", "authorization", "secret",
+      "presigned", "cookie"].every((f) => MSQDownloadDiag.FORBIDDEN.indexOf(f) >= 0));
+
+  /* CDN-D8 cache status unknown handled safely */
+  check("CDN-D8 缓存状态解析：明确 indicator 才映射，缺失/未知 → unknown",
+    MSQDownloadDiag.normalizeCacheStatus(undefined) === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus(null) === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus("") === "unknown" &&
+    MSQDownloadDiag.normalizeCacheStatus("Cache Hit") === "hit" &&
+    MSQDownloadDiag.normalizeCacheStatus("Cache Miss") === "miss" &&
+    MSQDownloadDiag.normalizeCacheStatus("X-Whatever") === "unknown" &&
+    d5.apkCacheStatus === "unknown");
+
+  /* native 侧诊断字段守卫（无 URL/域名落盘） */
+  const updSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/java/com/jty/safetyquiz/UpdatePlugin.java"), "utf8");
+  check("CDN-D9 native resolve 携带非敏感诊断字段 + X-Cache-Lookup 解析，不含域名/URL",
+    updSrc.includes('ret.put("httpStatus", status)') &&
+    updSrc.includes('ret.put("downloadMs", downloadMs)') &&
+    updSrc.includes('ret.put("bytesPerSec"') &&
+    updSrc.includes('ret.put("cacheStatus", cacheStatus)') &&
+    updSrc.includes('getHeaderField("X-Cache-Lookup")') &&
+    !updSrc.includes("shiinalab") && !/ret\.put\("(url|host|finalHost)"/.test(updSrc));
+  check("CDN-D9b 诊断模块已接入 app.js 下载链路与 DEV 诊断页（仅 DEV 可见）",
+    appSrc.includes("diag.buildSuccessRecord({") && appSrc.includes("diag.buildFailureRecord({") &&
+    appSrc.includes('add("最近下载来源"') && appSrc.includes('add("是否发生回退"'));
+}
+
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
 section("样本反馈：状态绑定 sampleId（FB-P 系列，纯函数）");
 {

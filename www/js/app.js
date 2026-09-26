@@ -1875,6 +1875,22 @@
         } else {
           add("诊断数据", "需升级安装包");
         }
+        /* APK_CDN_STABILITY_DIAG_V1：最近一次更新下载链路（非敏感，仅 DEV 诊断） */
+        var dl = (typeof MSQDownloadDiag !== "undefined" && MSQDownloadDiag)
+          ? MSQDownloadDiag.load(typeof localStorage !== "undefined" ? localStorage : null) : null;
+        if (dl) {
+          add("最近下载来源", dl.apkDownloadTransport === "cdn" ? "CDN"
+            : (dl.apkDownloadTransport === "legacy" ? "Legacy 备用通道" : "未知"));
+          add("是否发生回退", dl.apkFallbackUsed ? "是（CDN → Legacy）" : "否");
+          add("回退原因", dl.apkFallbackReason || "—");
+          add("HTTP 状态", dl.apkHttpStatus || "—");
+          add("下载字节数", dl.apkDownloadBytes ? fmtBytes(dl.apkDownloadBytes) : "—");
+          add("下载耗时", dl.apkDownloadMs ? (Math.round(dl.apkDownloadMs / 100) / 10) + " s" : "—");
+          add("平均下载速度", dl.apkBytesPerSec ? Math.round(dl.apkBytesPerSec / 1024) + " KB/s" : "—");
+          add("CDN 缓存", dl.apkCacheStatus === "hit" ? "命中"
+            : (dl.apkCacheStatus === "miss" ? "未命中" : "未知"));
+          add("下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败");
+        }
         box.innerHTML = "";
         rows.forEach(function (line) {
           var p = document.createElement("p");
@@ -2075,6 +2091,10 @@
     updatePhase = "downloading";
     updateSetError("");
     renderUpdateView("正在下载 0%");
+    /* APK_CDN_STABILITY_DIAG_V1：非敏感下载诊断（只进 DEV 诊断页） */
+    var diagStore = (typeof localStorage !== "undefined") ? localStorage : null;
+    var diag = (typeof MSQDownloadDiag !== "undefined") ? MSQDownloadDiag : null;
+    var firstFailureReason = null;
     if (typeof Update.addListener === "function" && !updateProgressBound) {
       updateProgressBound = true;
       Update.addListener("updateDownloadProgress", function (p) {
@@ -2089,15 +2109,34 @@
       });
     }
     var attemptDownload = function (currentUrl, isFallback) {
+      var transport = isFallback ? "legacy" : "cdn";
       Update.downloadUpdate({
         url: currentUrl,
         sha256: updateManifest.sha256,
         expectedPackageName: updateInfo.id,
         expectedVersionCode: updateManifest.versionCode,
         expectedSize: updateManifest.size
-      }).then(function () {
+      }).then(function (res) {
+        if (diag) {
+          diag.save(diagStore, diag.buildSuccessRecord({
+            transport: transport,
+            fallbackUsed: isFallback,
+            fallbackReason: firstFailureReason,
+            result: res || {}
+          }));
+        }
         afterDownloadVerified();
       }, function (e) {
+        if (diag) {
+          diag.save(diagStore, diag.buildFailureRecord({
+            transport: transport,
+            fallbackUsed: isFallback,
+            error: e
+          }));
+          if (!firstFailureReason) {
+            firstFailureReason = diag.fallbackReasonOf(e);
+          }
+        }
         /* APK_DELIVERY_COS_CDN_VC13_V1：仅明确传输层失败才回退 legacy 通道一次；
            安全校验失败（SHA/size/package/version/signer/解析）= HARD FAIL，
            绝不“换通道再试” */

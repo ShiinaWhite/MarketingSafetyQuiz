@@ -52,6 +52,18 @@ public class UpdatePlugin extends Plugin {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
+    /** APK_CDN_STABILITY_DIAG_V1：解析腾讯 CDN 明确缓存指标（实测 X-Cache-Lookup:
+     *  Cache Hit / Cache Miss）。拿不到或其它值 → unknown，绝不猜测。 */
+    private static String cacheStatusOf(HttpURLConnection conn) {
+        String v = conn.getHeaderField("X-Cache-Lookup");
+        if (v == null || v.isEmpty()) { v = conn.getHeaderField("X-Cache"); }
+        if (v == null || v.isEmpty()) { return "unknown"; }
+        String low = v.toLowerCase();
+        if (low.contains("hit")) { return "hit"; }
+        if (low.contains("miss")) { return "miss"; }
+        return "unknown";
+    }
+
     private File updateDir() {
         return new File(getContext().getCacheDir(), UPDATE_DIR);
     }
@@ -103,6 +115,7 @@ public class UpdatePlugin extends Plugin {
                     }
                     cleanupUpdatesDir();
 
+                    long startedAt = System.currentTimeMillis();   /* 非敏感诊断：耗时/速率 */
                     HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
                     conn.setConnectTimeout(10_000);
                     conn.setReadTimeout(30_000);
@@ -114,6 +127,7 @@ public class UpdatePlugin extends Plugin {
                         call.reject("下载失败 HTTP " + status, "HTTP_ERROR");
                         return;
                     }
+                    String cacheStatus = cacheStatusOf(conn);
                     long contentLength = conn.getContentLengthLong();
                     if (!UpdateVerifier.contentLengthAcceptable(contentLength, UpdateVerifier.MAX_APK_BYTES)) {
                         conn.disconnect();
@@ -179,6 +193,14 @@ public class UpdatePlugin extends Plugin {
                     ret.put("size", total);
                     ret.put("sha256", UpdateVerifier.sha256Hex(md.digest()));
                     ret.put("absolutePath", finalFile.getAbsolutePath());
+                    /* APK_CDN_STABILITY_DIAG_V1：非敏感下载诊断（只进 DEV 诊断页）。
+                       绝不含 URL/域名/凭据；host 标签由 JS 侧根据 primary/fallback 判定。 */
+                    long downloadMs = System.currentTimeMillis() - startedAt;
+                    ret.put("httpStatus", status);
+                    ret.put("downloadMs", downloadMs);
+                    ret.put("bytes", total);
+                    ret.put("bytesPerSec", downloadMs > 0 ? (total * 1000 / downloadMs) : 0);
+                    ret.put("cacheStatus", cacheStatus);
                     call.resolve(ret);
                 } catch (Exception e) {
                     cleanupUpdatesDir();
