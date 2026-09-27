@@ -46,12 +46,17 @@ SQLITE_DRIVER：**node:sqlite**（本机 Node v22.23.2 内置，DatabaseSync + b
 
 ```json
 请求  { "schemaVersion": 1, "androidId": "0123456789abcdef" }
-响应  200 { "ok": true, "deviceId": "<64 hex>" }
+响应  200 { "ok": true, "deviceId": "<64 hex>", "deviceToken": "<64 hex>" }
 ```
 
 - `androidId`：`/^[0-9a-f]{16}$/i`（ANDROID_ID 为 64bit → 16 hex），大小写归一为小写。
 - 非法 → 400 `{ok:false}`；secret 缺失 → 503 FAIL CLOSED；body ≤ 4 KiB。
 - 原始 ANDROID_ID **只在内存中参与 HMAC，不落任何持久层/日志/错误响应**，响应后即丢弃。
+- **DATA_PLATFORM_V1_1**：响应额外签发 `deviceToken = HMAC(secret, "telemetry-batch-v1:"
+  + deviceId)`；此后每笔 `/api/telemetry/batch` 必须同时提交 `deviceId + deviceToken`，
+  服务端重新计算并 timing-safe compare：缺 token → 401，不匹配 → 403，两者都
+  **零入库**。deviceToken 是 HMAC 派生物（非原始 secret），允许保存在客户端本地
+  state；secret 轮换后旧 token 全部失效，客户端对 401/403 清空凭据重新注册（走退避）。
 
 ### 1.2 POST /api/telemetry/batch
 
@@ -59,6 +64,7 @@ SQLITE_DRIVER：**node:sqlite**（本机 Node v22.23.2 内置，DatabaseSync + b
 {
   "schemaVersion": 1,
   "deviceId": "<64 hex>",
+  "deviceToken": "<64 hex>",
   "batches": [
     {
       "batchId": "uuid-v4",
@@ -85,7 +91,7 @@ SQLITE_DRIVER：**node:sqlite**（本机 Node v22.23.2 内置，DatabaseSync + b
 - `channel` allowlist：`dev | stable | unknown`；`packageName` allowlist：
   `com.jty.safetyquiz.dev | com.jty.safetyquiz`（二者强绑定：dev 包必须报 dev channel）。
 - `versionCode` 整数 1..1000000；`versionName` ≤ 40 字符 `[A-Za-z0-9._\-()]`。
-- `counters`：键 ∈ METRIC_CATALOG counter 白名单（35 个），值整数 1..1000000。
+- `counters`：键 ∈ METRIC_CATALOG counter 白名单（38 个），值整数 1..1000000。
 - `histograms`：键 ∈ {photo_total_ms, ocr_ms}，桶标签 ∈ 固定桶集，值整数 1..1000000。
 - 4xx 语义：**400 = 客户端 schema 错误**（服务端返回 `rejected` 明细，客户端丢弃对应 batch，
   不再退避重试）；**404 = 服务器未升级**（旧 Collector 无此路由）→ 按可重试网络错误退避，
@@ -486,7 +492,12 @@ samples.db 只是 index + query + analytics，**Raw → DB 单向**，V1 绝不�
 
 ## 18. AUTH_MODEL
 
-**选择：ANONYMOUS_STRICT_V1（telemetry 匿名写入口 + 严格补偿控制）。**
+**选择：ANONYMOUS_STRICT_V1 + 服务端签发 deviceToken（DATA_PLATFORM_V1_1）。**
+
+注册（register）入口匿名可用；batch 入口自 V1.1 起要求 `deviceId + deviceToken`
+成对提交，token 由 register 用服务端 secret 经域分隔 HMAC 签发、timing-safe 校验，
+不匹配 401/403 且零入库。匿名性语义不变：无账号、无用户身份，token 只绑定
+设备指纹的 HMAC 派生值。
 
 理由：现有 sample 写认证是编译期 BuildConfig 注入的原生 Bearer token，**刻意对 JS 不可
 达**；若 telemetry 复用，就必须把 secret 硬编码进 JS/暴露给 WebView —— 直接违反
@@ -497,7 +508,8 @@ V1 采用匿名入口 + 以下补偿控制（任务书 E 节规定的全套）�
 - strict schema（未知字段/键/值域全拒）、tight rate limit（10/min/IP）、
   body quota（4KiB/128KiB）、**no privileged operations**（两个只写端点，
   无读、无删、无任意键入库）、SQL 全参数绑定、单事务、时间戳 sanity、
-  packageName/channel allowlist。
+  packageName/channel allowlist；V1.1 增加 batch 端 deviceToken 校验
+  （401/403 拒绝同样消耗限流窗口）。
 - 写接口面 = 2 个端点；最坏滥用后果 = 向聚合表写入合法形状的计数行（可回滚/可重算），
   无升级路径、无数据外泄面。
 
@@ -569,3 +581,20 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    recordSample 单一实现（无第二套写逻辑）。
 6. raw ANDROID_ID 的全部可能落点（DB/日志/错误响应/debug dump）逐一封闭。
 7. node:sqlite 不可用时的降级路径覆盖 telemetry 与 samples 两处，业务端点零影响。
+
+---
+
+## 23. V1.1 增补（DATA_PLATFORM_V1_1_HARDEN_AND_ACTIVATE）
+
+1. **deviceToken**（§1.1/§1.2/§18 已同步）：register 响应追加
+   `deviceToken = HMAC(serverSecret, "telemetry-batch-v1:" + deviceId)`；
+   batch 顶层四键 `schemaVersion/deviceId/deviceToken/batches`，服务端 timing-safe
+   compare，缺 token 401、不匹配 403，均零入库；客户端对 401/403 清空凭据走
+   register 退避（secret 轮换自愈）。不变项：ANDROID_ID → server HMAC → deviceId、
+   raw ANDROID_ID 不落盘、匿名无账号模型。deviceToken 是 HMAC 派生物，允许进客户端
+   本地 state（等价 bearer 凭据语义）；原始 secret 仍只在服务端。
+2. **文档勘误**：METRIC_CATALOG_V1 counter 实际 = **38** 个（2 生命周期 + 4 文字搜题 +
+   6 拍题 + 5 识别置信 + 4 AUTO + 5 反馈 + 8 学习模式 + 4 错误），V1 报告误写为 35。
+   metric 集合本身零调整。
+3. **激活**：生产 Collector 按端口 8787 精确定位重启后，telemetry 端点与 samples.db
+   双写正式生效；`tools/sample_db/backfill.js --apply` 补录历史样本。

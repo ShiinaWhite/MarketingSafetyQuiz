@@ -22,6 +22,20 @@ const TEST_SECRET = "tel-test-secret-0123456789abcdef0123456789abcdef";
 const ANDROID_ID_A = "0123456789abcdef";
 const ANDROID_ID_B = "fedcba0987654321";
 const DEV_DEVICE_ID = telemetryStore.telemetryDeviceId(TEST_SECRET, ANDROID_ID_A);
+const DEV_TOKEN = telemetryStore.telemetryBatchToken(TEST_SECRET, DEV_DEVICE_ID);
+
+/* DATA_PLATFORM_V1_1：batch 请求构造（默认带合法 deviceToken） */
+function batchPayload(batches, overrides) {
+  const o = overrides || {};
+  const deviceId = o.deviceId || DEV_DEVICE_ID;
+  return {
+    schemaVersion: 1,
+    deviceId: deviceId,
+    deviceToken: "deviceToken" in o ? o.deviceToken
+      : telemetryStore.telemetryBatchToken(TEST_SECRET, deviceId),
+    batches: batches
+  };
+}
 
 function request(port, method, reqPath, body, headers) {
   return new Promise(function (resolve, reject) {
@@ -96,9 +110,17 @@ async function main() {
     check("deviceId 为 64 hex", typeof r.body.deviceId === "string" &&
       /^[0-9a-f]{64}$/.test(r.body.deviceId));
     const idA1 = r.body.deviceId;
+    /* DATA_PLATFORM_V1_1：register 必须签发可验证的 deviceToken */
+    check("register 返回 deviceToken（64 hex）",
+      typeof r.body.deviceToken === "string" &&
+      /^[0-9a-f]{64}$/.test(r.body.deviceToken));
+    check("deviceToken = HMAC(secret, 'telemetry-batch-v1:'+deviceId)",
+      r.body.deviceToken === telemetryStore.telemetryBatchToken(TEST_SECRET, idA1));
     r = await request(port, "POST", "/api/telemetry/register",
       { schemaVersion: 1, androidId: ANDROID_ID_A });
     check("同 ANDROID_ID（大小写不同）→ 同 deviceId", r.body.deviceId === idA1);
+    check("同 deviceId → 同 deviceToken（确定性）",
+      r.body.deviceToken === telemetryStore.telemetryBatchToken(TEST_SECRET, idA1));
     r = await request(port, "POST", "/api/telemetry/register",
       { schemaVersion: 1, androidId: ANDROID_ID_B });
     check("不同 ANDROID_ID → 不同 deviceId", r.body.deviceId !== idA1);
@@ -120,12 +142,12 @@ async function main() {
     section("TEL-BATCH 合法上报与幂等（A10）");
     const b1 = makeBatch({ counters: { text_search: 3 } });
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1] });
+      batchPayload([b1]));
     check("合法 batch 200 accepted", r.status === 200 &&
       r.body.accepted.length === 1 && r.body.accepted[0] === b1.batchId, r.status);
 
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1] });
+      batchPayload([b1]));
     check("同 batch 重传 → alreadyAccepted", r.status === 200 &&
       r.body.alreadyAccepted.length === 1 && r.body.accepted.length === 0,
       JSON.stringify(r.body));
@@ -133,7 +155,7 @@ async function main() {
     const b2 = makeBatch({ counters: { photo_attempt: 1 }, localDay: "2026-09-26",
       periodEnd: Date.now() - 24 * 3600000, periodStart: Date.now() - 25 * 3600000 });
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1, b2] });
+      batchPayload([b1, b2]));
     check("多 batch 合并上报（重传+新）", r.status === 200 &&
       r.body.alreadyAccepted.length === 1 && r.body.accepted.length === 1,
       JSON.stringify(r.body));
@@ -184,6 +206,8 @@ async function main() {
     check("raw ANDROID_ID 不落 DB 文件字节（含 WAL）",
       allBytes.indexOf(Buffer.from(ANDROID_ID_A)) < 0 &&
       allBytes.indexOf(Buffer.from(ANDROID_ID_B)) < 0);
+    check("server secret 不落 DB 文件字节（含 WAL）",
+      allBytes.indexOf(Buffer.from(TEST_SECRET)) < 0);
     const devRow = db2.db.prepare("SELECT * FROM devices LIMIT 1").get();
     check("devices 无 androidId 列", devRow && !Object.keys(devRow).some(function (k) {
       return k.toLowerCase().indexOf("android") >= 0; }), Object.keys(devRow || {}).join(","));
@@ -222,26 +246,59 @@ async function main() {
     ];
     for (const [label, patch] of badCases) {
       r = await request(port, "POST", "/api/telemetry/batch",
-        { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch(patch)] });
+        batchPayload([makeBatch(patch)]));
       check("拒绝：" + label, r.status === 400, r.status);
     }
     /* 未知 batch 顶层字段 */
     const extraField = makeBatch({});
     extraField.extra = { a: 1 };
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [extraField] });
+      batchPayload([extraField]));
     check("拒绝：未知 batch 字段", r.status === 400, r.status);
-    /* 未知顶层字段 */
-    r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch({})], junk: 1 });
+    /* 未知顶层字段（5 键 → 400） */
+    const extraTop = batchPayload([makeBatch({})]);
+    extraTop.junk = 1;
+    r = await request(port, "POST", "/api/telemetry/batch", extraTop);
     check("拒绝：未知顶层字段", r.status === 400, r.status);
+
+    section("TEL-SERVER deviceToken 校验（DATA_PLATFORM_V1_1）");
+    const noToken = batchPayload([makeBatch({})]);
+    delete noToken.deviceToken;
+    r = await request(port, "POST", "/api/telemetry/batch", noToken);
+    check("缺 deviceToken → 401", r.status === 401, r.status);
+    const noTokenStr = batchPayload([makeBatch({})], { deviceToken: 123 });
+    r = await request(port, "POST", "/api/telemetry/batch", noTokenStr);
+    check("deviceToken 非字符串 → 401（等同缺失）", r.status === 401, r.status);
+    const tokenCountBefore = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
+    let lastTokenResp = null;
+    const OTHER_ID = telemetryStore.telemetryDeviceId(TEST_SECRET, ANDROID_ID_B);
+    for (const [label, override] of [
+      ["token 不匹配", { deviceToken: "f".repeat(64) }],
+      ["token 格式错", { deviceToken: "zz" }],
+      ["token 绑定其他 deviceId（值合法但属他设备）",
+        { deviceId: OTHER_ID, deviceToken: DEV_TOKEN }]
+    ]) {
+      r = await request(port, "POST", "/api/telemetry/batch",
+        batchPayload([makeBatch({})], override));
+      lastTokenResp = r;
+      check("拒绝：" + label + "（403）", r.status === 403, r.status);
+    }
+    const tokenCountAfter = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
+    check("token 拒绝 → DB 零写入", tokenCountAfter === tokenCountBefore,
+      tokenCountBefore + " → " + tokenCountAfter);
+    check("401/403 响应不回显 token / secret",
+      JSON.stringify(lastTokenResp.raw || "").indexOf("f".repeat(64)) < 0 &&
+      (lastTokenResp.raw || "").indexOf(TEST_SECRET) < 0);
+    check("合法 token + 合法 batch 仍 200（对照）",
+      (await request(port, "POST", "/api/telemetry/batch",
+        batchPayload([makeBatch({})]))).status === 200);
 
     section("TEL-SERVER 部分非法 → 整请求拒绝 + rejected 明细（零入库）");
     const goodBatch = makeBatch({});
     const badBatch = makeBatch({ counters: { evil: 1 } });
     const batchCountBefore = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [goodBatch, badBatch] });
+      batchPayload([goodBatch, badBatch]));
     check("400 且 rejected 指向非法 batch", r.status === 400 &&
       Array.isArray(r.body.rejected) && r.body.rejected.length === 1 &&
       r.body.rejected[0].batchId === badBatch.batchId, JSON.stringify(r.body));
@@ -250,26 +307,34 @@ async function main() {
 
     section("TEL-SERVER 请求级上限");
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [] });
+      batchPayload([]));
     check("空 batches 400", r.status === 400);
     const manyBatches = [];
     for (let i = 0; i < 21; i++) { manyBatches.push(makeBatch({})); }
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: manyBatches });
+      batchPayload(manyBatches));
     check("21 个 batch 400", r.status === 400);
-    r = await request(port, "POST", "/api/telemetry/batch",
-      JSON.stringify({ schemaVersion: 1, deviceId: DEV_DEVICE_ID,
-        batches: [makeBatch({})] }).slice(0, -1) + "," + '"junk":"' + "x".repeat(200 * 1024) + '"}');
+    const bigBatch = makeBatch({});
+    bigBatch.counters = { text_search: 1 };
+    const bigPayload = batchPayload([bigBatch]);
+    bigPayload.batches = [];
+    for (let i = 0; i < 20; i++) {
+      const hb = makeBatch({}); hb.batchId = nextBatchId();
+      hb.histograms = { photo_total_ms: { "<1000": 1 } };
+      bigPayload.batches.push(hb);
+    }
+    bigPayload.junk = "x".repeat(200 * 1024);
+    r = await request(port, "POST", "/api/telemetry/batch", bigPayload);
     check("body > 128KiB → 413", r.status === 413, r.status);
     r = await request(port, "POST", "/api/telemetry/batch", "not json at all");
     check("非 JSON → 400", r.status === 400);
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: "ZZZZ", batches: [makeBatch({})] });
+      batchPayload([makeBatch({})], { deviceId: "ZZZZ" }));
     check("deviceId 格式坏 → 400", r.status === 400);
 
     section("TEL-SERVER 错误响应不泄漏内部信息");
     r = await request(port, "POST", "/api/telemetry/batch",
-      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch({ counters: { bad: 1 } })] });
+      batchPayload([makeBatch({ counters: { bad: 1 } })]));
     const rawLower = (r.raw || "").toLowerCase();
     check("无 db 路径 / SQL 字样", rawLower.indexOf("telemetry.db") < 0 &&
       rawLower.indexOf("sqlite") < 0 && rawLower.indexOf("select ") < 0);

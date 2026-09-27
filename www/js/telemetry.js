@@ -119,6 +119,9 @@
       schemaVersion: SCHEMA_VERSION,
       deviceId: (typeof s.deviceId === "string" && /^[0-9a-f]{64}$/.test(s.deviceId))
         ? s.deviceId : null,
+      /* DATA_PLATFORM_V1_1：batch 端凭据（服务端签发的 HMAC 派生物，非原始 secret） */
+      deviceToken: (typeof s.deviceToken === "string" && /^[0-9a-f]{64}$/.test(s.deviceToken))
+        ? s.deviceToken : null,
       currentBucket: freshBucket(nowMs, day),
       outbox: [],
       lastFlushSuccessAt: (typeof s.lastFlushSuccessAt === "number") ? s.lastFlushSuccessAt : 0,
@@ -328,10 +331,13 @@
         })
         .then(function (resp) {
           var id = resp && resp.deviceId;
-          if (!(typeof id === "string" && /^[0-9a-f]{64}$/.test(id))) {
+          var token = resp && resp.deviceToken;
+          if (!(typeof id === "string" && /^[0-9a-f]{64}$/.test(id)) ||
+              !(typeof token === "string" && /^[0-9a-f]{64}$/.test(token))) {
             throw new Error("bad-register-response");
           }
           state.deviceId = id;
+          state.deviceToken = token;
           state.registerRetryAt = 0;
           state.registerAttempts = 0;
           /* 注册本身也是一次 telemetry 网络交互：30min 上传间隔从注册时刻起算（§7） */
@@ -370,6 +376,7 @@
       var payload = {
         schemaVersion: SCHEMA_VERSION,
         deviceId: state.deviceId,
+        deviceToken: state.deviceToken,
         batches: batches
       };
       var body = JSON.stringify(payload);
@@ -412,6 +419,20 @@
         flushing = false;
       }, function (e) {
         var status = e && e.status;
+        if (status === 401 || status === 403) {
+          /* DATA_PLATFORM_V1_1：凭据失效（secret 轮换/服务端重置）→ 清空凭据
+             重新注册（走 register 退避），outbox 数据保留，绝不无限重试 */
+          state.deviceId = null;
+          state.deviceToken = null;
+          state.registerAttempts += 1;
+          state.registerRetryAt = now() + backoffMs(state.registerAttempts, rand);
+          state.flushAttempts = 0;
+          state.nextRetryAt = 0;
+          state.lastFlushResult = "token rejected (" + status + ")";
+          persist();
+          flushing = false;
+          return;
+        }
         if (status === 400) {
           /* schema 拒绝：只丢被拒批次（§8）；无法定位被拒批次时丢弃本次发送的全部
              批次（同一客户端 bug 不会因重试自愈），绝不无限循环 */
@@ -449,7 +470,7 @@
       try {
         if (flushing) { return; }
         var t = now();
-        if (!state.deviceId) {
+        if (!state.deviceId || !state.deviceToken) {
           if (t >= state.registerRetryAt) { registerAndFlush(); }
           return;
         }
@@ -478,7 +499,7 @@
       try {
         var id = state.deviceId;
         return {
-          hasDeviceId: !!id,
+          hasDeviceId: !!(id && state.deviceToken),
           deviceIdMasked: maskDeviceId(id),
           outboxCount: state.outbox.length,
           bucketActions: state.currentBucket.meaningfulActionCount,

@@ -118,13 +118,20 @@ function validateRegisterBody(body) {
 function validateBatchBody(body, nowMs) {
   if (!isPlainObject(body)) { return { ok: false, error: "body must be a JSON object" }; }
   if (body.schemaVersion !== 1) { return { ok: false, error: "unsupported schemaVersion" }; }
+  /* DATA_PLATFORM_V1_1：顶层 = schemaVersion/deviceId/deviceToken/batches 四键。
+     deviceToken 的值校验（64 hex）在此，匹配性校验由 server.js 用
+     timing-safe compare 完成（需要 secret，纯函数不持有）。 */
   const topKeys = Object.keys(body);
-  if (topKeys.length !== 3 ||
-      topKeys.indexOf("deviceId") < 0 || topKeys.indexOf("batches") < 0) {
+  if (topKeys.length !== 4 ||
+      topKeys.indexOf("deviceId") < 0 || topKeys.indexOf("batches") < 0 ||
+      topKeys.indexOf("deviceToken") < 0) {
     return { ok: false, error: "unknown or missing top-level fields" };
   }
   if (typeof body.deviceId !== "string" || !/^[0-9a-f]{64}$/.test(body.deviceId)) {
     return { ok: false, error: "invalid deviceId" };
+  }
+  if (typeof body.deviceToken !== "string" || !/^[0-9a-f]{64}$/.test(body.deviceToken)) {
+    return { ok: false, error: "invalid deviceToken" };
   }
   if (!Array.isArray(body.batches) || body.batches.length < 1 ||
       body.batches.length > MAX_BATCHES_PER_REQUEST) {
@@ -252,6 +259,14 @@ function validateHistogramMap(m) {
 function telemetryDeviceId(secret, androidIdLower) {
   return crypto.createHmac("sha256", secret)
     .update("msq-telemetry-v1:" + androidIdLower).digest("hex");
+}
+
+/* DATA_PLATFORM_V1_1：batch 端 deviceToken（服务端签发，客户端必带）。
+   派生自同一 secret 但域分隔不同（跨协议不可复用）；该值是 HMAC 派生物，
+   非原始 secret，允许保存在客户端本地 state。 */
+function telemetryBatchToken(secret, deviceId) {
+  return crypto.createHmac("sha256", secret)
+    .update("telemetry-batch-v1:" + deviceId).digest("hex");
 }
 
 /* ---------------- secret 装载（环境变量优先，其次 .secrets/telemetry-hmac-key） ---------------- */
@@ -530,6 +545,7 @@ module.exports = {
   validateBatchBody: validateBatchBody,
   validateSingleBatch: validateSingleBatch,
   telemetryDeviceId: telemetryDeviceId,
+  telemetryBatchToken: telemetryBatchToken,
   loadTelemetrySecret: loadTelemetrySecret,
   openTelemetryStore: openTelemetryStore
 };

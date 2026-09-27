@@ -2566,6 +2566,7 @@ const MSQTelemetry = require("./www/js/telemetry.js");
 async function runTelemetryTests() {
   const flush = () => new Promise((r) => setTimeout(r, 0));
   const DEV64 = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
+  const TOKEN64 = "ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56";
 
   function fakeClock(startDay) {
     /* 起点 ≥ 30min（上传节流窗口），避免 lastUploadAttemptAt=0 干扰判定 */
@@ -2587,7 +2588,8 @@ async function runTelemetryTests() {
     };
   }
 
-  /* ACK 语义与真实服务端一致：register 返回 deviceId，batch 全部 accepted */
+  /* ACK 语义与真实服务端一致：register 返回 deviceId+deviceToken，batch 全部 accepted。
+     fail = 全通道失败；batchFail/registerFail = 仅对应通道失败。 */
   function fakeTransport(options) {
     const o = options || {};
     const calls = [];
@@ -2597,8 +2599,10 @@ async function runTelemetryTests() {
         calls.push({ url: url, body: body });
         if (o.fail) { return Promise.reject(o.fail()); }
         if (url.endsWith("/api/telemetry/register")) {
-          return Promise.resolve({ ok: true, deviceId: DEV64 });
+          if (o.registerFail) { return Promise.reject(o.registerFail()); }
+          return Promise.resolve({ ok: true, deviceId: DEV64, deviceToken: TOKEN64 });
         }
+        if (o.batchFail) { return Promise.reject(o.batchFail()); }
         return Promise.resolve({ ok: true,
           accepted: body.batches.map((b) => b.batchId), alreadyAccepted: [] });
       },
@@ -2618,10 +2622,15 @@ async function runTelemetryTests() {
     const fc = o.clock || fakeClock();
     const timer = o.timer || fakeTimer();
     const transport = o.transport || fakeTransport();
-    let savedDeviceId = o.deviceId || null;
+    /* DATA_PLATFORM_V1_1：有 deviceId 的种子 state 自动补 deviceToken，
+       除非用例显式构造 token 缺失/失效场景 */
+    let initialState = o.initialState || null;
+    if (initialState && initialState.deviceId && !initialState.deviceToken) {
+      initialState = Object.assign({}, initialState, { deviceToken: TOKEN64 });
+    }
     const ctrl = MSQTelemetry.createController({
       storage: {
-        load: () => o.initialState || null,
+        load: () => initialState,
         save: (s) => { saves.push(JSON.parse(JSON.stringify(s))); }
       },
       clock: fc.clock,
@@ -2638,17 +2647,18 @@ async function runTelemetryTests() {
         : o.appInfo,
       random: o.random || (() => 0.5)
     });
-    return { ctrl: ctrl, saves: saves, timer: timer, transport: transport, fc: fc,
-      getSavedDeviceId: () => savedDeviceId };
+    return { ctrl: ctrl, saves: saves, timer: timer, transport: transport, fc: fc };
   }
 
   /* ---------- TEL-ID：注册与缓存（服务端确定性在 test_telemetry.js） ---------- */
-  section("TEL-ID 客户端注册与 deviceId 缓存");
+  section("TEL-ID 客户端注册与 deviceId/deviceToken 缓存");
   {
     const env = makeCtrl({});
     env.ctrl.attemptFlush("cold");
     await flush();
     check("首次注册成功 → deviceId 缓存", env.ctrl.stateSnapshot().deviceId === DEV64);
+    check("deviceToken 同步缓存（DATA_PLATFORM_V1_1）",
+      env.ctrl.stateSnapshot().deviceToken === TOKEN64);
     check("register 恰一次", env.transport.registerPosts().length === 1);
     env.ctrl.attemptFlush("resume");
     await flush();
@@ -2678,8 +2688,9 @@ async function runTelemetryTests() {
     await flush();
     check("30 动作冻结 → 上行一次 batch POST", env.transport.batchPosts().length === 1);
     const body = env.transport.batchPosts()[0].body;
-    check("payload 顶层 = schemaVersion/deviceId/batches",
-      body.schemaVersion === 1 && body.deviceId === DEV64 && Array.isArray(body.batches));
+    check("payload 顶层 = schemaVersion/deviceId/deviceToken/batches",
+      body.schemaVersion === 1 && body.deviceId === DEV64 &&
+      body.deviceToken === TOKEN64 && Array.isArray(body.batches));
     const b = body.batches[0];
     const keys = Object.keys(b).sort();
     check("batch 恰 10 个字段", JSON.stringify(keys) === JSON.stringify([
@@ -2877,6 +2888,31 @@ async function runTelemetryTests() {
       check("HTTP " + status + " → 数据保留 + 退避", envX.ctrl.stateSnapshot().outbox.length === 2 &&
         envX.ctrl.stateSnapshot().flushAttempts === 1);
     }
+
+    /* DATA_PLATFORM_V1_1：401/403 → 凭据清除 + 重新注册退避，outbox 保留 */
+    for (const status of [401, 403]) {
+      const envAuth = makeCtrl({
+        initialState: JSON.parse(JSON.stringify(seed)),
+        transport: fakeTransport({
+          batchFail: () => Object.assign(new Error("HTTP " + status), { status: status })
+        })
+      });
+      envAuth.ctrl.attemptFlush("cold");
+      await flush();
+      const stAuth = envAuth.ctrl.stateSnapshot();
+      check("HTTP " + status + " → deviceId/deviceToken 清空，outbox 保留",
+        stAuth.deviceId === null && stAuth.deviceToken === null &&
+        stAuth.outbox.length === 2);
+      check("HTTP " + status + " → 安排 register 退避",
+        stAuth.registerAttempts === 1 && stAuth.registerRetryAt > stAuth.lastUploadAttemptAt);
+      /* 退避窗口内不重试注册；到期后重新注册拿新凭据 */
+      envAuth.fc.c.nowMs = stAuth.registerRetryAt + 1;
+      envAuth.ctrl.attemptFlush("resume");
+      await flush();
+      check("HTTP " + status + " → 到期重新注册并恢复凭据",
+        envAuth.ctrl.stateSnapshot().deviceId === DEV64 &&
+        envAuth.ctrl.stateSnapshot().deviceToken === TOKEN64);
+    }
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */
@@ -2921,9 +2957,9 @@ async function runTelemetryTests() {
     const st = env.ctrl.stateSnapshot();
     const stateKeys = Object.keys(st).sort();
     check("state 顶层字段固定", JSON.stringify(stateKeys) === JSON.stringify([
-      "currentBucket", "deviceId", "flushAttempts", "lastFlushResult", "lastFlushSuccessAt",
-      "lastUploadAttemptAt", "nextRetryAt", "outbox", "registerAttempts", "registerRetryAt",
-      "schemaVersion"]), stateKeys.join(","));
+      "currentBucket", "deviceId", "deviceToken", "flushAttempts", "lastFlushResult",
+      "lastFlushSuccessAt", "lastUploadAttemptAt", "nextRetryAt", "outbox",
+      "registerAttempts", "registerRetryAt", "schemaVersion"]), stateKeys.join(","));
     check("桶字段固定（无事件列表）", Object.keys(st.currentBucket).every((k) =>
       ["periodStart", "periodEnd", "localDay", "counters", "histograms",
         "meaningfulActionCount", "batchId"].indexOf(k) >= 0));

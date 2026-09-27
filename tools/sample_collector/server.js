@@ -865,13 +865,36 @@ function handleTelemetryRegister(res, ctx, body) {
   const secret = ctx.telemetry.secret;
   if (!secret) { sendJSON(res, 503, { ok: false, error: "telemetry unavailable" }); return; }
   const deviceId = ctx.telemetry.module.telemetryDeviceId(secret, v.androidId);
-  sendJSON(res, 200, { ok: true, deviceId: deviceId });
+  /* DATA_PLATFORM_V1_1：batch 端凭据同响应签发（客户端此后每笔 batch 必带） */
+  const deviceToken = ctx.telemetry.module.telemetryBatchToken(secret, deviceId);
+  sendJSON(res, 200, { ok: true, deviceId: deviceId, deviceToken: deviceToken });
+}
+
+/* DATA_PLATFORM_V1_1：deviceToken 校验。缺 token → 401；不匹配 → 403。
+   先比长度再恒定时间比较（与写接口 token 同款做法）；校验先于 schema/DB，
+   不匹配绝不入库。校验失败同样消耗 telemetry 限流窗口（10/min/IP）。 */
+function checkTelemetryBatchToken(ctx, body) {
+  if (!ctx.telemetry.secret) { return 503; }
+  if (!body || typeof body !== "object" || typeof body.deviceToken !== "string") {
+    return 401;
+  }
+  if (typeof body.deviceId !== "string" || !/^[0-9a-f]{64}$/.test(body.deviceId)) {
+    return 400;   /* deviceId 非法：schema 错误，token 无绑定对象可校验 */
+  }
+  const provided = body.deviceToken;
+  if (!/^[0-9a-f]{64}$/.test(provided)) { return 403; }
+  const expected = ctx.telemetry.module.telemetryBatchToken(
+    ctx.telemetry.secret, body.deviceId);
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) { return 403; }
+  return crypto.timingSafeEqual(a, b) ? 0 : 403;
 }
 
 function handleTelemetryBatch(res, ctx, body, nowMs) {
-  if (!ctx.telemetry.secret) {
-    /* 与 register 同规则：secret 缺失 → FAIL CLOSED（§3），绝不接受匿名写入 */
-    sendJSON(res, 503, { ok: false, error: "telemetry unavailable" });
+  const tokenFail = checkTelemetryBatchToken(ctx, body);
+  if (tokenFail) {
+    sendJSON(res, tokenFail, { ok: false, error: "telemetry unavailable" });
     return;
   }
   const v = ctx.telemetry.module.validateBatchBody(body, nowMs);
