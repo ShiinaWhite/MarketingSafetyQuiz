@@ -342,6 +342,13 @@
     if (mode !== "recite" && mode !== "wrong") {
       list = list.map(function (q) { return MSQ.shuffleQuestionOptions(q, Math.random); });
     }
+    /* USAGE_TELEMETRY_V1：学习模式启动计数（在全部早退之后，只有会话真正建立才计） */
+    var MODE_START_METRICS = {
+      seq: "mode_sequence_start", rand: "mode_random_start", single: "mode_single_start",
+      multi: "mode_multi_start", judge: "mode_judge_start", wrong: "mode_wrong_start",
+      recite: "mode_recite_start"
+    };
+    if (MODE_START_METRICS[mode]) { tRecord(MODE_START_METRICS[mode]); }
     P = {
       mode: mode, list: list,
       pos: Math.max(0, Math.min(Store.data.positions[mode] || 0, list.length - 1)),
@@ -533,6 +540,7 @@
 
   /* ---------------- 模拟考试 ---------------- */
   function startExam() {
+    tRecord("mode_exam_start");
     E = { paper: MSQ.generateExam(byType, examConfig(), Math.random), answers: {}, pos: 0, result: null };
     P = null;
     show("view-quiz", "forward");
@@ -823,6 +831,9 @@
     var emptyEl = $("search-empty");
     if (emptyEl) { emptyEl.classList.toggle("hidden", q !== ""); }
     var all = MSQ.searchQuestions(searchIndex, q);
+    /* USAGE_TELEMETRY_V1：逻辑搜题口径（空闲门+去重）——逐字输入只产出 1 次计数，
+       query 字符串只在本模块内存参与判定，绝不持久化/上传 */
+    tObserveSearch(q, all.length);
     var counts = MSQ.countSearchResultsByType(all);
     renderFilterBar(counts, q !== "");
     /* 一次搜索 + 一次过滤：只从有序结果里摘取，不重搜、不重排 */
@@ -953,6 +964,8 @@
   var detailReturnContext = { source: "search", batchScrollTop: 0, batchWindowY: 0 };
 
   function openSearchDetail(id, source) {
+    /* search_result_open 独立计数：只统计文字搜题结果点击（batch 候选打开不计） */
+    if (source !== "batch-results") { tRecord("search_result_open"); }
     var q = null;
     bank.questions.forEach(function (x) { if (x.id === id) { q = x; } });
     if (!q) { return; }
@@ -1389,6 +1402,7 @@
      拍摄本身永远固定 AUTO（CAP-S4），这里是拍后用户的有意识纠正。 */
   function switchBatchPageType(mode) {
     if (!lastBatch || !lastBatch.lines) { return; }
+    if (mode !== "auto") { tRecord("type_manual_correction"); }
     var lines = lastBatch.lines;
     var tSplit = performance.now();
     MSQ.splitPageOcrLines(lines, mode === "auto" ? "single" : mode);
@@ -1529,6 +1543,7 @@
     }
     /* 相机取消时回到拍摄入口页（menu 入口 → 首页；搜题页 📷 → 搜题页） */
     captureOriginView = (currentViewId() === "view-search") ? "view-search" : "view-menu";
+    tRecord("photo_attempt");
     var photo;
     try {
       photo = await Camera.getPhoto({
@@ -1543,11 +1558,17 @@
       var msg = String((e && e.message) || e);
       if (/permission|denied/i.test(msg)) {
         Modal.alert("无法使用相机", "请授予相机权限后重试");
+        tRecord("camera_error");
+      } else if (/cancel/i.test(msg)) {
+        tRecord("photo_cancel");
+      } else {
+        tRecord("camera_error");
       }
       /* 用户取消：静默回到入口页，绝不进入任何中间页 */
       show(captureOriginView, "backward");
       return;
     }
+    tRecord("photo_capture_success");
     var totalStart = performance.now();
     var ocrMs = 0, text = "", lines = [];
     var ocrWidth = 0, ocrHeight = 0;
@@ -1562,10 +1583,13 @@
       lines = normalizeOcrLines(res);
     } catch (e) {
       Modal.alert("识别失败", "请重新拍摄（" + String((e && e.message) || e).slice(0, 40) + "）");
+      tRecord("ocr_error");
+      tRecord("photo_process_failure");
       return;
     }
     if (!lines.length) {
       Modal.alert("未识别到清晰文字", "请重新拍摄（尽量拍全、拍正、光线均匀）");
+      tRecord("photo_process_failure");
       return;
     }
     var tSplit = performance.now();
@@ -1574,9 +1598,17 @@
     var splitMs = Math.round(performance.now() - tSplit);
     var tMatch = performance.now();
     /* AUTO_PAGE_TYPE 固定生效（CAP-S4）：拍摄前没有任何题型选择，auto 在内存中
-       三题型试跑后择优；OCR 只发生一次（上方），此处纯计算 */
-    var r = MSQ.recomputePageFromLines(batchIndex, lines, "auto",
-      { limit: 3, previousType: lastResolvedPageType });
+       三题型试跑后择优；OCR 只发生一次（上方），此处纯计算。
+       matcher 异常守卫：先计数再原样 rethrow，主流程行为零改动。 */
+    var r;
+    try {
+      r = MSQ.recomputePageFromLines(batchIndex, lines, "auto",
+        { limit: 3, previousType: lastResolvedPageType });
+    } catch (mErr) {
+      tRecord("matcher_error");
+      tRecord("photo_process_failure");
+      throw mErr;
+    }
     var matchMs = Math.round(performance.now() - tMatch);
     var out = r.out;
     var resolved = r.resolved;
@@ -1588,6 +1620,21 @@
       suggestion: null, dataUrl: dataUrl, ocrWidth: ocrWidth, ocrHeight: ocrHeight,
       sampleId: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.makeSampleId(new Date()) : null
     };
+    /* USAGE_TELEMETRY_V1：识别结果计数（只在此处计；手动切题型重算不重复计）。
+       AUTO 判定结果 + 置信度分布 + 耗时直方图（只入桶，不上传精确时间线）。 */
+    tRecord("photo_process_success");
+    tRecord("auto_" + resolved.type);
+    tAdd("recognized_question_total", out.blocks.length);
+    var confCount = { high: 0, medium: 0, low: 0, none: 0 };
+    out.blocks.forEach(function (b) {
+      var c = (b && b.confidence) && confCount.hasOwnProperty(b.confidence) ? b.confidence : "none";
+      confCount[c] += 1;
+    });
+    Object.keys(confCount).forEach(function (k) {
+      if (confCount[k] > 0) { tAdd("confidence_" + k, confCount[k]); }
+    });
+    tHist("photo_total_ms", state.totalMs);
+    tHist("ocr_ms", ocrMs);
     renderBatchResults(state);
     collectAndUploadSample(state);
   }
@@ -1724,6 +1771,8 @@
       var types = Object.keys(selected).filter(function (t) { return selected[t]; });
       if (!types.length || !lastSampleUpload) { panelHint(panel, "请至少选择一项"); return; }
       lastSampleUpload.feedback.pageTypes = types;
+      /* USAGE_TELEMETRY_V1：反馈类型计数（提交动作，取消不计数） */
+      types.forEach(function (t) { tRecord("feedback_" + t); });
       renderFeedbackButton();
       persistFeedbackNow();
       showFeedbackToast("已记录本页问题");
@@ -1758,7 +1807,7 @@
     var fb = lastSampleUpload.feedback;
     var key = blockIndex + ":wrong_answer";
     var nowMarked = !fb.blocks[key];
-    if (nowMarked) { fb.blocks[key] = true; } else { delete fb.blocks[key]; }
+    if (nowMarked) { fb.blocks[key] = true; tRecord("feedback_wrong_answer"); } else { delete fb.blocks[key]; }
     updateRowWrongMark(rowEl, nowMarked);
     if (navigator.vibrate) { try { navigator.vibrate(30); } catch (e) { /* 无震动能力 */ } }
     renderFeedbackButton();
@@ -1935,6 +1984,21 @@
             : (dl.apkCacheStatus === "miss" ? "未命中" : "未知")]);
           groups[4].rows.push(["下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败",
             dl.downloadOk ? "ok" : "err"]);
+        }
+        /* DATA_PLATFORM_V1：Telemetry 诊断组（A14，仅 DEV）。
+           只展示计数/时间/掩码设备 ID——绝不显示完整 deviceId、原始 ANDROID_ID
+           （JS 侧从未持有）、任何内容文本或服务器域名。 */
+        var telDiag = Telemetry ? Telemetry.diagnostics() : null;
+        if (telDiag) {
+          groups.push({ title: "Telemetry", rows: [
+            ["注册状态", telDiag.hasDeviceId ? "已注册" : "未注册"],
+            ["设备 ID", telDiag.deviceIdMasked || "—"],
+            ["待上传批次", telDiag.outboxCount],
+            ["当前桶动作数", telDiag.bucketActions],
+            ["上次成功上传", telDiag.lastFlushSuccessAt ? fmtTime(telDiag.lastFlushSuccessAt) : "暂无"],
+            ["下次重试", telDiag.nextRetryAt ? fmtTime(telDiag.nextRetryAt) : "—"],
+            ["最近结果", telDiag.lastFlushResult || "—"]
+          ] });
         }
         box.innerHTML = "";
         var banner = document.createElement("div");
@@ -2469,6 +2533,49 @@
   /* INSTANT_V2：trigger 仍在 app.js bootstrap 期调用；其内部 getAppInfo/fetchLatest
      复用 prefetch 的唯一请求（prefetch 在 questions.js 之前已经开始 fetch）。 */
   if (startupUpdateCtrl) { startupUpdateCtrl.trigger(); }
+
+  /* ---------------- USAGE_TELEMETRY_V1（DATA_PLATFORM_V1）：旁路观察 ----------------
+     纯 best-effort 分析数据：任何失败只 console，绝不 toast/modal，绝不影响
+     搜题/拍题/反馈/更新主流程。Telemetry = null（无原生插件/未就绪）时全部
+     埋点立即 no-op。只计数，不保存任何 query/OCR/内容文本。 */
+  var Telemetry = null;
+  var telemetryAppInfo = null;
+
+  function tRecord(metric) {
+    try { if (Telemetry) { Telemetry.record(metric); } } catch (e) { /* swallow */ }
+  }
+
+  function tAdd(metric, n) {
+    try { if (Telemetry) { Telemetry.add(metric, n); } } catch (e) { /* swallow */ }
+  }
+
+  function tHist(name, ms) {
+    try { if (Telemetry) { Telemetry.observeHistogram(name, ms); } } catch (e) { /* swallow */ }
+  }
+
+  function tObserveSearch(query, resultCount) {
+    try { if (Telemetry) { Telemetry.observeSearch(query, resultCount); } } catch (e) { /* swallow */ }
+  }
+
+  if (typeof MSQTelemetry !== "undefined" && MSQTelemetry) {
+    prefetchReady.then(function (r) {
+      telemetryAppInfo = (r && r.info) ? r.info : null;
+    }, function () { /* 无 App 信息：flush 静默等待下一个触发点 */ });
+    MSQTelemetry.createFromEnvironment({
+      serverUrl: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.PUBLIC_BASE_URL : "",
+      appInfo: function () { return telemetryAppInfo; }
+    }).then(function (t) {
+      if (!t) { return; }   /* 无原生 Telemetry 插件（浏览器调试）：telemetry 关闭 */
+      Telemetry = t;
+      t.onColdStart();
+      var App = getAppPlugin();
+      if (App && typeof App.addListener === "function") {
+        App.addListener("resume", function () {
+          try { t.onAppResume(); } catch (e) { /* swallow */ }
+        });
+      }
+    }, function () { /* telemetry 关闭：静默 */ });
+  }
 
   /* 启动更新提示 Modal（VC16_UI_POLISH_V1 + UI_DESIGN_V1）：复用现有 Modal 组件壳，
      不是系统 AlertDialog，也不新增 native plugin。

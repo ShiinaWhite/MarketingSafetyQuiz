@@ -12,6 +12,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(OcrPlugin.class);
         registerPlugin(UpdatePlugin.class);
         registerPlugin(SampleQueuePlugin.class);
+        registerPlugin(TelemetryPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

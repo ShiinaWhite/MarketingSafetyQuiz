@@ -92,6 +92,26 @@ function createR2Store(options) {
     presignPutUrl: r2.presignPutUrl
   };
   const logger = opts.log || function () {};
+  /* DATA_PLATFORM_V1（samples.db 双写）：commit 成功出口旁路回调。回调内部异常
+     在本文件内吞掉，绝不影响 commit 响应（见 DATA_PLATFORM_V1_DESIGN.md §12）。 */
+  const onCommit = typeof opts.onCommit === "function" ? opts.onCommit : null;
+
+  function notifyCommitted(input, sampleId, objectKey, captureSha256, captureSize) {
+    if (!onCommit) { return; }
+    try {
+      const dir = sampleDir(sampleId);
+      const capturePath = path.join(dir, CAPTURE_NAME);
+      onCommit({
+        sampleId: sampleId,
+        objectKey: objectKey,
+        captureSha256: captureSha256,
+        captureSize: captureSize,
+        provider: providerName,
+        manifest: input.manifest,
+        localPath: fs.existsSync(capturePath) ? capturePath : null
+      });
+    } catch (e) { /* 双写失败绝不影响 commit 链路 */ }
+  }
   /* 镜像轮询间隔（毫秒）；0 = 不自动轮询（测试手动触发 tick） */
   const mirrorIntervalMs = opts.mirrorIntervalMs === undefined ? 30_000 : opts.mirrorIntervalMs;
 
@@ -210,6 +230,7 @@ function createR2Store(options) {
       /* run.json 允许更新（manifest 可能带更多上下文），但捕获数据不重传 */
       writeRunJson(dir, sampleId, existing, manifest);
       kickMirror();
+      notifyCommitted(input, sampleId, objectKey, captureSha256, captureSize);
       return {
         ok: true, status: 200, alreadyCommitted: true, sampleId: sampleId,
         objectKey: objectKey, captureSha256: captureSha256,
@@ -236,6 +257,7 @@ function createR2Store(options) {
         fs.mkdirSync(dir, { recursive: true });
         writeFileAtomic(stateFile(sampleId), JSON.stringify(state, null, 2));
         writeRunJson(dir, sampleId, state, manifest);
+        notifyCommitted(input, sampleId, objectKey, captureSha256, captureSize);
         return {
           ok: true, status: 200, alreadyCommitted: true, sampleId: sampleId,
           objectKey: objectKey, captureSha256: captureSha256, mirrorStatus: "done"
@@ -308,6 +330,8 @@ function createR2Store(options) {
 
     /* 后台镜像：绝不在 commit 响应路径里下载 */
     kickMirror();
+
+    notifyCommitted(input, sampleId, objectKey, captureSha256, captureSize);
 
     return {
       ok: true, status: 201, sampleId: sampleId, objectKey: objectKey,

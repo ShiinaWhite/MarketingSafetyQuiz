@@ -1,0 +1,395 @@
+/* test_telemetry.js —— USAGE_TELEMETRY_V1 服务端自检（TEL-SERVER / TEL-SQLITE）
+   运行: node tools/telemetry/test_telemetry.js   （退出码 0 = 全部通过）
+   全程写入 os.tmpdir() 随机目录，结束清理，不触碰 data/ 生产库。
+   限流测试用独立实例（低阈值），主实例关闭限流避免用例互相消耗预算。 */
+"use strict";
+const http = require("http");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { createCollector } = require("../sample_collector/server.js");
+const telemetryStore = require("./store.js");
+const serverModule = require("../sample_collector/server.js");
+
+const fails = [];
+function check(name, cond, detail) {
+  console.log(`  [${cond ? "PASS" : "FAIL"}] ${name}` + (detail !== undefined ? `  (${detail})` : ""));
+  if (!cond) { fails.push(name); }
+}
+function section(t) { console.log(`\n== ${t} ==`); }
+
+const TEST_SECRET = "tel-test-secret-0123456789abcdef0123456789abcdef";
+const ANDROID_ID_A = "0123456789abcdef";
+const ANDROID_ID_B = "fedcba0987654321";
+const DEV_DEVICE_ID = telemetryStore.telemetryDeviceId(TEST_SECRET, ANDROID_ID_A);
+
+function request(port, method, reqPath, body, headers) {
+  return new Promise(function (resolve, reject) {
+    const payload = body === undefined ? null
+      : Buffer.from(typeof body === "string" ? body : JSON.stringify(body), "utf8");
+    const req = http.request({
+      host: "127.0.0.1", port: port, method: method, path: reqPath,
+      headers: Object.assign(
+        payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {},
+        headers || {})
+    }, function (res) {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch (e) { /* 非 JSON */ }
+        resolve({ status: res.statusCode, body: parsed, raw: raw });
+      });
+    });
+    req.on("error", reject);
+    if (payload) { req.write(payload); }
+    req.end();
+  });
+}
+
+let uuidSeq = 0;
+function nextBatchId() {
+  uuidSeq += 1;
+  const hex = uuidSeq.toString(16).padStart(12, "0");
+  return "a1b2c3d4-0000-4000-8000-" + hex;
+}
+
+/* 构造一个合法 batch（字段与 DATA_PLATFORM_V1_DESIGN.md §1.2 一致） */
+function makeBatch(overrides) {
+  const o = overrides || {};
+  const now = Date.now();
+  return {
+    batchId: o.batchId || nextBatchId(),
+    localDay: o.localDay || new Date(now).toISOString().slice(0, 10),
+    periodStart: o.periodStart !== undefined ? o.periodStart : now - 3600000,
+    periodEnd: o.periodEnd !== undefined ? o.periodEnd : now,
+    versionCode: o.versionCode !== undefined ? o.versionCode : 24,
+    versionName: o.versionName !== undefined ? o.versionName : "1.0.24-dev",
+    channel: o.channel || "dev",
+    packageName: o.packageName || "com.jty.safetyquiz.dev",
+    counters: o.counters !== undefined ? o.counters : { app_cold_start: 1, text_search: 3 },
+    histograms: o.histograms !== undefined ? o.histograms
+      : { photo_total_ms: { "1000-2000": 1 } }
+  };
+}
+
+async function main() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "msq-telemetry-test-"));
+  const dbPath = path.join(tmp, "telemetry.db");
+  let collector = null;
+  try {
+    collector = createCollector({
+      out: path.join(tmp, "out"),
+      allowAnonymousWrites: true,
+      telemetryDbPath: dbPath,
+      telemetrySecret: TEST_SECRET,
+      telemetryRateLimitPerMin: 1000000   /* 限流单独测 */
+    });
+    const port = await collector.listen("127.0.0.1", 0);
+
+    /* ---------- TEL-ID：HMAC 确定性与注册校验 ---------- */
+    section("TEL-ID 注册：同 ANDROID_ID → 同 deviceId；不同 → 不同");
+    let r = await request(port, "POST", "/api/telemetry/register",
+      { schemaVersion: 1, androidId: ANDROID_ID_A.toUpperCase() });
+    check("合法注册 200", r.status === 200 && r.body.ok === true, r.status);
+    check("deviceId 为 64 hex", typeof r.body.deviceId === "string" &&
+      /^[0-9a-f]{64}$/.test(r.body.deviceId));
+    const idA1 = r.body.deviceId;
+    r = await request(port, "POST", "/api/telemetry/register",
+      { schemaVersion: 1, androidId: ANDROID_ID_A });
+    check("同 ANDROID_ID（大小写不同）→ 同 deviceId", r.body.deviceId === idA1);
+    r = await request(port, "POST", "/api/telemetry/register",
+      { schemaVersion: 1, androidId: ANDROID_ID_B });
+    check("不同 ANDROID_ID → 不同 deviceId", r.body.deviceId !== idA1);
+
+    section("TEL-ID 注册：非法输入全部 400");
+    for (const bad of [
+      { androidId: "0123456789abcde" },
+      { androidId: "0123456789abcdeg" },
+      { androidId: 123 },
+      { schemaVersion: 1, androidId: ANDROID_ID_A, extra: 1 },
+      { schemaVersion: 2, androidId: ANDROID_ID_A },
+      { schemaVersion: 1 }
+    ]) {
+      r = await request(port, "POST", "/api/telemetry/register", bad);
+      check("拒绝 " + JSON.stringify(bad).slice(0, 50), r.status === 400, r.status);
+    }
+
+    /* ---------- TEL-BATCH：合法上报与幂等 ---------- */
+    section("TEL-BATCH 合法上报与幂等（A10）");
+    const b1 = makeBatch({ counters: { text_search: 3 } });
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1] });
+    check("合法 batch 200 accepted", r.status === 200 &&
+      r.body.accepted.length === 1 && r.body.accepted[0] === b1.batchId, r.status);
+
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1] });
+    check("同 batch 重传 → alreadyAccepted", r.status === 200 &&
+      r.body.alreadyAccepted.length === 1 && r.body.accepted.length === 0,
+      JSON.stringify(r.body));
+
+    const b2 = makeBatch({ counters: { photo_attempt: 1 }, localDay: "2026-09-26",
+      periodEnd: Date.now() - 24 * 3600000, periodStart: Date.now() - 25 * 3600000 });
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [b1, b2] });
+    check("多 batch 合并上报（重传+新）", r.status === 200 &&
+      r.body.alreadyAccepted.length === 1 && r.body.accepted.length === 1,
+      JSON.stringify(r.body));
+
+    /* ---------- TEL-SQLITE：幂等聚合 + 表结构 + 隐私红线 ---------- */
+    section("TEL-SQLITE 幂等与结构");
+    const db2 = telemetryStore.openTelemetryStore({ path: dbPath });
+    check("第二个连接打开成功（WAL 并发）", db2.ok);
+    const totals1 = db2.store.metricTotals("2000-01-01");
+    const textSearchTotal = totals1.filter(function (x) { return x.metric_name === "text_search"; })[0];
+    check("text_search 总量 = 3（重传后不重复累加）",
+      textSearchTotal && textSearchTotal.total === 3, JSON.stringify(totals1));
+
+    let wal = null;
+    try { wal = db2.db.prepare("PRAGMA journal_mode").get(); } catch (e) { wal = null; }
+    check("journal_mode = wal", wal && String(wal.journal_mode).toLowerCase() === "wal",
+      JSON.stringify(wal));
+    const mig = db2.db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get();
+    check("schema_migrations v1", mig && mig.v === 1);
+    const tables = db2.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
+      .map(function (x) { return x.name; });
+    for (const need of ["schema_migrations", "devices", "telemetry_batches",
+      "daily_device_metrics", "daily_metric_values"]) {
+      check("表存在：" + need, tables.indexOf(need) >= 0);
+    }
+    check("表无多余（V1 五张 + sqlite_sequence）",
+      tables.filter(function (t) { return t !== "sqlite_sequence"; }).length === 5,
+      tables.join(","));
+
+    /* raw ANDROID_ID 红线：全表扫描 + DB/WAL 文件字节扫描 */
+    let rawFound = false;
+    for (const t of ["devices", "telemetry_batches", "daily_device_metrics", "daily_metric_values"]) {
+      const rows = db2.db.prepare("SELECT * FROM " + t).all();
+      for (const row of rows) {
+        for (const k of Object.keys(row)) {
+          if (typeof row[k] === "string" &&
+             (row[k].indexOf(ANDROID_ID_A) >= 0 || row[k].indexOf(ANDROID_ID_B) >= 0)) {
+            rawFound = true;
+          }
+        }
+      }
+    }
+    check("raw ANDROID_ID 不落任何表", !rawFound);
+    const walPath = dbPath + "-wal";
+    let allBytes = fs.readFileSync(dbPath);
+    try { allBytes = Buffer.concat([allBytes, fs.readFileSync(walPath)]); } catch (e) { /* 无 wal */ }
+    check("raw ANDROID_ID 不落 DB 文件字节（含 WAL）",
+      allBytes.indexOf(Buffer.from(ANDROID_ID_A)) < 0 &&
+      allBytes.indexOf(Buffer.from(ANDROID_ID_B)) < 0);
+    const devRow = db2.db.prepare("SELECT * FROM devices LIMIT 1").get();
+    check("devices 无 androidId 列", devRow && !Object.keys(devRow).some(function (k) {
+      return k.toLowerCase().indexOf("android") >= 0; }), Object.keys(devRow || {}).join(","));
+    check("devices 元数据已记录", devRow && devRow.first_version === "1.0.24-dev" &&
+      devRow.last_channel === "dev", JSON.stringify(devRow));
+
+    section("TEL-SQLITE batch 可重算");
+    const batchesBefore = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
+    const recompute = db2.store.recomputeDaily();
+    const totalsAfter = db2.store.metricTotals("2000-01-01");
+    check("recompute 后聚合一致", JSON.stringify(totals1) === JSON.stringify(totalsAfter) &&
+      recompute.batches === batchesBefore, "batches=" + recompute.batches);
+    check("activeDevices 查询可用", db2.store.activeDevices("2000-01-01") === 1);
+
+    /* ---------- TEL-SERVER：allowlist / 值域 / 时间戳 / 上限 ---------- */
+    section("TEL-SERVER 严格 allowlist（未知 metric / 值域 / 时间戳 / 上限）");
+    const badCases = [
+      ["未知 counter metric", { counters: { evil_metric: 1 } }],
+      ["counter 值 0", { counters: { text_search: 0 } }],
+      ["counter 值超上限", { counters: { text_search: 1000001 } }],
+      ["counter 非整数", { counters: { text_search: 1.5 } }],
+      ["未知 histogram", { histograms: { evil_ms: { "<100": 1 } } }],
+      ["未知 histogram 桶", { histograms: { photo_total_ms: { "<999": 1 } } }],
+      ["localDay 非真实日期", { localDay: "2026-02-30" }],
+      ["localDay 格式坏", { localDay: "20260927" }],
+      ["period 跨度过大", { periodStart: Date.now() - 30 * 3600000 }],
+      ["periodEnd 在未来", { periodEnd: Date.now() + 3600 * 1000 }],
+      ["periodStart 晚于 periodEnd", { periodStart: Date.now(), periodEnd: Date.now() - 1000 }],
+      ["channel/package 不匹配", { channel: "stable" }],
+      ["未知 package", { packageName: "com.evil.app" }],
+      ["未知 channel", { channel: "beta" }],
+      ["versionCode 非法", { versionCode: 0 }],
+      ["versionCode 非整数", { versionCode: 24.5 }],
+      ["versionName 注入字符", { versionName: "1.0; DROP TABLE devices" }],
+      ["versionName 超长", { versionName: "x".repeat(41) }]
+    ];
+    for (const [label, patch] of badCases) {
+      r = await request(port, "POST", "/api/telemetry/batch",
+        { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch(patch)] });
+      check("拒绝：" + label, r.status === 400, r.status);
+    }
+    /* 未知 batch 顶层字段 */
+    const extraField = makeBatch({});
+    extraField.extra = { a: 1 };
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [extraField] });
+    check("拒绝：未知 batch 字段", r.status === 400, r.status);
+    /* 未知顶层字段 */
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch({})], junk: 1 });
+    check("拒绝：未知顶层字段", r.status === 400, r.status);
+
+    section("TEL-SERVER 部分非法 → 整请求拒绝 + rejected 明细（零入库）");
+    const goodBatch = makeBatch({});
+    const badBatch = makeBatch({ counters: { evil: 1 } });
+    const batchCountBefore = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [goodBatch, badBatch] });
+    check("400 且 rejected 指向非法 batch", r.status === 400 &&
+      Array.isArray(r.body.rejected) && r.body.rejected.length === 1 &&
+      r.body.rejected[0].batchId === badBatch.batchId, JSON.stringify(r.body));
+    const batchCountAfter = db2.db.prepare("SELECT COUNT(*) AS n FROM telemetry_batches").get().n;
+    check("零入库（好 batch 也不落地）", batchCountAfter === batchCountBefore);
+
+    section("TEL-SERVER 请求级上限");
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [] });
+    check("空 batches 400", r.status === 400);
+    const manyBatches = [];
+    for (let i = 0; i < 21; i++) { manyBatches.push(makeBatch({})); }
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: manyBatches });
+    check("21 个 batch 400", r.status === 400);
+    r = await request(port, "POST", "/api/telemetry/batch",
+      JSON.stringify({ schemaVersion: 1, deviceId: DEV_DEVICE_ID,
+        batches: [makeBatch({})] }).slice(0, -1) + "," + '"junk":"' + "x".repeat(200 * 1024) + '"}');
+    check("body > 128KiB → 413", r.status === 413, r.status);
+    r = await request(port, "POST", "/api/telemetry/batch", "not json at all");
+    check("非 JSON → 400", r.status === 400);
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: "ZZZZ", batches: [makeBatch({})] });
+    check("deviceId 格式坏 → 400", r.status === 400);
+
+    section("TEL-SERVER 错误响应不泄漏内部信息");
+    r = await request(port, "POST", "/api/telemetry/batch",
+      { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch({ counters: { bad: 1 } })] });
+    const rawLower = (r.raw || "").toLowerCase();
+    check("无 db 路径 / SQL 字样", rawLower.indexOf("telemetry.db") < 0 &&
+      rawLower.indexOf("sqlite") < 0 && rawLower.indexOf("select ") < 0);
+
+    db2.store.close();
+
+    /* ---------- secret 缺失 → 503 FAIL CLOSED，业务端点不受影响 ---------- */
+    section("TEL-SERVER secret 缺失 → 503 FAIL CLOSED（App 业务不受影响）");
+    serverModule._resetRateLimitsForTest();
+    let noSecret = null;
+    const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "msq-telemetry-nosecret-"));
+    try {
+      noSecret = createCollector({
+        out: path.join(tmp2, "out"),
+        allowAnonymousWrites: true,
+        telemetryDbPath: path.join(tmp2, "telemetry.db"),
+        telemetrySecret: null   /* 显式强制缺失（本机存在真实 secret 文件） */
+      });
+      const port2 = await noSecret.listen("127.0.0.1", 0);
+      r = await request(port2, "POST", "/api/telemetry/register",
+        { schemaVersion: 1, androidId: ANDROID_ID_A });
+      check("register 503", r.status === 503, r.status);
+      r = await request(port2, "POST", "/api/telemetry/batch",
+        { schemaVersion: 1, deviceId: DEV_DEVICE_ID, batches: [makeBatch({})] });
+      check("batch 503", r.status === 503, r.status);
+      r = await request(port2, "GET", "/health");
+      check("/health 不受影响", r.status === 200 && r.body.ok === true);
+      /* legacy 样本端点照常（匿名测试模式） */
+      const fixtureJpeg = makeFixtureJpeg(30, 40);
+      r = await request(port2, "POST", "/api/sample", {
+        sampleId: "20260927_120000_aaa001",
+        photoDataUrl: "data:image/jpeg;base64," + fixtureJpeg.toString("base64"),
+        manifest: { sampleId: "20260927_120000_aaa001", capturedAt: "2026-09-27T04:00:00Z" }
+      });
+      check("样本端点不受 telemetry 故障影响", r.status === 201, r.status);
+    } finally {
+      if (noSecret) { await noSecret.close(); }
+      fs.rmSync(tmp2, { recursive: true, force: true });
+    }
+
+    /* secret 文件/env 装载分支 */
+    section("TEL-SERVER secret 装载分支");
+    const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), "msq-telemetry-secret-"));
+    try {
+      const envBackup = process.env.MSQ_TELEMETRY_HMAC_KEY;
+      delete process.env.MSQ_TELEMETRY_HMAC_KEY;
+      const missing = telemetryStore.loadTelemetrySecret({
+        secretFile: path.join(tmp3, "definitely-missing")
+      });
+      if (envBackup !== undefined) { process.env.MSQ_TELEMETRY_HMAC_KEY = envBackup; }
+      check("env/文件均缺失 → null", missing === null);
+      const fromFile = telemetryStore.loadTelemetrySecret({
+        secretFile: null, secret: undefined
+      });
+      check("本机 .secrets/telemetry-hmac-key 存在且 ≥32 bytes",
+        typeof fromFile === "string" && fromFile.length >= 32);
+    } finally {
+      fs.rmSync(tmp3, { recursive: true, force: true });
+    }
+
+    /* store 打开失败降级 */
+    section("TEL-SQLITE 打开失败降级");
+    const broken = telemetryStore.openTelemetryStore({ path: path.join(tmp, "sub", "\0bad") });
+    check("非法路径 → ok:false 而非抛出", broken.ok === false && typeof broken.error === "string");
+
+    /* ---------- 限流（独立实例，低阈值） ---------- */
+    section("TEL-SERVER 限流（5/min/IP 独立实例）");
+    serverModule._resetRateLimitsForTest();
+    let limited = null;
+    const tmp4 = fs.mkdtempSync(path.join(os.tmpdir(), "msq-telemetry-rl-"));
+    try {
+      limited = createCollector({
+        out: path.join(tmp4, "out"),
+        allowAnonymousWrites: true,
+        telemetryDbPath: path.join(tmp4, "telemetry.db"),
+        telemetrySecret: TEST_SECRET,
+        telemetryRateLimitPerMin: 5
+      });
+      const port4 = await limited.listen("127.0.0.1", 0);
+      let saw429 = false;
+      for (let i = 0; i < 10; i++) {
+        r = await request(port4, "POST", "/api/telemetry/register",
+          { schemaVersion: 1, androidId: "aaaaaaaaaaaaaaaa" });
+        if (r.status === 429) { saw429 = true; break; }
+      }
+      check("超限 429", saw429);
+    } finally {
+      if (limited) { await limited.close(); }
+      fs.rmSync(tmp4, { recursive: true, force: true });
+    }
+  } finally {
+    if (collector) { await collector.close(); }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  console.log("\n==============================================");
+  if (fails.length) {
+    console.log(`结果：${fails.length} 项失败 ✗`);
+    fails.forEach((f) => console.log("  FAIL: " + f));
+    process.exit(1);
+  }
+  console.log("结果：全部通过 ✓");
+}
+
+/* 最小结构合法 JPEG（与 test_collector.js 同构） */
+function makeFixtureJpeg(width, height) {
+  const be16 = (n) => [(n >> 8) & 255, n & 255];
+  const seg = (marker, payload) => [0xFF, marker, ...be16(payload.length + 2), ...payload];
+  const SOI = [0xFF, 0xD8];
+  const APP0 = seg(0xE0, [0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+  const DQT = seg(0xDB, [0x00, ...new Array(64).fill(8)]);
+  const SOF0 = seg(0xC0, [0x08, ...be16(height), ...be16(width), 0x03,
+    0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+  const DHT = seg(0xC4, [0x00, ...new Array(16).fill(0), 0x00]);
+  const SOS = seg(0xDA, [0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00]);
+  const EOI = [0xFF, 0xD9];
+  return Buffer.from([SOI, APP0, DQT, SOF0, DHT, SOS, 0x00, 0x12, EOI].flat());
+}
+
+main().catch(function (e) {
+  console.error("test harness error:", e);
+  process.exit(1);
+});

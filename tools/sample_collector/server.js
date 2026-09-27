@@ -32,7 +32,16 @@
      - R2 object key 由服务器派生，客户端只能回传、不能自造路径；
      - legacy 只接受 image/jpeg data URL；body 有大小上限；不执行任何上传内容；
        无任意文件读取接口；
-     - 已存在的 sampleId 拒绝覆盖（409）；文件先写临时名再 rename，避免半文件。 */
+     - 已存在的 sampleId 拒绝覆盖（409）；文件先写临时名再 rename，避免半文件。
+
+   DATA_PLATFORM_V1（telemetry + samples.db，见 DATA_PLATFORM_V1_DESIGN.md）：
+     POST /api/telemetry/register  ANDROID_ID → HMAC → telemetryDeviceId（内存内，原文即弃）
+     POST /api/telemetry/batch     严格 allowlist 校验 → telemetry.db 单事务（匿名写入口）
+     两个端点只在 createCollector 显式传入 telemetryDbPath 时启用（生产 main 入口传
+     默认 data/telemetry/telemetry.db）；secret 缺失 / node:sqlite 不可用 → 503 FAIL
+     CLOSED，其余端点不受影响。
+     samples.db 双写：legacy /api/sample 成功、R2 commit 成功（r2_store onCommit 回调）、
+     /api/feedback 成功之后旁路补写 samplesDb，任何 DB 异常只 log，绝不影响原链路。 */
 "use strict";
 
 const http = require("http");
@@ -173,6 +182,8 @@ function parseArgs(argv) {
     else if (a === "--out") { args.out = argv[++i] || args.out; }
     else if (a === "--max-mb") { args.maxBodyBytes = (Number(argv[++i]) || 40) * 1024 * 1024; }
     else if (a === "--write-tokens") { args.writeTokens = String(argv[++i] || "").split(",").filter(Boolean); }
+    else if (a === "--telemetry-db") { args.telemetryDb = argv[++i]; }
+    else if (a === "--samples-db") { args.samplesDb = argv[++i]; }
     else if (a === "--help" || a === "-h") { args.help = true; }
   }
   return args;
@@ -201,6 +212,11 @@ function sendJSON(res, status, obj) {
 const RATE_LIMIT_UNAUTH_PER_MIN = 15;
 const RATE_LIMIT_SAMPLE_PER_MIN = 30;
 const RATE_LIMIT_FEEDBACK_PER_MIN = 120;
+/* DATA_PLATFORM_V1：telemetry 匿名端点限流（正常客户端 30min 一次，余量 >100 倍） */
+const RATE_LIMIT_TELEMETRY_PER_MIN = 10;
+/* telemetry body 配额：register 只有两个标量字段；batch ≤ 20 batch（§1） */
+const MAX_TELE_REGISTER_BODY_BYTES = 4 * 1024;
+const MAX_TELE_BATCH_BODY_BYTES = 128 * 1024;
 
 const rateBuckets = new Map();   // key → { windowStart, count }
 
@@ -339,6 +355,40 @@ function handleCollector(req, res, ctx) {
     }
     if (updateMatch[2] === "latest") { sendLatest(res, ctx.updatesRoot, channel); }
     else { sendApk(res, ctx.updatesRoot, channel); }
+    return;
+  }
+
+  /* ---- DATA_PLATFORM_V1：telemetry 匿名写入口（AUTH_MODEL = ANONYMOUS_STRICT_V1） ----
+     不走 sample 写 token（secret 刻意对 JS 不可达，不为统计把秘密硬编码进 JS）。
+     补偿控制：严格 allowlist schema + 每 IP 限流 + body 配额 + 只写端点 +
+     SQL 参数绑定 + 单事务。secret 缺失 / store 不可用 → 503 FAIL CLOSED。 */
+  const isTeleRegister = req.method === "POST" && p === "/api/telemetry/register";
+  const isTeleBatch = req.method === "POST" && p === "/api/telemetry/batch";
+  if (isTeleRegister || isTeleBatch) {
+    const now = Date.now();
+    const ip = clientIp(req);
+    const teleLimit = (ctx.telemetry && ctx.telemetry.rateLimitPerMin) ||
+      RATE_LIMIT_TELEMETRY_PER_MIN;
+    if (!rateLimit("tele:" + ip + ":" + (isTeleRegister ? "reg" : "bat"),
+      teleLimit, now)) {
+      rejectWrite(res, ctx, req, 429, "rate limited");
+      return;
+    }
+    if (!ctx.telemetry || !ctx.telemetry.ok) {
+      sendJSON(res, 503, { ok: false, error: "telemetry unavailable" });
+      return;
+    }
+    const limit = isTeleRegister ? MAX_TELE_REGISTER_BODY_BYTES : MAX_TELE_BATCH_BODY_BYTES;
+    readBody(req, limit).then(function (raw) {
+      let body;
+      try { body = JSON.parse(raw.toString("utf8")); }
+      catch (e) { sendJSON(res, 400, { ok: false, error: "malformed JSON" }); return; }
+      if (isTeleRegister) { handleTelemetryRegister(res, ctx, body); }
+      else { handleTelemetryBatch(res, ctx, body, Date.now()); }
+    }).catch(function (e) {
+      if (e && e.code === "TOO_LARGE") { sendJSON(res, 413, { ok: false, error: "body too large" }); }
+      else { sendJSON(res, 500, { ok: false, error: "internal error" }); }
+    });
     return;
   }
 
@@ -499,6 +549,15 @@ function handleSample(req, res, ctx) {
       })();
       const incomingSha = sha256Hex(jpg);
       if (existingSha !== null && existingSha === incomingSha) {
+        /* samples.db 双写：raw 已存在 + DB 缺失时这里完成补写（幂等 duplicate） */
+        recordSampleQuietly(ctx, {
+          sampleId: body.sampleId,
+          manifest: body.manifest,
+          provider: "local",
+          localPath: path.join(dir, "capture.jpg"),
+          sha256: incomingSha,
+          size: jpg.length
+        });
         sendJSON(res, 200, {
           ok: true,
           alreadyExists: true,
@@ -535,6 +594,19 @@ function handleSample(req, res, ctx) {
     fs.mkdirSync(dir, { recursive: true });
     writeFileAtomic(path.join(dir, "capture.jpg"), jpg);
     writeFileAtomic(path.join(dir, "run.json"), JSON.stringify(run, null, 2));
+
+    /* samples.db 双写（SAMPLE_DATABASE_V1）：legacy 路径 provider=local，
+       local_path/sha/size/width/height 全部可知 */
+    recordSampleQuietly(ctx, {
+      sampleId: body.sampleId,
+      manifest: run,
+      provider: "local",
+      localPath: path.join(dir, "capture.jpg"),
+      sha256: run.image.sha256,
+      size: jpg.length,
+      width: run.image.width,
+      height: run.image.height
+    });
 
     sendJSON(res, 201, {
       ok: true,
@@ -652,6 +724,7 @@ function handleFeedback(req, res, ctx, maxBodyBytes) {
       };
       state.updatedAt = new Date().toISOString();
       writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+      recordFeedbackQuietly(ctx, body.sampleId, state);
       sendJSON(res, 200, { ok: true, sampleId: body.sampleId });
       return;
     }
@@ -694,6 +767,7 @@ function handleFeedback(req, res, ctx, maxBodyBytes) {
       state.blockIssues = blocks;
       state.updatedAt = new Date().toISOString();
       writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+      recordFeedbackQuietly(ctx, body.sampleId, state);
       sendJSON(res, 200, { ok: true, sampleId: body.sampleId, feedback: {
         pageIssues: state.pageIssues, blockIssues: state.blockIssues
       } });
@@ -771,12 +845,84 @@ function handleFeedback(req, res, ctx, maxBodyBytes) {
 
     state.updatedAt = new Date().toISOString();
     writeFileAtomic(path.join(dir, "feedback.json"), JSON.stringify(state, null, 2));
+    recordFeedbackQuietly(ctx, body.sampleId, state);
     sendJSON(res, 200, { ok: true, sampleId: body.sampleId, feedback: {
       pageIssues: state.pageIssues, blockIssues: state.blockIssues
     } });
   }).catch(function () {
     sendJSON(res, 500, { ok: false, error: "internal error" });
   });
+}
+
+/* ---------------- DATA_PLATFORM_V1：telemetry 端点处理 ----------------
+   register：body 只在内存完成 HMAC，原始 ANDROID_ID 不落任何持久层/日志/错误响应。
+   batch：严格 allowlist 校验（§1）→ 单事务入库；rejected 逐 batch 给原因。
+   错误响应一律不含 DB 路径 / SQL / 堆栈。 */
+
+function handleTelemetryRegister(res, ctx, body) {
+  const v = ctx.telemetry.module.validateRegisterBody(body);
+  if (!v.ok) { sendJSON(res, 400, { ok: false, error: v.error }); return; }
+  const secret = ctx.telemetry.secret;
+  if (!secret) { sendJSON(res, 503, { ok: false, error: "telemetry unavailable" }); return; }
+  const deviceId = ctx.telemetry.module.telemetryDeviceId(secret, v.androidId);
+  sendJSON(res, 200, { ok: true, deviceId: deviceId });
+}
+
+function handleTelemetryBatch(res, ctx, body, nowMs) {
+  if (!ctx.telemetry.secret) {
+    /* 与 register 同规则：secret 缺失 → FAIL CLOSED（§3），绝不接受匿名写入 */
+    sendJSON(res, 503, { ok: false, error: "telemetry unavailable" });
+    return;
+  }
+  const v = ctx.telemetry.module.validateBatchBody(body, nowMs);
+  if (!v.ok) {
+    /* schema 拒绝：零入库；rejected 逐 batch 给原因（客户端只丢被拒批次） */
+    sendJSON(res, 400, {
+      ok: false, error: v.error, rejected: v.rejected || []
+    });
+    return;
+  }
+  let result;
+  try {
+    result = ctx.telemetry.store.ingestBatches(v, nowMs);
+  } catch (e) {
+    sendJSON(res, 500, { ok: false, error: "internal error" });
+    return;
+  }
+  sendJSON(res, 200, {
+    ok: true,
+    accepted: result.accepted,
+    alreadyAccepted: result.alreadyAccepted
+  });
+}
+
+/* ---------------- samples.db 双写（SAMPLE_DATABASE_V1 §12） ----------------
+   只在既有成功路径之后旁路调用；任何异常只 log，绝不影响 commit/feedback 响应。 */
+
+function sampleDbLog(msg) {
+  console.log("[samples.db] " + msg);
+}
+
+function recordSampleQuietly(ctx, info) {
+  if (!ctx.samplesDb || !ctx.samplesDb.ok) { return; }
+  try {
+    const outcome = ctx.samplesDb.store.recordSample(info);
+    if (outcome === "inserted") { sampleDbLog("indexed " + info.sampleId); }
+  } catch (e) {
+    /* DB 临时异常：现有已上传图片绝不受影响；下次 commit 重试或 backfill 补写 */
+    sampleDbLog("record failed (kept going) sampleId=" + info.sampleId +
+      " err=" + String((e && e.message) || e).slice(0, 80));
+  }
+}
+
+function recordFeedbackQuietly(ctx, sampleId, state) {
+  if (!ctx.samplesDb || !ctx.samplesDb.ok) { return; }
+  try {
+    ctx.samplesDb.store.recordFeedback(sampleId, state);
+  } catch (e) {
+    sampleDbLog("feedback record failed (kept going) sampleId=" + sampleId +
+      " err=" + String((e && e.message) || e).slice(0, 80));
+  }
 }
 
 /* ---------------- 入口 ---------------- */
@@ -796,8 +942,45 @@ function createCollector(options) {
     writeTokens: Array.isArray(opts.writeTokens) ? opts.writeTokens.filter(Boolean) : [],
     allowAnonymousWrites: opts.allowAnonymousWrites === true
   };
+  /* DATA_PLATFORM_V1：只在显式传入 DB 路径时启用（生产入口传默认 data/ 路径；
+     既有测试不传 → telemetry 503 / samples 双写关闭，行为与旧版一致）。
+     初始化失败（node:sqlite 缺失 / 磁盘异常）→ 降级禁用并告警，绝不抛出。 */
+  if (opts.telemetryDbPath) {
+    const telemetryModule = require("../telemetry/store.js");
+    const opened = telemetryModule.openTelemetryStore({
+      path: opts.telemetryDbPath,
+      secretFile: opts.telemetrySecretFile,
+      secret: opts.telemetrySecret
+    });
+    ctx.telemetry = opened.ok
+      ? { ok: true, module: telemetryModule, store: opened.store,
+          rateLimitPerMin: opts.telemetryRateLimitPerMin || RATE_LIMIT_TELEMETRY_PER_MIN,
+          secret: telemetryModule.loadTelemetrySecret({
+            secret: opts.telemetrySecret, secretFile: opts.telemetrySecretFile }) }
+      : { ok: false, error: opened.error };
+    if (!opened.ok) {
+      console.warn("[警告] telemetry.db 初始化失败，telemetry 端点 FAIL CLOSED（503）：" +
+        String(opened.error).slice(0, 120));
+    }
+  } else {
+    ctx.telemetry = { ok: false, error: "not configured" };
+  }
+  if (opts.samplesDbPath) {
+    const samplesModule = require("../sample_db/store.js");
+    const opened = samplesModule.openSamplesStore({ path: opts.samplesDbPath });
+    ctx.samplesDb = opened.ok
+      ? { ok: true, store: opened.store }
+      : { ok: false, error: opened.error };
+    if (!opened.ok) {
+      console.warn("[警告] samples.db 初始化失败，样本双写禁用（原链路不受影响）：" +
+        String(opened.error).slice(0, 120));
+    }
+  } else {
+    ctx.samplesDb = { ok: false, error: "not configured" };
+  }
   /* 样本数据面后端（COS_SAMPLE_TRANSFER_V1）：COS 优先，R2 后备，都没有则 FAIL CLOSED。
-     测试可注入 r2Store 或 providerResult；对象操作与 provider 无关。 */
+     测试可注入 r2Store 或 providerResult；对象操作与 provider 无关。
+     DATA_PLATFORM_V1：commit 成功出口注入 onCommit → samples.db 旁路补写。 */
   const providerResult = opts.providerResult || selectProvider({ root: opts.root });
   const r2Store = opts.r2Store || createR2Store({
     outRoot: outRoot,
@@ -808,7 +991,18 @@ function createCollector(options) {
     maxCaptureBytes: opts.maxCaptureBytes,
     presignTtlSeconds: opts.presignTtlSeconds,
     mirrorIntervalMs: opts.mirrorIntervalMs,
-    log: opts.log
+    log: opts.log,
+    onCommit: function (info) {
+      recordSampleQuietly(ctx, {
+        sampleId: info.sampleId,
+        manifest: info.manifest,
+        provider: info.provider,
+        objectKey: info.objectKey,
+        sha256: info.captureSha256,
+        size: info.captureSize,
+        localPath: info.localPath
+      });
+    }
   });
   ctx.r2 = r2Store;
   ctx.providerName = r2Store.provider;
@@ -824,6 +1018,9 @@ function createCollector(options) {
     outRoot: ctx.outRoot,
     r2: r2Store,
     providerName: r2Store.provider,
+    telemetryOk: !!(ctx.telemetry && ctx.telemetry.ok),
+    telemetrySecretPresent: !!(ctx.telemetry && ctx.telemetry.secret),
+    samplesDbOk: !!(ctx.samplesDb && ctx.samplesDb.ok),
     listen: function (host, port) {
       return new Promise(function (resolve, reject) {
         server.once("error", reject);
@@ -835,6 +1032,12 @@ function createCollector(options) {
     },
     close: function () {
       r2Store.stopMirrorWorker();
+      if (ctx.telemetry && ctx.telemetry.store && ctx.telemetry.store.close) {
+        try { ctx.telemetry.store.close(); } catch (e) { /* 尽力 */ }
+      }
+      if (ctx.samplesDb && ctx.samplesDb.store && ctx.samplesDb.store.close) {
+        try { ctx.samplesDb.store.close(); } catch (e) { /* 尽力 */ }
+      }
       return new Promise(function (resolve) {
         server.close(function () { resolve(); });
       });
@@ -873,7 +1076,9 @@ module.exports = {
   jpegSize: jpegSize,
   sha256Hex: sha256Hex,
   parseArgs: parseArgs,
-  lanIPv4Addresses: lanIPv4Addresses
+  lanIPv4Addresses: lanIPv4Addresses,
+  /* 测试专用：清空模块级限流窗口（rateBuckets 按 IP 聚合，跨实例共享）。 */
+  _resetRateLimitsForTest: function () { rateBuckets.clear(); }
 };
 /* 写接口 token：环境变量优先，其次 .secrets/sample-write-token。
    均缺失 → writeTokens 为空 → 写接口 FAIL CLOSED（503），读接口不受影响。 */
@@ -889,6 +1094,16 @@ function loadWriteTokens(explicit) {
   return [];
 }
 
+/* telemetry HMAC secret（DATA_PLATFORM_V1 §3）：环境变量优先，其次
+   .secrets/telemetry-hmac-key。缺失 → telemetry 端点 FAIL CLOSED；只返回布尔可用性，
+   secret 值绝不打印。 */
+function loadTelemetrySecretValue() {
+  const telemetryModule = require("../telemetry/store.js");
+  return telemetryModule.loadTelemetrySecret({
+    secretFile: path.resolve(__dirname, "..", "..", ".secrets", "telemetry-hmac-key")
+  });
+}
+
 if (require.main === module) {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -901,10 +1116,21 @@ if (require.main === module) {
     console.warn("[警告] 写接口 FAIL CLOSED —— POST /api/sample、/api/feedback 将返回 503。");
     console.warn("[警告] 运行 node tools/sample_auth/init_secret.js 生成后重启 Collector。");
   }
+  /* DATA_PLATFORM_V1：默认 DB 路径 = 仓库 data/（gitignore）；secret 缺失时
+     telemetry 端点 FAIL CLOSED，样本链路与更新链路不受影响。 */
+  const dataRoot = path.resolve(__dirname, "..", "..", "data");
+  const telemetrySecret = loadTelemetrySecretValue();
+  if (!telemetrySecret) {
+    console.warn("[警告] 未找到 telemetry HMAC secret（MSQ_TELEMETRY_HMAC_KEY / .secrets/telemetry-hmac-key）：");
+    console.warn("[警告] POST /api/telemetry/* 将 FAIL CLOSED（503）；App 业务不受影响。");
+  }
   const collector = createCollector({
     out: args.out,
     maxBodyBytes: args.maxBodyBytes,
-    writeTokens: writeTokens
+    writeTokens: writeTokens,
+    telemetryDbPath: args.telemetryDb || path.join(dataRoot, "telemetry", "telemetry.db"),
+    samplesDbPath: args.samplesDb || path.join(dataRoot, "samples", "samples.db"),
+    telemetrySecret: telemetrySecret || undefined
   });
   collector.listen(args.host, args.port).then(function (port) {
     printBanner(args.host, port, collector.outRoot);
@@ -912,6 +1138,12 @@ if (require.main === module) {
       console.log("");
       console.log("[警告] 写接口处于 FAIL CLOSED 状态（见上方警告）。");
     }
+    console.log("");
+    console.log("数据平台（DATA_PLATFORM_V1）：");
+    console.log("  telemetry : " + (collector.telemetryOk
+      ? (collector.telemetrySecretPresent ? "ENABLED" : "DISABLED（HMAC secret 缺失 → 503 FAIL CLOSED）")
+      : "DISABLED"));
+    console.log("  samples.db 双写: " + (collector.samplesDbOk ? "ENABLED" : "DISABLED"));
     console.log("");
     if (collector.r2 && collector.r2.available()) {
       console.log("样本直传：ENABLED（provider=" + collector.providerName +
