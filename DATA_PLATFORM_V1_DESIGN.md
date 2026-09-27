@@ -605,3 +605,9 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    一律拒绝注册。同时：注册成功后立即续传积压 outbox（注册 ≠ batch 上传，
    30min 间隔时钟不从注册起算）；测试 mock 固定为真实 Capacitor 对象形状，
    并有源码守卫防止 `String(androidId)` / string mock 回归。
+5. **统一时间门（TELEMETRY_SCHEDULER_RETRY_GATE_V1，vc28）**：上传时刻统一为
+   `nextAttemptAt = max(lastUploadAttemptAt + 30min, nextRetryAt)`——retry backoff
+   不再绕过 30min 节流（5min retryAt 也要等满 30min），30min 到期也不再绕过未来的
+   retry backoff（2h backoff 要等满 2h）；outbox 非空且 now < nextAttemptAt 时由
+   SCHEDULER_V1 唯一 timer 到点自动 attemptFlush（timer 到期重算重排，自愈）。
+   长尾排空（DRAIN_TAIL_DELAY_MS 标记）同样服从统一门。诊断 uploadState 不变。

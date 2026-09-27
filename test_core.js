@@ -2619,7 +2619,10 @@ async function runTelemetryTests() {
           }
           return Promise.resolve({ ok: true, deviceId: DEV64, deviceToken: TOKEN64 });
         }
-        if (o.batchFail) { return Promise.reject(o.batchFail()); }
+        if (o.batchFail) {
+          const err = o.batchFail();   /* 返回 null = 本次放行（一次性失败注入） */
+          if (err) { return Promise.reject(err); }
+        }
         return Promise.resolve({ ok: true,
           accepted: body.batches.map((b) => b.batchId), alreadyAccepted: [] });
       },
@@ -2818,12 +2821,21 @@ async function runTelemetryTests() {
     await flush();
     check("outbox 25 → 单次 POST 只带 20 个", env2.transport.batchPosts().length === 1 &&
       env2.transport.batchPosts()[0].body.batches.length === 20);
-    check("ACK 后剩余 5 且安排 60s 排空", env2.ctrl.stateSnapshot().outbox.length === 5 &&
+    check("ACK 后剩余 5 且安排 60s 排空标记", env2.ctrl.stateSnapshot().outbox.length === 5 &&
       env2.ctrl.stateSnapshot().nextRetryAt === env2.fc.c.nowMs + 60000);
+    /* SCHEDULER_RETRY_GATE_V1：长尾排空服从统一时间门 —— 60s 标记被 30min 节流
+       压住，61s 时零 POST；到 nextAttemptAt = 上传尝试+30min 才排空 */
     env2.fc.c.nowMs += 61000;
     env2.ctrl.attemptFlush("drain");
     await flush();
-    check("到期后排空全部（ACK 才删除）", env2.ctrl.stateSnapshot().outbox.length === 0);
+    check("统一门：60s 标记不绕过 30min 节流（零 POST）",
+      env2.transport.batchPosts().length === 1 &&
+      env2.ctrl.stateSnapshot().outbox.length === 5);
+    env2.fc.c.nowMs = env2.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env2.ctrl.attemptFlush("drain");
+    await flush();
+    check("统一门到期排空长尾（ACK 才删除）", env2.ctrl.stateSnapshot().outbox.length === 0);
     check("MSQTelemetry.MAX_BODY_BYTES = 128KiB", MSQTelemetry.MAX_BODY_BYTES === 128 * 1024);
   }
 
@@ -2920,9 +2932,10 @@ async function runTelemetryTests() {
       MSQTelemetry.backoffMs(1, () => 0) === 240000 &&
       MSQTelemetry.backoffMs(1, () => 1) === 360000);
 
+    let gateFails = 1;   /* 首次 batch POST 失败，其后放行 */
     const env = makeCtrl({
       initialState: { deviceId: DEV64 },
-      transport: fakeTransport({ fail: () => new Error("down") })
+      transport: fakeTransport({ batchFail: () => (gateFails-- > 0 ? new Error("down") : null) })
     });
     for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
     await flush();
@@ -2930,11 +2943,21 @@ async function runTelemetryTests() {
       env.ctrl.stateSnapshot().flushAttempts === 1 &&
       env.ctrl.stateSnapshot().nextRetryAt > env.fc.c.nowMs);
     check("最近结果记录失败原因", env.ctrl.stateSnapshot().lastFlushResult === "network error");
-    /* 到期重试不受 30min 限制 */
+    /* SCHEDULER_RETRY_GATE_V1：5min retryAt 不再绕过 30min 节流 —— 统一到
+       nextAttemptAt = max(throttleAt, retryAt) = 失败时刻+30min 才重试 */
+    const failAt = env.ctrl.stateSnapshot().lastUploadAttemptAt;
     env.fc.c.nowMs = env.ctrl.stateSnapshot().nextRetryAt + 1;
     env.ctrl.attemptFlush("retry-due");
     await flush();
-    check("到期重试发生（即使 <30min）", env.transport.batchPosts().length === 2);
+    check("统一门：5min retryAt 被节流压住（30min 前零 POST）",
+      env.transport.batchPosts().length === 1 &&
+      env.ctrl.stateSnapshot().outbox.length === 1 &&
+      env.timer.pendingCount() === 1);
+    env.fc.c.nowMs = failAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env.timer.fire();
+    await flush();
+    check("统一门到期（30min）timer 自动重试成功", env.transport.batchPosts().length === 2 &&
+      env.ctrl.stateSnapshot().outbox.length === 0);
 
     /* 成功 → attempts 归零 */
     const envOk = makeCtrl({ initialState: { deviceId: DEV64 } });
@@ -3136,6 +3159,91 @@ async function runTelemetryTests() {
       envRetry.ctrl.diagnostics().uploadState === "等待重试");
     /* outbox 保留（scheduler 修复不改变失败保留语义） */
     check("退避中 outbox 保留", envRetry.ctrl.stateSnapshot().outbox.length === 1);
+  }
+
+  /* ---------- TEL-GATE：统一时间门（TELEMETRY_SCHEDULER_RETRY_GATE_V1） ----------
+     nextAttemptAt = max(throttleAt, retryAt)，两个绕过方向全部堵死。 */
+  section("TEL-GATE retry=5min+throttle=30min → 30min；retry=2h+throttle=30min → 2h");
+  {
+    const seed1 = (retryAt) => ({
+      deviceId: DEV64, deviceToken: TOKEN64,
+      lastUploadAttemptAt: 10000000000,   /* 失败/上传尝试时刻 T_FAIL */
+      nextRetryAt: retryAt, flushAttempts: retryAt ? 1 : 0,
+      outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000000f1",
+        localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+        counters: { text_search: 1 }, histograms: {} }]
+    });
+    const T_FAIL = 10000000000;
+    const THROTTLE_AT = T_FAIL + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+
+    /* 场景 A：retry=5min + throttle=30min → 30min 才上传（5min 时零 POST） */
+    const envA = makeCtrl({ initialState: seed1(T_FAIL + 5 * 60000) });
+    envA.fc.c.nowMs = T_FAIL + 5 * 60000;
+    envA.ctrl.attemptFlush("retry-due");
+    await flush();
+    check("A: retryAt=5min 到期但被 30min 门压住（零 POST、outbox 保留）",
+      envA.transport.batchPosts().length === 0 &&
+      envA.ctrl.stateSnapshot().outbox.length === 1 &&
+      envA.timer.pendingCount() === 1);
+    envA.fc.c.nowMs = THROTTLE_AT;
+    envA.timer.fire();
+    await flush();
+    check("A: 30min 门到期 timer 自动上传（无需 resume，ACK 后清空取消）",
+      envA.transport.batchPosts().length === 1 &&
+      envA.ctrl.stateSnapshot().outbox.length === 0 &&
+      envA.timer.pendingCount() === 0);
+
+    /* 场景 B：retry=2h + throttle=30min → 2h 才上传（30min 到期不绕过 backoff） */
+    const envB = makeCtrl({ initialState: seed1(T_FAIL + 2 * 3600000) });
+    envB.fc.c.nowMs = THROTTLE_AT;
+    envB.ctrl.attemptFlush("throttle-due");
+    await flush();
+    check("B: 30min 节流到期但不绕过 2h retry backoff（零 POST、outbox 保留）",
+      envB.transport.batchPosts().length === 0 &&
+      envB.ctrl.stateSnapshot().outbox.length === 1 &&
+      envB.timer.pendingCount() === 1);
+    envB.fc.c.nowMs = T_FAIL + 2 * 3600000;
+    envB.timer.fire();
+    await flush();
+    check("B: 2h backoff 到期 timer 自动上传（ACK 后清空取消）",
+      envB.transport.batchPosts().length === 1 &&
+      envB.ctrl.stateSnapshot().outbox.length === 0 &&
+      envB.timer.pendingCount() === 0);
+
+    /* timer 唯一：gate 分支反复触发复用同一 timer；且新退避推远门后照常尊重 */
+    let cFails = 1;   /* 2h 到期的那次尝试失败，其后放行 */
+    const envC = makeCtrl({
+      initialState: seed1(T_FAIL + 2 * 3600000),
+      transport: fakeTransport({ batchFail: () => (cFails-- > 0 ? new Error("down") : null) })
+    });
+    envC.ctrl.attemptFlush("a");
+    envC.ctrl.attemptFlush("b");
+    envC.ctrl.onAppResume();
+    await flush();
+    check("C: 多触发点下 scheduler 唯一", envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000;
+    envC.timer.fire();   /* 旧门到期：尝试失败 → 退避推远 nextRetryAt */
+    await flush();
+    { const stC = envC.ctrl.stateSnapshot();
+    check("C: 2h 到期尝试失败 → 新退避（flushAttempts=2 → 30min）",
+      envC.transport.batchPosts().length === 1 &&
+      stC.flushAttempts === 2 &&
+      stC.nextRetryAt === T_FAIL + 2 * 3600000 + 30 * 60000,
+      "posts=" + envC.transport.batchPosts().length + " attempts=" + stC.flushAttempts +
+      " nextRetryAt=" + stC.nextRetryAt + " last=" + stC.lastFlushResult); }
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000 + 5 * 60000;
+    envC.ctrl.attemptFlush("early");
+    await flush();
+    check("C: 新退避被统一门尊重（5min 后零新 POST、timer 唯一）",
+      envC.transport.batchPosts().length === 1 &&
+      envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000 + 30 * 60000;
+    envC.timer.fire();
+    await flush();
+    check("C: 新退避到期 timer 自动重试成功（ACK 清空取消）",
+      envC.transport.batchPosts().length === 2 &&
+      envC.ctrl.stateSnapshot().outbox.length === 0 &&
+      envC.timer.pendingCount() === 0);
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */

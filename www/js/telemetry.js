@@ -546,6 +546,8 @@
             (state.currentBucket.counters.telemetry_upload_error || 0) + 1;
           state.currentBucket.meaningfulActionCount += 1;
           state.flushAttempts = 0;
+          /* 长尾排空标记：统一时间门（SCHEDULER_RETRY_GATE_V1）下 60s 标记
+             会被 30min 节流压住，实际由 max 门放行 */
           state.nextRetryAt = state.outbox.length ? (now() + DRAIN_TAIL_DELAY_MS) : 0;
           state.lastFlushResult = "rejected (400)";
           persist();
@@ -572,13 +574,17 @@
           cancelFlushTimer();   /* outbox 清空：scheduler 无事可做 */
           return;
         }
-        var dueRetry = state.nextRetryAt && t >= state.nextRetryAt;
-        var eligibleAt = state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS;
-        var intervalOk = t >= eligibleAt;
-        if (!intervalOk && !dueRetry) {
-          /* 被节流阻挡：安排唯一 timer 到 eligibleAt 自动重试；
-             后续触发点（resume/freeze/record）进入本分支时复用同一 timer */
-          scheduleFlushTimer(eligibleAt - t);
+        /* TELEMETRY_SCHEDULER_RETRY_GATE_V1：统一上传时间门。
+           nextAttemptAt = max(lastUploadAttemptAt+30min, nextRetryAt)：
+           - retry backoff 不得绕过 30min 网络节流（5min retryAt 也要等满 30min）；
+           - 30min 到期也不得绕过未来的 retry backoff（2h backoff 要等满 2h）。
+           outbox 非空且 now >= nextAttemptAt 才 flush；否则唯一 timer 到点自动重试，
+           后续触发点（resume/freeze/record）进入本分支时复用同一 timer。 */
+        var throttleAt = state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS;
+        var retryAt = state.nextRetryAt || 0;
+        var nextAttemptAt = Math.max(throttleAt, retryAt);
+        if (t < nextAttemptAt) {
+          scheduleFlushTimer(nextAttemptAt - t);
           return;
         }
         flushNow();
