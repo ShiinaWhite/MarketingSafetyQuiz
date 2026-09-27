@@ -3246,6 +3246,150 @@ async function runTelemetryTests() {
       envC.timer.pendingCount() === 0);
   }
 
+  /* ---------- TEL-REARM：异步完成路径自动重挂 scheduler（SCHEDULER_REARM_V1） ----------
+     核心断言：所有完成回调之后零外部触发，仅推进时钟 + timer.fire() 即自动续传。 */
+  section("TEL-REARM 失败/长尾/400部分/401-403/register 全路径自动恢复");
+  {
+    /* A. retryable 网络失败 → backoff 落库 → 零外部触发自动重试成功 */
+    let aFails = 1;
+    const envA = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: fakeTransport({ batchFail: () => (aFails-- > 0 ? new Error("down") : null) })
+    });
+    for (let i = 0; i < 30; i++) { envA.ctrl.record("text_search"); }
+    await flush();
+    check("A: 失败后自动 re-arm（零外部触发，timer 已挂）",
+      envA.ctrl.stateSnapshot().outbox.length === 1 && envA.timer.pendingCount() === 1);
+    envA.fc.c.nowMs = Math.max(
+      envA.ctrl.stateSnapshot().lastUploadAttemptAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS,
+      envA.ctrl.stateSnapshot().nextRetryAt);
+    envA.timer.fire();
+    await flush();
+    check("A: 到点自动重试成功（ACK 清空、timer 归零）",
+      envA.transport.batchPosts().length === 2 &&
+      envA.ctrl.stateSnapshot().outbox.length === 0 &&
+      envA.timer.pendingCount() === 0);
+
+    /* B. >20 batches：首批成功后剩余自动续传（30min 统一门） */
+    const longOutbox = [];
+    for (let i = 0; i < 25; i++) {
+      longOutbox.push({ batchId: "a1b2c3d4-0000-4000-8000-" + String(i).padStart(12, "0"),
+        localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+        counters: { app_resume: 1 }, histograms: {} });
+    }
+    const envB = makeCtrl({ initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+      outbox: longOutbox } });
+    envB.ctrl.attemptFlush("cold");
+    await flush();
+    check("B: 首批 20 上传后自动 re-arm（timer 唯一）",
+      envB.transport.batchPosts().length === 1 && envB.timer.pendingCount() === 1);
+    envB.fc.c.nowMs = envB.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    envB.timer.fire();
+    await flush();
+    check("B: 长尾自动续传（剩余 5 全部 ACK、timer 归零）",
+      envB.transport.batchPosts().length === 2 &&
+      envB.ctrl.stateSnapshot().outbox.length === 0 &&
+      envB.timer.pendingCount() === 0);
+
+    /* C. 400 部分 rejected：被拒批次删除，剩余合法 batch 自动续传 */
+    const bA = "a1b2c3d4-0000-4000-8000-00000000010a";
+    const bB = "a1b2c3d4-0000-4000-8000-00000000010b";
+    const pastAttempt = 10000000000 - 40 * 60000;   /* 上次尝试在 40min 前：门已到 */
+    let cFails400 = 1;
+    const envC = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        lastUploadAttemptAt: pastAttempt,
+        outbox: [
+          { batchId: bA, localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+            counters: { app_resume: 1 }, histograms: {} },
+          { batchId: bB, localDay: "2026-09-28", periodStart: 3, periodEnd: 4,
+            counters: { text_search: 2 }, histograms: {} }] },
+      transport: fakeTransport({ batchFail: () => (cFails400-- > 0
+        ? Object.assign(new Error("HTTP 400"),
+          { status: 400, rejected: [{ batchId: bA, error: "unknown counter metric" }] })
+        : null) })
+    });
+    envC.ctrl.attemptFlush("cold");
+    await flush();
+    check("C: 400 partial → 被拒批次删除、合法批次保留",
+      envC.ctrl.stateSnapshot().outbox.length === 1 &&
+      envC.ctrl.stateSnapshot().outbox[0].batchId === bB);
+    check("C: 400 后自动 re-arm（timer 唯一）", envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = Math.max(
+      envC.ctrl.stateSnapshot().lastUploadAttemptAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS,
+      envC.ctrl.stateSnapshot().nextRetryAt);
+    envC.timer.fire();
+    await flush();
+    check("C: 剩余合法批次自动续传成功（ACK 清空、timer 归零）",
+      envC.transport.batchPosts().length === 2 &&
+      envC.ctrl.stateSnapshot().outbox.length === 0 &&
+      envC.timer.pendingCount() === 0);
+
+    /* D. register 失败 → registerRetryAt 到点自动重注册（零外部触发） */
+    let dRegFails = 1;
+    const envD = makeCtrl({
+      transport: fakeTransport({ registerFail: () => (dRegFails-- > 0
+        ? new Error("reg down") : null) })
+    });
+    envD.ctrl.attemptFlush("cold");
+    await flush();
+    check("D: 注册失败后自动 re-arm register timer（零外部触发）",
+      envD.ctrl.stateSnapshot().deviceId === null && envD.timer.pendingCount() === 1);
+    envD.fc.c.nowMs = envD.ctrl.stateSnapshot().registerRetryAt;
+    envD.timer.fire();
+    await flush();
+    check("D: 到点自动重注册成功并恢复凭据",
+      envD.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envD.ctrl.stateSnapshot().deviceToken === TOKEN64 &&
+      envD.transport.registerPosts().length === 2);
+
+    /* E. 401/403 token 失效 → 清凭据 → registerRetryAt 到点自动恢复 */
+    let eBatch403 = 1;
+    const envE = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000001e1",
+          localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+          counters: { text_search: 1 }, histograms: {} }] },
+      transport: fakeTransport({ batchFail: () => (eBatch403-- > 0
+        ? Object.assign(new Error("HTTP 403"), { status: 403 }) : null) })
+    });
+    envE.ctrl.attemptFlush("cold");
+    await flush();
+    check("E: 403 → 清凭据 + 自动 re-arm register timer（零外部触发）",
+      envE.ctrl.stateSnapshot().deviceId === null &&
+      envE.ctrl.stateSnapshot().outbox.length === 1 &&
+      envE.timer.pendingCount() === 1);
+    envE.fc.c.nowMs = envE.ctrl.stateSnapshot().registerRetryAt;
+    envE.timer.fire();
+    await flush();
+    { const stE = envE.ctrl.stateSnapshot();
+    check("E: 到点自动重注册成功（凭据恢复；outbox 仍被 30min 节流压住——不绕过）",
+      stE.deviceId === DEV64 &&
+      stE.deviceToken === TOKEN64 &&
+      envE.transport.registerPosts().length === 1 &&
+      stE.outbox.length === 1 &&
+      envE.timer.pendingCount() === 1,
+      "deviceId=" + (stE.deviceId === DEV64 ? "ok" : stE.deviceId) +
+      " regPosts=" + envE.transport.registerPosts().length +
+      " outbox=" + stE.outbox.length + " pending=" + envE.timer.pendingCount() +
+      " last=" + stE.lastFlushResult + " now=" + envE.fc.c.nowMs +
+      " regRetryAt=" + stE.registerRetryAt); }
+    envE.fc.c.nowMs = envE.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    envE.timer.fire();
+    await flush();
+    check("E: 节流到期自动上传积压 outbox（全链路无人值守恢复）",
+      envE.ctrl.stateSnapshot().outbox.length === 0 &&
+      envE.transport.batchPosts().length === 2 &&
+      envE.timer.pendingCount() === 0);
+
+    /* F. 诊断状态：无凭据期显示 等待注册 */
+    const envF = makeCtrl({});
+    check("F: 无凭据期诊断 uploadState = 等待注册",
+      envF.ctrl.diagnostics().uploadState === "等待注册");
+  }
+
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */
   section("TEL-PRIVACY 逻辑搜题口径与内容红线");
   {
@@ -3304,6 +3448,7 @@ async function runTelemetryTests() {
     const hostile = MSQTelemetry.createController({
       storage: { load: () => { throw new Error("x"); }, save: () => { throw new Error("x"); } },
       clock: { now: () => 1, localDay: () => "2026-09-27" },
+      setTimeout: (fn) => 0, clearTimeout: () => {},
       transport: { post: () => Promise.reject(new Error("x")) },
       native: { getAndroidId: () => Promise.reject(new Error("x")) },
       serverUrl: "https://example.test",

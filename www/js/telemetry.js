@@ -425,6 +425,9 @@
           state.lastFlushResult = "register failed";
           persist();
           flushing = false;
+          /* TELEMETRY_SCHEDULER_REARM_V1：注册失败 → registerRetryAt 到点
+             自动重试（one-shot timer），无需外部触发 */
+          attemptFlush("re-arm");
         });
     }
 
@@ -511,6 +514,9 @@
         state.lastFlushResult = "OK (" + accepted.length + " acked)";
         persist();
         flushing = false;
+        /* TELEMETRY_SCHEDULER_REARM_V1：ACK 后 outbox 仍有剩余（>20 长尾）→
+           自动重挂唯一 timer（统一门：30min 后续传），不依赖外部触发 */
+        attemptFlush("re-arm");
       }, function (e) {
         var status = e && e.status;
         if (status === 401 || status === 403) {
@@ -525,6 +531,9 @@
           state.lastFlushResult = "token rejected (" + status + ")";
           persist();
           flushing = false;
+          /* TELEMETRY_SCHEDULER_REARM_V1：token 失效 → registerRetryAt 到点
+             自动重注册（one-shot timer），无需外部触发 */
+          attemptFlush("re-arm");
           return;
         }
         if (status === 400) {
@@ -552,6 +561,9 @@
           state.lastFlushResult = "rejected (400)";
           persist();
           flushing = false;
+          /* TELEMETRY_SCHEDULER_REARM_V1：部分 rejected 后剩余合法 batch →
+             自动重挂 timer（统一门），到点续传 */
+          attemptFlush("re-arm");
           return;
         }
         state.flushAttempts += 1;
@@ -559,6 +571,9 @@
         state.lastFlushResult = status ? ("HTTP " + status) : "network error";
         persist();
         flushing = false;
+        /* TELEMETRY_SCHEDULER_REARM_V1：可重试失败 → backoff 到点自动重试，
+           不依赖外部触发 */
+        attemptFlush("re-arm");
       });
     }
 
@@ -567,7 +582,12 @@
         if (flushing) { return; }
         var t = now();
         if (!state.deviceId || !state.deviceToken) {
+          /* TELEMETRY_SCHEDULER_REARM_V1：无凭据（注册失败/token 失效）同样由
+             唯一 one-shot timer 自动恢复 —— registerRetryAt 到点自动重注册，
+             不再依赖外部 resume/cold-start */
+          cancelFlushTimer();
           if (t >= state.registerRetryAt) { registerAndFlush(); }
+          else { scheduleFlushTimer(state.registerRetryAt - t); }
           return;
         }
         if (!state.outbox.length) {
@@ -604,10 +624,11 @@
       attemptFlush("resume");
     }
 
-    /* 上传状态（TELEMETRY_FLUSH_SCHEDULER_V1）：等待重试 > 等待节流 > 上传中 > 可上传。
-       供 DEV 诊断展示；中文标签与 app.js 诊断组一致 */
+    /* 上传状态（TELEMETRY_FLUSH_SCHEDULER_V1 + REARM_V1）：
+       等待注册 > 上传中 > 等待重试 > 等待节流 > 可上传。供 DEV 诊断展示 */
     function uploadStateOf(t) {
       if (flushing) { return "上传中"; }
+      if (!state.deviceId || !state.deviceToken) { return "等待注册"; }
       if (!state.outbox.length) { return "可上传"; }
       if (state.nextRetryAt && t < state.nextRetryAt) { return "等待重试"; }
       if (t < state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS) { return "等待节流"; }

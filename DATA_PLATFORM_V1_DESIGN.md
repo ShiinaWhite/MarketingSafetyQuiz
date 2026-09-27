@@ -611,3 +611,9 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    retry backoff（2h backoff 要等满 2h）；outbox 非空且 now < nextAttemptAt 时由
    SCHEDULER_V1 唯一 timer 到点自动 attemptFlush（timer 到期重算重排，自愈）。
    长尾排空（DRAIN_TAIL_DELAY_MS 标记）同样服从统一门。诊断 uploadState 不变。
+6. **完成路径 re-arm（TELEMETRY_SCHEDULER_REARM_V1，vc29）**：审查全部异步完成回调，
+   保证 outbox 非空 / 无凭据时零外部触发自动恢复 —— (a) 可重试失败：backoff 落库后
+   re-arm；(b) 成功 ACK 长尾（>20）：重挂 timer 由统一门续传；(c) 400 部分 rejected：
+   剩余合法 batch 自动续传；(d) 401/403 清凭据与注册失败：registerRetryAt 到点自动
+   重注册（attemptFlush 无凭据分支同样挂唯一 one-shot timer）。原则不变：不轮询、
+   timer 唯一、不绕 30min 节流、不绕 backoff、ACK 前不删。诊断新增「等待注册」状态。
