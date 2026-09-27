@@ -251,6 +251,10 @@
     var pendingSearch = null;
     var searchTimer = null;
     var flushing = false;
+    /* TELEMETRY_FLUSH_SCHEDULER_V1：outbox 非空被 30min 节流阻挡时的唯一
+       自动重试 timer。不轮询、不重复创建；outbox 清空或上传尝试发生即取消。
+       不持久化：进程死后由 cold-start attemptFlush 重新评估并重排。 */
+    var flushTimer = null;
 
     var initialRaw = null;
     try {
@@ -354,13 +358,13 @@
         if (!q) {
           lastCountedQuery = null;          /* 清空 = 下次输入视为新意图 */
           pendingSearch = null;
-          if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+          if (searchTimer) { (d.clearTimeout || clearTimeout)(searchTimer); searchTimer = null; }
           return;
         }
         if (q === lastCountedQuery) { return; }   /* 同 query：筛选/重渲染不重复计数 */
         pendingSearch = { query: q, resultCount: (typeof resultCount === "number" &&
           isFinite(resultCount) && resultCount > 0) ? resultCount : 0 };
-        if (searchTimer) { clearTimeout(searchTimer); }
+        if (searchTimer) { (d.clearTimeout || clearTimeout)(searchTimer); }
         var timerFn = d.setTimeout || setTimeout;
         searchTimer = timerFn(fireSearchTimer, SEARCH_IDLE_MS);
       } catch (e) { /* swallow */ }
@@ -456,7 +460,24 @@
         .then(function (resp) { return { resp: resp, sent: payload.batches }; });
     }
 
+    function scheduleFlushTimer(delayMs) {
+      if (flushTimer) { return; }   /* 唯一性：已有 scheduler 时复用，不重复创建 */
+      var timerFn = d.setTimeout || setTimeout;
+      flushTimer = timerFn(function () {
+        flushTimer = null;
+        attemptFlush("throttle-timer");
+      }, Math.max(0, delayMs));
+    }
+
+    function cancelFlushTimer() {
+      if (!flushTimer) { return; }
+      var clearFn = d.clearTimeout || clearTimeout;
+      try { clearFn(flushTimer); } catch (e) { /* swallow */ }
+      flushTimer = null;
+    }
+
     function flushNow() {
+      cancelFlushTimer();   /* 上传尝试发生：旧 scheduler 作废（结果由回调决定） */
       flushing = true;
       var info = appInfo();
       if (!validAppInfo(info)) {
@@ -547,10 +568,19 @@
           if (t >= state.registerRetryAt) { registerAndFlush(); }
           return;
         }
-        if (!state.outbox.length) { return; }
+        if (!state.outbox.length) {
+          cancelFlushTimer();   /* outbox 清空：scheduler 无事可做 */
+          return;
+        }
         var dueRetry = state.nextRetryAt && t >= state.nextRetryAt;
-        var intervalOk = (t - state.lastUploadAttemptAt) >= MIN_UPLOAD_INTERVAL_MS;
-        if (!intervalOk && !dueRetry) { return; }
+        var eligibleAt = state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS;
+        var intervalOk = t >= eligibleAt;
+        if (!intervalOk && !dueRetry) {
+          /* 被节流阻挡：安排唯一 timer 到 eligibleAt 自动重试；
+             后续触发点（resume/freeze/record）进入本分支时复用同一 timer */
+          scheduleFlushTimer(eligibleAt - t);
+          return;
+        }
         flushNow();
       } catch (e) { /* swallow */ }
     }
@@ -568,9 +598,20 @@
       attemptFlush("resume");
     }
 
+    /* 上传状态（TELEMETRY_FLUSH_SCHEDULER_V1）：等待重试 > 等待节流 > 上传中 > 可上传。
+       供 DEV 诊断展示；中文标签与 app.js 诊断组一致 */
+    function uploadStateOf(t) {
+      if (flushing) { return "上传中"; }
+      if (!state.outbox.length) { return "可上传"; }
+      if (state.nextRetryAt && t < state.nextRetryAt) { return "等待重试"; }
+      if (t < state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS) { return "等待节流"; }
+      return "可上传";
+    }
+
     function diagnostics() {
       try {
         var id = state.deviceId;
+        var t = now();
         return {
           hasDeviceId: !!(id && state.deviceToken),
           deviceIdMasked: maskDeviceId(id),
@@ -578,7 +619,12 @@
           bucketActions: state.currentBucket.meaningfulActionCount,
           lastFlushSuccessAt: state.lastFlushSuccessAt || null,
           nextRetryAt: state.nextRetryAt || null,
-          lastFlushResult: state.lastFlushResult || null
+          lastFlushResult: state.lastFlushResult || null,
+          /* SCHEDULER_V1 新增：节流时钟与上传状态 */
+          lastUploadAttemptAt: state.lastUploadAttemptAt || null,
+          nextEligibleAt: state.lastUploadAttemptAt
+            ? (state.lastUploadAttemptAt + MIN_UPLOAD_INTERVAL_MS) : null,
+          uploadState: uploadStateOf(t)
         };
       } catch (e) { return null; }
     }

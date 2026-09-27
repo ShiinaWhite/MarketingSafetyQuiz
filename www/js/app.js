@@ -1995,6 +1995,9 @@
             ["设备 ID", telDiag.deviceIdMasked || "—"],
             ["待上传批次", telDiag.outboxCount],
             ["当前桶动作数", telDiag.bucketActions],
+            ["上传状态", telDiag.uploadState || "—"],
+            ["上次上传尝试", telDiag.lastUploadAttemptAt ? fmtTime(telDiag.lastUploadAttemptAt) : "暂无"],
+            ["下次允许上传", telDiag.nextEligibleAt ? fmtTime(telDiag.nextEligibleAt) : "立即"],
             ["上次成功上传", telDiag.lastFlushSuccessAt ? fmtTime(telDiag.lastFlushSuccessAt) : "暂无"],
             ["下次重试", telDiag.nextRetryAt ? fmtTime(telDiag.nextRetryAt) : "—"],
             ["最近结果", telDiag.lastFlushResult || "—"]

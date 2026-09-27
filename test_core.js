@@ -2578,13 +2578,27 @@ async function runTelemetryTests() {
   }
 
   function fakeTimer() {
-    const t = { fn: null, delay: 0 };
+    /* 多 timer 版：observeSearch 的空闲 timer 与 flush scheduler 共存互不干扰；
+       fire() 触发 delay 最小的 pending（模拟时钟推进到最近到期点） */
+    let seq = 0;
+    let lastDelayVal = 0;
+    const pending = new Map();
     return {
-      setTimeout: (fn, d) => { t.fn = fn; t.delay = d; return { fake: true }; },
-      clearTimeout: () => { t.fn = null; },
-      fire: () => { if (t.fn) { const f = t.fn; t.fn = null; f(); } },
-      pending: () => !!t.fn,
-      lastDelay: () => t.delay
+      setTimeout: (fn, delay) => {
+        const id = ++seq; lastDelayVal = delay; pending.set(id, { fn: fn, delay: delay });
+        return id;
+      },
+      clearTimeout: (id) => { pending.delete(id); },
+      fire: () => {
+        if (!pending.size) { return; }
+        let bestId = null, best = null;
+        for (const [id, t2] of pending) { if (!best || t2.delay < best.delay) { best = t2; bestId = id; } }
+        pending.delete(bestId);
+        best.fn();
+      },
+      pending: () => pending.size > 0,
+      pendingCount: () => pending.size,
+      lastDelay: () => lastDelayVal
     };
   }
 
@@ -3069,6 +3083,59 @@ async function runTelemetryTests() {
     check("test_core appInfo mock 均经真实 prefetch 形状或显式坏形状（无理想化直写默认）",
       !/appInfo: o\.appInfo === undefined\s*\?\s*\(\) => \(\{ versionCode/.test(
         fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")));
+  }
+
+  /* ---------- TEL-SCHED：节流 scheduler（TELEMETRY_FLUSH_SCHEDULER_V1） ---------- */
+  section("TEL-SCHED 30min 到期 timer 自动 POST（唯一/可取消/无需 resume）");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("首次上传成功（节流时钟基线）", env.transport.batchPosts().length === 1);
+    const t0 = env.fc.c.nowMs;
+
+    /* 节流窗口内冻结：零 POST、outbox 保留、scheduler 已排定 */
+    env.fc.c.nowMs = t0 + 10 * 60000;
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("throttle 内零 POST（outbox 完整保留）", env.transport.batchPosts().length === 1 &&
+      env.ctrl.stateSnapshot().outbox.length === 1);
+    check("被节流阻挡时已安排自动重试 timer", env.timer.pendingCount() === 1);
+    check("节流内诊断 uploadState = 等待节流",
+      env.ctrl.diagnostics().uploadState === "等待节流");
+    check("诊断含上次上传尝试 / 下次允许上传",
+      env.ctrl.diagnostics().lastUploadAttemptAt === t0 &&
+      env.ctrl.diagnostics().nextEligibleAt === t0 + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS);
+
+    /* 唯一性：任意触发点进入节流分支复用同一 timer，不重复创建 */
+    env.ctrl.attemptFlush("resume");
+    await flush();
+    env.ctrl.onAppResume();
+    await flush();
+    check("重复触发（resume/显式）不重复创建 timer", env.timer.pendingCount() === 1);
+    check("resume/cold-start 不绕过 30min 限制（零 POST）",
+      env.transport.batchPosts().length === 1 && env.ctrl.stateSnapshot().outbox.length === 1);
+
+    /* 到期：无需任何 resume/freeze，timer 自动 POST → ACK 清 outbox → timer 取消 */
+    env.fc.c.nowMs = t0 + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env.timer.fire();
+    await flush();
+    check("30min timer 到期自动 POST", env.transport.batchPosts().length === 2);
+    check("ACK → outbox 清空、scheduler 取消", env.ctrl.stateSnapshot().outbox.length === 0 &&
+      env.timer.pendingCount() === 0);
+    check("清空后诊断 uploadState = 可上传", env.ctrl.diagnostics().uploadState === "可上传");
+
+    /* 等待重试状态优先于等待节流：网络失败退避期间诊断显示等待重试 */
+    const envRetry = makeCtrl({
+      initialState: { deviceId: DEV64 },
+      transport: fakeTransport({ batchFail: () => new Error("down") })
+    });
+    for (let i = 0; i < 30; i++) { envRetry.ctrl.record("text_search"); }
+    await flush();
+    check("失败退避中诊断 uploadState = 等待重试",
+      envRetry.ctrl.diagnostics().uploadState === "等待重试");
+    /* outbox 保留（scheduler 修复不改变失败保留语义） */
+    check("退避中 outbox 保留", envRetry.ctrl.stateSnapshot().outbox.length === 1);
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */
