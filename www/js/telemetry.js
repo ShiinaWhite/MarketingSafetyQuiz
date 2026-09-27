@@ -324,10 +324,18 @@
           }
           return native.getAndroidId();
         })
-        .then(function (androidId) {
-          if (!androidId) { throw new Error("no-android-id"); }
+        .then(function (result) {
+          /* TELEMETRY_ANDROID_ID_BRIDGE_V1：Capacitor 插件 resolve 的是
+             { androidId: "<16hex>" } 对象（TelemetryPlugin.getAndroidId 的
+             返回协议），不是裸字符串。必须读字段并按 16 hex 校验；
+             任何其他形状（裸 string/null/[object Object]）一律拒绝注册，
+             绝不把对象 String() 后发给服务端。 */
+          var id = result && result.androidId;
+          if (typeof id !== "string" || !/^[0-9a-f]{16}$/i.test(id)) {
+            throw new Error("no-android-id");
+          }
           return d.transport.post(d.serverUrl + "/api/telemetry/register",
-            { schemaVersion: SCHEMA_VERSION, androidId: String(androidId) }, 15000);
+            { schemaVersion: SCHEMA_VERSION, androidId: id.toLowerCase() }, 15000);
         })
         .then(function (resp) {
           var id = resp && resp.deviceId;
@@ -340,8 +348,9 @@
           state.deviceToken = token;
           state.registerRetryAt = 0;
           state.registerAttempts = 0;
-          /* 注册本身也是一次 telemetry 网络交互：30min 上传间隔从注册时刻起算（§7） */
-          state.lastUploadAttemptAt = now();
+          /* 注册 ≠ batch 上传：30min 上传间隔时钟不从注册起算 —— 注册成功后的
+             attemptFlush("registered") 立即续传积压 outbox（TELEMETRY_ANDROID_ID_
+             BRIDGE_V1：修复后首传不必等 30min）；后续冻结/恢复才受间隔节流 */
           state.lastFlushResult = "registered";
           persist();
           flushing = false;

@@ -598,3 +598,10 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    metric 集合本身零调整。
 3. **激活**：生产 Collector 按端口 8787 精确定位重启后，telemetry 端点与 samples.db
    双写正式生效；`tools/sample_db/backfill.js --apply` 补录历史样本。
+4. **真桥接修复（TELEMETRY_ANDROID_ID_BRIDGE_V1，vc26）**：TelemetryPlugin.getAndroidId
+   resolve 的是 `{ androidId: "<16hex>" }` 对象；registerAndFlush 旧实现把整个对象
+   `String()` 后上传导致服务端 400。修复：读取 `result.androidId` 并按
+   `/^[0-9a-f]{16}$/i` 校验（大小写归一），任何其他形状（裸 string/null/非 hex）
+   一律拒绝注册。同时：注册成功后立即续传积压 outbox（注册 ≠ batch 上传，
+   30min 间隔时钟不从注册起算）；测试 mock 固定为真实 Capacitor 对象形状，
+   并有源码守卫防止 `String(androidId)` / string mock 回归。

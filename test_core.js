@@ -2599,7 +2599,10 @@ async function runTelemetryTests() {
         calls.push({ url: url, body: body });
         if (o.fail) { return Promise.reject(o.fail()); }
         if (url.endsWith("/api/telemetry/register")) {
-          if (o.registerFail) { return Promise.reject(o.registerFail()); }
+          if (o.registerFail) {
+            const err = o.registerFail();   /* 返回 null = 本次放行（一次性失败注入） */
+            if (err) { return Promise.reject(err); }
+          }
           return Promise.resolve({ ok: true, deviceId: DEV64, deviceToken: TOKEN64 });
         }
         if (o.batchFail) { return Promise.reject(o.batchFail()); }
@@ -2638,7 +2641,8 @@ async function runTelemetryTests() {
       clearTimeout: timer.clearTimeout,
       transport: transport,
       native: o.native === undefined
-        ? { getAndroidId: () => Promise.resolve("0123456789abcdef") }
+        ? { /* 真实 Capacitor 桥接形状（TelemetryPlugin.getAndroidId resolve 对象） */
+          getAndroidId: () => Promise.resolve({ androidId: "0123456789abcdef" }) }
         : o.native,
       serverUrl: "https://example.test",
       appInfo: o.appInfo === undefined
@@ -2674,6 +2678,80 @@ async function runTelemetryTests() {
     await flush();
     check("退避窗口内不重试注册（仍只有首次失败尝试）",
       failEnv.transport.registerPosts().length === 1);
+  }
+
+  /* ---------- TEL-BRIDGE：真桥接形状（TELEMETRY_ANDROID_ID_BRIDGE_V1） ---------- */
+  section("TEL-BRIDGE {androidId} 对象形状 / 非法形状拒绝 / outbox 恢复上传");
+  {
+    /* 真实 Capacitor 形状：getAndroidId resolve { androidId } 对象 */
+    const envOk = makeCtrl({});
+    envOk.ctrl.attemptFlush("cold");
+    await flush();
+    check("对象形状 {androidId} → 注册成功", envOk.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envOk.ctrl.stateSnapshot().deviceToken === TOKEN64);
+    check("POST body androidId = result.androidId", envOk.transport.registerPosts().length === 1 &&
+      envOk.transport.registerPosts()[0].body.androidId === "0123456789abcdef");
+    check("注册成功 → 积压 outbox 立即续传（不等 30min）",
+      envOk.transport.batchPosts().length === 0);
+
+    const envUp = makeCtrl({ native: {
+      getAndroidId: () => Promise.resolve({ androidId: "ABCDEF0123456789" }) } });
+    envUp.ctrl.attemptFlush("cold");
+    await flush();
+    check("大写 ANDROID_ID → 小写归一后上行", envUp.transport.registerPosts().length === 1 &&
+      envUp.transport.registerPosts()[0].body.androidId === "abcdef0123456789");
+
+    /* 旧 bug 形状（裸 string）必须被拒绝 —— 防止 [object Object] 回归 */
+    const envStr = makeCtrl({ native: {
+      getAndroidId: () => Promise.resolve("0123456789abcdef") } });
+    envStr.ctrl.attemptFlush("cold");
+    await flush();
+    check("裸 string 形状 → 拒绝注册（绝不上传对象字符串）",
+      envStr.transport.registerPosts().length === 0 &&
+      envStr.ctrl.stateSnapshot().registerAttempts === 1);
+    check("拒绝路径零 batch 上行", envStr.transport.batchPosts().length === 0);
+
+    for (const [label, shape] of [
+      ["15 hex", { androidId: "0123456789abcde" }],
+      ["非 hex", { androidId: "zz23456789abcdef" }],
+      ["null androidId", { androidId: null }]
+    ]) {
+      const envBad = makeCtrl({ native: { getAndroidId: () => Promise.resolve(shape) } });
+      envBad.ctrl.attemptFlush("cold");
+      await flush();
+      check("拒绝：" + label, envBad.transport.registerPosts().length === 0);
+    }
+
+    /* outbox 不丢：注册失败期冻结的批次，注册恢复后自动继续上传 */
+    let regFails = 1;
+    const envKeep = makeCtrl({ transport: fakeTransport({
+      registerFail: () => (regFails-- > 0 ? new Error("reg down") : null) }) });
+    for (let i = 0; i < 30; i++) { envKeep.ctrl.record("text_search"); }
+    await flush();
+    check("注册失败期 outbox 保留、零 batch 上行",
+      envKeep.ctrl.stateSnapshot().outbox.length === 1 &&
+      envKeep.transport.batchPosts().length === 0);
+    envKeep.fc.c.nowMs += 10 * 60000;   /* 越过 register 退避（首退 5min×jitter） */
+    envKeep.ctrl.attemptFlush("resume");
+    await flush();
+    check("注册恢复 → 自动续传积压 batch（ACK 后清空）",
+      envKeep.ctrl.stateSnapshot().outbox.length === 0 &&
+      envKeep.transport.batchPosts().length === 1 &&
+      envKeep.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envKeep.ctrl.stateSnapshot().deviceToken === TOKEN64);
+
+    /* 源码守卫：字段读取 + 16hex 校验；禁止 String(androidId) / string mock 回归 */
+    const telBridgeSrc = fs.readFileSync(path.join(__dirname, "www/js/telemetry.js"), "utf8");
+    check("telemetry.js 读取 result.androidId 并按 16 hex 校验",
+      /result && result\.androidId/.test(telBridgeSrc) &&
+      /\/\^\[0-9a-f\]\{16\}\$\/i\.test\(id\)/.test(telBridgeSrc));
+    check("telemetry.js 无 String(androidId) 旧 bug 模式",
+      !telBridgeSrc.includes("String(androidId)"));
+    check("默认 mock 为对象形状；string 形状 mock 仅允许 TEL-BRIDGE 拒绝测试一处",
+      /getAndroidId: \(\) => Promise\.resolve\(\{ androidId: "0123456789abcdef" \}\)/.test(
+        fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")) &&
+      (fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")
+        .match(/getAndroidId: \(\) => Promise\.resolve\("[^"]*"\)/g) || []).length === 1);
   }
 
   /* ---------- TEL-BATCH：payload 形状 / 合并上限 ---------- */
