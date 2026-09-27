@@ -2631,6 +2631,12 @@ async function runTelemetryTests() {
     if (initialState && initialState.deviceId && !initialState.deviceToken) {
       initialState = Object.assign({}, initialState, { deviceToken: TOKEN64 });
     }
+    /* 真实 prefetch 形状（TELEMETRY_APP_INFO_BRIDGE_V1）：channel 在外层、
+       包名字段叫 id —— appInfo 一律经 normalizePrefetchInfo 规范化，
+       禁止直接手写理想化 { packageName, channel } 输入 */
+    const REAL_PREFETCH = { ok: true,
+      info: { id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 },
+      channel: "dev" };
     const ctrl = MSQTelemetry.createController({
       storage: {
         load: () => initialState,
@@ -2646,12 +2652,12 @@ async function runTelemetryTests() {
         : o.native,
       serverUrl: "https://example.test",
       appInfo: o.appInfo === undefined
-        ? () => ({ versionCode: 24, versionName: "1.0.24-dev", channel: "dev",
-          packageName: "com.jty.safetyquiz.dev" })
+        ? () => MSQTelemetry.normalizePrefetchInfo(REAL_PREFETCH)
         : o.appInfo,
       random: o.random || (() => 0.5)
     });
-    return { ctrl: ctrl, saves: saves, timer: timer, transport: transport, fc: fc };
+    return { ctrl: ctrl, saves: saves, timer: timer, transport: transport, fc: fc,
+      REAL_PREFETCH: REAL_PREFETCH };
   }
 
   /* ---------- TEL-ID：注册与缓存（服务端确定性在 test_telemetry.js） ---------- */
@@ -2774,7 +2780,8 @@ async function runTelemetryTests() {
     check("batch 恰 10 个字段", JSON.stringify(keys) === JSON.stringify([
       "batchId", "channel", "counters", "histograms", "localDay",
       "packageName", "periodEnd", "periodStart", "versionCode", "versionName"]), keys.join(","));
-    check("元数据来自 appInfo", b.versionCode === 24 && b.versionName === "1.0.24-dev" &&
+    check("元数据来自真实 prefetch 形状（id→packageName，vc=当前 DEV vc）",
+      b.versionCode === 27 && b.versionName === "1.0.27-dev" &&
       b.channel === "dev" && b.packageName === "com.jty.safetyquiz.dev");
     check("counters/直方图形状", b.counters.app_cold_start === 1 &&
       b.counters.text_search === 1 && b.histograms.photo_total_ms["2000-4000"] === 1);
@@ -2991,6 +2998,77 @@ async function runTelemetryTests() {
         envAuth.ctrl.stateSnapshot().deviceId === DEV64 &&
         envAuth.ctrl.stateSnapshot().deviceToken === TOKEN64);
     }
+  }
+
+  /* ---------- TEL-APPINFO：prefetch 真实形状规范化（TELEMETRY_APP_INFO_BRIDGE_V1） ---------- */
+  section("TEL-APPINFO {info:{id,…},channel} 规范化 / 坏元数据不上传 / outbox 保留");
+  {
+    /* 真实 prefetch 形状 → withMeta 契约形状 */
+    const nf = MSQTelemetry.normalizePrefetchInfo({ ok: true,
+      info: { id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 },
+      channel: "dev" });
+    check("normalizePrefetchInfo：id→packageName、r.channel→channel",
+      nf.packageName === "com.jty.safetyquiz.dev" && nf.channel === "dev" &&
+      nf.versionName === "1.0.27-dev" && nf.versionCode === 27);
+    check("normalizePrefetchInfo：r.channel 缺失 → 包名推导回退",
+      MSQTelemetry.normalizePrefetchInfo({ info: {
+        id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 }
+      }).channel === "dev");
+    for (const [label, shape] of [
+      ["无 info", {}],
+      ["包名不在白名单", { info: { id: "com.other.app", versionName: "x", versionCode: 1 } }],
+      ["versionCode 缺失", { info: { id: "com.jty.safetyquiz.dev", versionName: "x" } }]
+    ]) {
+      check("normalizePrefetchInfo 拒绝：" + label,
+        MSQTelemetry.normalizePrefetchInfo(shape) === null);
+    }
+    check("validAppInfo 拒绝旧 bug 形状（packageName=undefined → String 化）",
+      MSQTelemetry.validAppInfo({ versionCode: 24, versionName: "1.0.24-dev" }) === false &&
+      MSQTelemetry.validAppInfo({
+        packageName: "com.jty.safetyquiz.dev", channel: "dev",
+        versionName: "1.0.27-dev", versionCode: 27 }) === true);
+
+    /* 真 bug 重演：理想化/透传形状的 appInfo → 绝不出网，outbox 保留 */
+    const seedOut = { deviceId: DEV64, deviceToken: TOKEN64, outbox: [
+      { batchId: "a1b2c3d4-0000-4000-8000-0000000000e1", localDay: "2026-09-28",
+        periodStart: 1, periodEnd: 2, counters: { text_search: 1 }, histograms: {} }] };
+    const envBad = makeCtrl({
+      initialState: JSON.parse(JSON.stringify(seedOut)),
+      appInfo: () => ({ versionCode: 27, versionName: "1.0.27-dev", channel: "dev",
+        packageName: undefined })
+    });
+    envBad.ctrl.attemptFlush("cold");
+    await flush();
+    check("坏元数据 → 零 batch 上行，outbox 保留（防自伤式丢弃）",
+      envBad.transport.batchPosts().length === 0 &&
+      envBad.ctrl.stateSnapshot().outbox.length === 1);
+    check("坏元数据 → 诊断结果标记 bad app metadata",
+      envBad.ctrl.stateSnapshot().lastFlushResult === "bad app metadata");
+    check("坏元数据 → 不进退避循环（nextRetryAt 不变）",
+      envBad.ctrl.stateSnapshot().nextRetryAt === 0);
+
+    /* 修复后（真实形状 appInfo）共享同一 state → 自动恢复上传 */
+    const envFixed = makeCtrl({ initialState: envBad.ctrl.stateSnapshot() });
+    envFixed.ctrl.attemptFlush("resume");
+    await flush();
+    check("元数据修复 → 同一 outbox 自动上传（ACK 后清空）",
+      envFixed.transport.batchPosts().length === 1 &&
+      envFixed.ctrl.stateSnapshot().outbox.length === 0);
+    const sentBody = envFixed.transport.batchPosts()[0].body;
+    check("最终 batch 元数据：packageName=com.jty.safetyquiz.dev / channel=dev / versionCode=27",
+      sentBody.deviceId === DEV64 &&
+      sentBody.batches[0].packageName === "com.jty.safetyquiz.dev" &&
+      sentBody.batches[0].channel === "dev" &&
+      sentBody.batches[0].versionCode === 27);
+
+    /* 源码守卫：app.js 接线必须经 normalizePrefetchInfo，禁止直接透传 r.info */
+    const appInfoSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+    check("app.js Telemetry 接线经 normalizePrefetchInfo",
+      /MSQTelemetry\.normalizePrefetchInfo\(r\)/.test(appInfoSrc) &&
+      !appInfoSrc.includes("telemetryAppInfo = (r && r.info) ? r.info : null"));
+    check("test_core appInfo mock 均经真实 prefetch 形状或显式坏形状（无理想化直写默认）",
+      !/appInfo: o\.appInfo === undefined\s*\?\s*\(\) => \(\{ versionCode/.test(
+        fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")));
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */

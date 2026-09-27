@@ -2559,7 +2559,12 @@
 
   if (typeof MSQTelemetry !== "undefined" && MSQTelemetry) {
     prefetchReady.then(function (r) {
-      telemetryAppInfo = (r && r.info) ? r.info : null;
+      /* TELEMETRY_APP_INFO_BRIDGE_V1：prefetch 真实形状 = { info:{id,versionName,
+         versionCode}, channel } —— 包名字段叫 id、channel 在外层。统一在接线边界
+         经 normalizePrefetchInfo 规范化为 withMeta 契约形状，绝不直接透传 r.info
+         （旧写法 packageName=undefined → 服务端 400 rejected）。 */
+      telemetryAppInfo = (typeof MSQTelemetry !== "undefined" && MSQTelemetry)
+        ? MSQTelemetry.normalizePrefetchInfo(r) : null;
     }, function () { /* 无 App 信息：flush 静默等待下一个触发点 */ });
     MSQTelemetry.createFromEnvironment({
       serverUrl: (typeof MSQSample !== "undefined" && MSQSample) ? MSQSample.PUBLIC_BASE_URL : "",

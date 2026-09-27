@@ -53,7 +53,66 @@
   var MAX_BODY_BYTES = 128 * 1024;
   var DRAIN_TAIL_DELAY_MS = 60000;
 
+  /* DATA_PLATFORM_V1_1 元数据白名单（与 tools/telemetry/store.js 同源）：
+     客户端上传前本地预校验 —— 元数据坏（如旧版把 prefetch r.info 直接透传，
+     packageName=undefined）绝不出网，batch 留在 outbox 等修复，防自伤式丢弃 */
+  var CHANNELS = ["dev", "stable", "unknown"];
+  var PACKAGES = {
+    "com.jty.safetyquiz.dev": "dev",
+    "com.jty.safetyquiz": "stable"
+  };
+
   /* ---------------- 纯函数 ---------------- */
+
+  /* TELEMETRY_APP_INFO_BRIDGE_V1：prefetch 真实形状 → withMeta 契约形状。
+     startup-update-prefetch 的 ready 结果是 { info: { id, versionName, versionCode },
+     channel }（包名字段叫 id，channel 在外层）——绝不能把 r.info 直接当 appInfo
+     透传（会得到 packageName=undefined）。任何形状异常 → null（telemetry 保持
+     未就绪，batch 留在 outbox）。 */
+  function normalizePrefetchInfo(r) {
+    try {
+      var info = r && r.info;
+      if (!info || typeof info !== "object") { return null; }
+      if (typeof info.id !== "string" ||
+          !(info.id === "com.jty.safetyquiz.dev" || info.id === "com.jty.safetyquiz")) {
+        return null;
+      }
+      if (!(typeof info.versionCode === "number" && isFinite(info.versionCode) &&
+          info.versionCode >= 1)) {
+        return null;
+      }
+      return {
+        packageName: info.id,
+        /* channel = r.channel（prefetch 外层，与 updateChannelFor 同源）；缺失时
+           回退包名推导。两者的强绑定一致性由 validAppInfo 上传前把关 */
+        channel: (typeof r.channel === "string" && r.channel)
+          ? r.channel : (PACKAGES[info.id] || null),
+        versionName: (typeof info.versionName === "string" && info.versionName)
+          ? info.versionName : "unknown",
+        versionCode: info.versionCode
+      };
+    } catch (e) { return null; }
+  }
+
+  /* withMeta 上行前的元数据契约校验（channel/package 强绑定，与服务端同规则） */
+  function validAppInfo(info) {
+    try {
+      if (!info || typeof info !== "object") { return false; }
+      if (typeof info.packageName !== "string" || !PACKAGES[info.packageName]) {
+        return false;
+      }
+      if (info.channel !== PACKAGES[info.packageName]) { return false; }
+      if (typeof info.versionCode !== "number" || !(info.versionCode >= 1) ||
+          Math.floor(info.versionCode) !== info.versionCode) {
+        return false;
+      }
+      if (typeof info.versionName !== "string" || !info.versionName ||
+          info.versionName.length > 40) {
+        return false;
+      }
+      return true;
+    } catch (e) { return false; }
+  }
 
   function localDayString(ms) {
     var d = new Date(ms);
@@ -400,9 +459,14 @@
     function flushNow() {
       flushing = true;
       var info = appInfo();
-      if (!info || !info.versionCode) {
-        /* 无版本信息（App.getInfo 未就绪）：不上报，等下一个触发点 */
+      if (!validAppInfo(info)) {
+        /* TELEMETRY_APP_INFO_BRIDGE_V1：元数据坏（packageName/channel/version 缺失
+           或不在白名单）= 客户端自身 bug，绝不出网 —— 服务端会 400 且按 rejected
+           语义丢弃批次。保留 outbox 等下一个触发点（appInfo 修复后自动恢复），
+           只更新本地诊断结果，不进退避循环 */
         flushing = false;
+        state.lastFlushResult = "bad app metadata";
+        persist();
         return;
       }
       var take = state.outbox.slice(0, MAX_BATCHES_PER_POST).map(withMeta);
@@ -661,6 +725,10 @@
     MAX_BODY_BYTES: MAX_BODY_BYTES,
     localDayString: localDayString,
     bucketize: bucketize,
+    normalizePrefetchInfo: normalizePrefetchInfo,
+    validAppInfo: validAppInfo,
+    CHANNELS: CHANNELS,
+    PACKAGES: PACKAGES,
     backoffMs: backoffMs,
     maskDeviceId: maskDeviceId,
     uuidV4: uuidV4,
