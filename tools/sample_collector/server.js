@@ -364,13 +364,14 @@ function handleCollector(req, res, ctx) {
      SQL 参数绑定 + 单事务。secret 缺失 / store 不可用 → 503 FAIL CLOSED。 */
   const isTeleRegister = req.method === "POST" && p === "/api/telemetry/register";
   const isTeleBatch = req.method === "POST" && p === "/api/telemetry/batch";
-  if (isTeleRegister || isTeleBatch) {
+  const isTeleAdminSummary = req.method === "POST" && p === "/api/telemetry/admin/summary";
+  if (isTeleRegister || isTeleBatch || isTeleAdminSummary) {
     const now = Date.now();
     const ip = clientIp(req);
     const teleLimit = (ctx.telemetry && ctx.telemetry.rateLimitPerMin) ||
       RATE_LIMIT_TELEMETRY_PER_MIN;
-    if (!rateLimit("tele:" + ip + ":" + (isTeleRegister ? "reg" : "bat"),
-      teleLimit, now)) {
+    if (!rateLimit("tele:" + ip + ":" + (isTeleAdminSummary ? "adm"
+      : (isTeleRegister ? "reg" : "bat")), teleLimit, now)) {
       rejectWrite(res, ctx, req, 429, "rate limited");
       return;
     }
@@ -378,12 +379,14 @@ function handleCollector(req, res, ctx) {
       sendJSON(res, 503, { ok: false, error: "telemetry unavailable" });
       return;
     }
-    const limit = isTeleRegister ? MAX_TELE_REGISTER_BODY_BYTES : MAX_TELE_BATCH_BODY_BYTES;
+    const limit = (isTeleRegister || isTeleAdminSummary)
+      ? MAX_TELE_REGISTER_BODY_BYTES : MAX_TELE_BATCH_BODY_BYTES;
     readBody(req, limit).then(function (raw) {
       let body;
       try { body = JSON.parse(raw.toString("utf8")); }
       catch (e) { sendJSON(res, 400, { ok: false, error: "malformed JSON" }); return; }
       if (isTeleRegister) { handleTelemetryRegister(res, ctx, body); }
+      else if (isTeleAdminSummary) { handleTelemetryAdminSummary(res, ctx, body, Date.now()); }
       else { handleTelemetryBatch(res, ctx, body, Date.now()); }
     }).catch(function (e) {
       if (e && e.code === "TOO_LARGE") { sendJSON(res, 413, { ok: false, error: "body too large" }); }
@@ -919,6 +922,55 @@ function handleTelemetryBatch(res, ctx, body, nowMs) {
   });
 }
 
+/* ---------------- DATA_PLATFORM_V1_DASHBOARD：admin 只读聚合接口 ----------------
+   POST /api/telemetry/admin/summary
+   请求 { deviceId, deviceToken, days(1|7|30) }。鉴权顺序：
+     1) deviceToken timing-safe 校验（与 batch 同规则）
+     2) deviceId ∈ admin allowlist（MSQ_TELEMETRY_ADMIN_DEVICE_IDS /
+        .secrets/telemetry-admin-devices，本机配置不进 Git）
+     3) days ∈ {1,7,30}
+   非管理员/错 token 一律 403，days 非法 400。READ ONLY：复用 report.js 的
+   buildReport（与 CLI 报表同一套统计口径，无第二套算法）；不返回 raw batch、
+   不返回任何设备 ID 列表、无搜索内容/OCR/照片。响应不含 token/allowlist。 */
+const ADMIN_DAYS = [1, 7, 30];
+
+function handleTelemetryAdminSummary(res, ctx, body, nowMs) {
+  if (!ctx.telemetry.secret) { sendJSON(res, 503, { ok: false, error: "telemetry unavailable" }); return; }
+  if (!body || typeof body !== "object") { sendJSON(res, 400, { ok: false, error: "invalid request" }); return; }
+  /* 1) token（timing-safe；先格式后比较，与 batch 同款） */
+  if (typeof body.deviceToken !== "string" || !/^[0-9a-f]{64}$/.test(body.deviceToken) ||
+      typeof body.deviceId !== "string" || !/^[0-9a-f]{64}$/.test(body.deviceId)) {
+    sendJSON(res, 403, { ok: false, error: "forbidden" });
+    return;
+  }
+  const expectedToken = ctx.telemetry.module.telemetryBatchToken(ctx.telemetry.secret, body.deviceId);
+  const a = Buffer.from(body.deviceToken, "utf8");
+  const b = Buffer.from(expectedToken, "utf8");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    sendJSON(res, 403, { ok: false, error: "forbidden" });
+    return;
+  }
+  /* 2) admin allowlist */
+  if (!ctx.telemetry.adminIds || ctx.telemetry.adminIds.indexOf(body.deviceId) < 0) {
+    sendJSON(res, 403, { ok: false, error: "forbidden" });
+    return;
+  }
+  /* 3) days 白名单 */
+  if (ADMIN_DAYS.indexOf(body.days) < 0) {
+    sendJSON(res, 400, { ok: false, error: "days must be 1|7|30" });
+    return;
+  }
+  let report;
+  try {
+    /* 与 CLI 报表完全同一实现（REPORT_PARITY），只读 SELECT */
+    report = require("../telemetry/report.js").buildReport(ctx.telemetry.store, body.days, nowMs);
+  } catch (e) {
+    sendJSON(res, 500, { ok: false, error: "internal error" });
+    return;
+  }
+  sendJSON(res, 200, { ok: true, report: report });
+}
+
 /* ---------------- samples.db 双写（SAMPLE_DATABASE_V1 §12） ----------------
    只在既有成功路径之后旁路调用；任何异常只 log，绝不影响 commit/feedback 响应。 */
 
@@ -978,6 +1030,9 @@ function createCollector(options) {
     ctx.telemetry = opened.ok
       ? { ok: true, module: telemetryModule, store: opened.store,
           rateLimitPerMin: opts.telemetryRateLimitPerMin || RATE_LIMIT_TELEMETRY_PER_MIN,
+          adminIds: telemetryModule.loadTelemetryAdminIds({
+            adminIds: opts.telemetryAdminIds,
+            adminFile: opts.telemetryAdminFile }),
           secret: telemetryModule.loadTelemetrySecret({
             secret: opts.telemetrySecret, secretFile: opts.telemetrySecretFile }) }
       : { ok: false, error: opened.error };

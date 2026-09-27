@@ -125,14 +125,20 @@
     <main id="search-detail-body" class="pad"></main>
   </section>
 
-  <!-- DEV 隐藏诊断（VC17：全中文显示层；仅 DEV 构建，更新页当前版本行 7 连击进入；
-       不含凭据/签名下载地址/域名，普通用户不可见） -->
+  <!-- 开发者中心（IN_APP_TELEMETRY_DASHBOARD_V1：DEV + stable 隐藏入口共用；
+       更新页当前版本行 3 秒 7 连击进入；诊断=原诊断内容，数据=telemetry 聚合；
+       不含凭据/完整设备 ID/签名下载地址/域名，普通 UI 无任何入口） -->
   <section id="view-devdiag" class="view hidden">
     <header class="quiz-head">
       <button id="btn-devdiag-back" class="backbtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 5.5-6.2 6.5 6.2 6.5"/></svg><span>返回</span></button>
-      <div class="qtitle">开发者诊断</div>
+      <div class="qtitle">开发者中心</div>
     </header>
+    <div class="devtabs" role="tablist">
+      <button id="devtab-diag" class="devtab active" type="button" role="tab" aria-selected="true">诊断</button>
+      <button id="devtab-data" class="devtab" type="button" role="tab" aria-selected="false">数据</button>
+    </div>
     <main id="devdiag-body" class="pad"></main>
+    <main id="devdata-body" class="pad hidden"></main>
   </section>
 
   <!-- 检查更新（SELF_UPDATE_V1，仅手动检查） -->

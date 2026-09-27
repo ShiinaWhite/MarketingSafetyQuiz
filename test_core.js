@@ -1965,17 +1965,19 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     !indexSrc.includes("shiinalab") && !appSrc.includes("shiinalab") &&
     !indexSrc.includes("apk.shiinalab") && !indexSrc.includes("update.shiinalab"));
 
-  /* —— DIAG 系列：DEV 隐藏诊断入口 = 检查更新页「当前版本」整行 7 连击 —— */
-  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（仅 dev 渠道；块级整行可点）",
-    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) === "dev"') &&
+  /* —— DIAG 系列：开发者中心隐藏入口 = 检查更新页「当前版本」整行 3 秒 7 连击
+     （IN_APP_TELEMETRY_DASHBOARD_V1：DEV + stable 两个合法包均绑定；未知包不绑） —— */
+  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（dev+stable 渠道；块级整行可点）",
+    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) !== null') &&
     appSrc.indexOf('renderUpdateView("当前版本："') < appSrc.indexOf("bindDevDiagTap(statusEl)") &&
     appSrc.includes("function bindDevDiagTap(el)") &&
     appSrc.includes("devDiagTaps.count >= 7"));
   check("DIAG-3/4 计数逻辑：>=7 才进入，超 3 秒重置",
     appSrc.includes("now - devDiagTaps.firstAt > 3000") &&
     appSrc.includes("if (devDiagTaps.count >= 7) {"));
-  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel 非 dev 直接跳过）",
-    appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
+  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel null 直接跳过；dev/stable 均绑定）",
+    appSrc.includes('diagnosticsChannel(updateInfo.id) !== null') &&
+    appSrc.includes("bindDevDiagTap(statusEl)") &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.other.app") === null);
   check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路，方向仅影响动画）",
@@ -2013,8 +2015,11 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
       !dd.includes('"Retry queue now"'));
     check("DIAG17-3 两个操作按钮中文（立即清理/立即重试）",
       dd.includes('"立即清理"') && dd.includes('"立即重试"'));
-    check("DIAG17-1b 诊断页标题中文（开发者诊断）",
-      indexSrc.includes("开发者诊断") && !indexSrc.includes("Developer Diagnostics"));
+    check("DIAG17-1b 标题中文（开发者中心；双 Tab 诊断|数据；数据面板独立）",
+      indexSrc.includes("开发者中心") && !indexSrc.includes("Developer Diagnostics") &&
+      indexSrc.includes('id="devtab-diag"') && indexSrc.includes('id="devtab-data"') &&
+      indexSrc.includes('id="devdata-body"') && indexSrc.includes(">诊断</button>") &&
+      indexSrc.includes(">数据</button>"));
     check("DIAG17 诊断页不渲染任何域名/endpoint/objectKey",
       !dd.includes("shiinalab") && !dd.includes("objectKey") &&
       !dd.includes("presigned") && !dd.includes("serverUrl"));
@@ -2213,10 +2218,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     mainStrings.includes(">营销安规搜题<") &&
     !mainStrings.includes("营销安规搜题 DEV") &&
     devStrings.includes(">营销安规搜题 DEV<"));
-  check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
+  check("MAIN-3 stable 渠道与 DEV 均绑定隐藏开发者中心入口（未知包仍不绑定）",
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
-    appSrc.includes('diagnosticsChannel(updateInfo.id) === "dev"'));
+    appSrc.includes('diagnosticsChannel(updateInfo.id) !== null'));
   check("MAIN-4 sample config UI 不存在（stable 与 dev 共用同一收口后 UI）",
     !indexSrcMain.includes("sample-panel") && !indexSrcMain.includes("自动上传测试样本") &&
     !indexSrcMain.includes("测试连接") && !indexSrcMain.includes("sample-enabled"));
@@ -3388,6 +3393,76 @@ async function runTelemetryTests() {
     const envF = makeCtrl({});
     check("F: 无凭据期诊断 uploadState = 等待注册",
       envF.ctrl.diagnostics().uploadState === "等待注册");
+  }
+
+  /* ---------- TELE-DASH：adminSummary + 缓存（IN_APP_TELEMETRY_DASHBOARD_V1） ---------- */
+  section("TELE-DASH adminSummary 内部凭据 / 10min 缓存 / 源码守卫");
+  {
+    /* adminSummary：内部读取 deviceId/deviceToken，days 透传，响应解包 resp.report */
+    const dashCalls = [];
+    const env = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: { post: (url, body) => {
+        dashCalls.push({ url: url, body: body });
+        return Promise.resolve({ ok: true, report: { dau: 3, windowDays: body.days } });
+      } }
+    });
+    const rep = await new Promise(function (resolve, reject) {
+      env.ctrl.adminSummary(7).then(resolve, reject);
+    });
+    check("adminSummary 请求 admin endpoint 且携带内部凭据",
+      dashCalls.length === 1 &&
+      dashCalls[0].url.endsWith("/api/telemetry/admin/summary") &&
+      dashCalls[0].body.deviceId === DEV64 &&
+      dashCalls[0].body.deviceToken === TOKEN64 &&
+      dashCalls[0].body.days === 7);
+    check("adminSummary 解包 resp.report", rep.dau === 3 && rep.windowDays === 7);
+
+    const envNoCred = makeCtrl({});
+    const noCred = await envNoCred.ctrl.adminSummary(7).then(function () { return "ok"; },
+      function (e) { return e && e.message; });
+    check("未注册 → adminSummary 拒绝（不发起请求）",
+      noCred === "not-registered" && dashCalls.length === 1);
+    const envBad = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: { post: () => Promise.resolve({ ok: false }) }
+    });
+    const badResp = await envBad.ctrl.adminSummary(7).then(function () { return "ok"; },
+      function (e) { return e && e.message; });
+    check("非 ok 响应 → 拒绝", badResp === "bad-summary-response");
+
+    /* 缓存：10min TTL、按 days 分键、损坏 store 容错 */
+    const memStore = (function () { const m = {}; return {
+      getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = v; } }; })();
+    check("空缓存 → null", MSQTelemetry.loadDashboardCache(memStore, 7) === null);
+    MSQTelemetry.saveDashboardCache(memStore, 7, { dau: 5 });
+    MSQTelemetry.saveDashboardCache(memStore, 30, { dau: 9 });
+    const c7 = MSQTelemetry.loadDashboardCache(memStore, 7);
+    const c30 = MSQTelemetry.loadDashboardCache(memStore, 30);
+    check("缓存按 days 分键读取", c7 && c7.report.dau === 5 && c30 && c30.report.dau === 9);
+    check("新鲜缓存 ageMs < 10min", MSQTelemetry.isDashboardCacheFresh(c7.ageMs) &&
+      c7.ageMs < MSQTelemetry.DASH_CACHE_TTL_MS);
+    check("DASH_CACHE_TTL_MS = 10min", MSQTelemetry.DASH_CACHE_TTL_MS === 600000);
+    const staleEntry = { reports: { "7": { savedAt: Date.now() - 11 * 60000, report: { dau: 1 } } } };
+    const staleStore = { getItem: () => JSON.stringify(staleEntry), setItem: () => {} };
+    const staleC = MSQTelemetry.loadDashboardCache(staleStore, 7);
+    check("过期缓存仍可读但 isDashboardCacheFresh=false",
+      staleC && !MSQTelemetry.isDashboardCacheFresh(staleC.ageMs));
+    const badStore = { getItem: () => "{corrupted", setItem: () => { throw new Error("x"); } };
+    check("损坏缓存读取 → null（不抛出）",
+      MSQTelemetry.loadDashboardCache(badStore, 7) === null &&
+      MSQTelemetry.saveDashboardCache(badStore, 7, {}) === false);
+
+    /* 源码守卫：token 不进 UI 层；adminSummary 无日志面 */
+    check("app.js 不出现 deviceToken（token 只在 MSQTelemetry 内部）",
+      !appSrc.includes("deviceToken"));
+    check("telemetry.js adminSummary 无 console 输出面",
+      (function () {
+        const telSrc = fs.readFileSync(path.join(__dirname, "www/js/telemetry.js"), "utf8");
+        const adminFn = telSrc.slice(telSrc.indexOf("function adminSummary"),
+          telSrc.indexOf("function diagnostics"));
+        return adminFn.indexOf("console.") < 0;
+      })());
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */

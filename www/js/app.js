@@ -1908,6 +1908,7 @@
   function openDevDiagnostics() {
     var Queue = sampleQueuePlugin();
     if (!(Queue && typeof Queue.stats === "function")) { return; }
+    switchDevTab("diag");   /* 每次进入开发者中心复位到诊断 Tab */
     renderDevDiagnostics();
     show("view-devdiag", "forward");
   }
@@ -2006,10 +2007,15 @@
         box.innerHTML = "";
         var banner = document.createElement("div");
         banner.className = "diag-banner";
-        var devBadge = document.createElement("span");
-        devBadge.className = "u-badge mono";
-        devBadge.textContent = "仅开发版";
-        banner.appendChild(devBadge);
+        /* IN_APP_TELEMETRY_DASHBOARD_V1：DEV 显示 DEV 徽标；stable 不显示「仅开发版」 */
+        var channelLabel = (typeof MSQSample !== "undefined" && MSQSample && updateInfo)
+          ? MSQSample.diagnosticsChannel(updateInfo.id) : null;
+        if (channelLabel === "dev") {
+          var devBadge = document.createElement("span");
+          devBadge.className = "u-badge mono";
+          devBadge.textContent = "DEV";
+          banner.appendChild(devBadge);
+        }
         var bannerNote = document.createElement("span");
         bannerNote.className = "diag-note";
         bannerNote.textContent = "样本队列与更新链路内部诊断";
@@ -2067,6 +2073,246 @@
       p.textContent = "队列状态不可用";
       box.appendChild(p);
     });
+  }
+
+  /* ---------------- 开发者中心·数据 Tab（IN_APP_TELEMETRY_DASHBOARD_V1） ----------------
+     数据 = POST /api/telemetry/admin/summary（admin 鉴权）聚合，与 report.js 完全
+     同一套统计口径。设备凭据只在 MSQTelemetry 内部读取并随请求体发送，绝不进
+     DOM/UI/日志。缓存：最近成功结果本地保存 10 分钟——先缓存后 revalidate；
+     失败只在本隐藏页显示「暂时无法获取数据」，不影响任何主业务。 */
+  var currentDevTab = "diag";
+  var devDataDays = 7;
+  var devDataLoading = false;
+
+  function switchDevTab(tab) {
+    currentDevTab = tab;
+    var diag = $("devdiag-body"), data = $("devdata-body");
+    var tDiag = $("devtab-diag"), tData = $("devtab-data");
+    if (!diag || !data || !tDiag || !tData) { return; }
+    diag.classList.toggle("hidden", tab !== "diag");
+    data.classList.toggle("hidden", tab !== "data");
+    tDiag.classList.toggle("active", tab === "diag");
+    tData.classList.toggle("active", tab === "data");
+    tDiag.setAttribute("aria-selected", tab === "diag" ? "true" : "false");
+    tData.setAttribute("aria-selected", tab === "data" ? "true" : "false");
+    if (tab === "data") { refreshDevData(false); }
+  }
+
+  function refreshDevData(force) {
+    var cache = (typeof MSQTelemetry !== "undefined" && MSQTelemetry)
+      ? MSQTelemetry.loadDashboardCache(
+          (typeof localStorage !== "undefined") ? localStorage : null, devDataDays)
+      : null;
+    if (!force && cache) {
+      /* 先显示缓存（含过期缓存），随后后台 revalidate */
+      renderDevDataReport(cache.report, cache.ageMs);
+    } else {
+      renderDevDataLoading();
+    }
+    fetchDevData(devDataDays);
+  }
+
+  function fetchDevData(days) {
+    if (devDataLoading) { return; }
+    if (!Telemetry) { renderDevDataError("暂时无法获取数据"); return; }
+    devDataLoading = true;
+    Telemetry.adminSummary(days).then(function (report) {
+      devDataLoading = false;
+      MSQTelemetry.saveDashboardCache(
+        (typeof localStorage !== "undefined") ? localStorage : null, days, report);
+      if (currentDevTab === "data" && devDataDays === days) {
+        renderDevDataReport(report, 0);
+      }
+    }, function () {
+      devDataLoading = false;
+      if (currentDevTab === "data" && devDataDays === days) {
+        var cache = MSQTelemetry.loadDashboardCache(
+          (typeof localStorage !== "undefined") ? localStorage : null, days);
+        if (!cache) { renderDevDataError("暂时无法获取数据"); }
+        /* 有缓存：保留已渲染的缓存视图（页面顶部标注数据时间），不打扰 */
+      }
+    });
+  }
+
+  function renderDevDataLoading() {
+    var body = $("devdata-body");
+    if (!body) { return; }
+    body.innerHTML = "";
+    var p = document.createElement("p");
+    p.className = "sample-note";
+    p.textContent = "正在获取数据…";
+    body.appendChild(p);
+  }
+
+  function renderDevDataError(msg) {
+    var body = $("devdata-body");
+    if (!body) { return; }
+    body.innerHTML = "";
+    var p = document.createElement("p");
+    p.className = "sample-note";
+    p.textContent = msg;
+    body.appendChild(p);
+  }
+
+  function devDataCard(title, rows) {
+    var card = document.createElement("div");
+    card.className = "diag-card";
+    var t = document.createElement("div");
+    t.className = "diag-title";
+    t.textContent = title;
+    card.appendChild(t);
+    rows.forEach(function (r) {
+      if (r instanceof Element) { card.appendChild(r); return; }
+      card.appendChild(devDataRow(r[0], r[1], r[2]));
+    });
+    return card;
+  }
+
+  function devDataRow(label, value, cls) {
+    var rowEl = document.createElement("div");
+    rowEl.className = "diag-kv";
+    var k = document.createElement("span");
+    k.className = "k";
+    k.textContent = label;
+    var v = document.createElement("span");
+    v.className = "v mono" + (cls ? " " + cls : "");
+    v.textContent = String(value);
+    rowEl.appendChild(k);
+    rowEl.appendChild(v);
+    return rowEl;
+  }
+
+  function devBar(label, count, total) {
+    var rowEl = document.createElement("div");
+    rowEl.className = "diag-kv devbar-row";
+    var k = document.createElement("span");
+    k.className = "k";
+    k.textContent = label;
+    rowEl.appendChild(k);
+    var right = document.createElement("span");
+    right.className = "devbar-wrap";
+    var pct = total > 0 ? Math.round(count / total * 100) : 0;
+    var track = document.createElement("span");
+    track.className = "devbar";
+    var fill = document.createElement("span");
+    fill.className = "devbar-fill";
+    fill.style.width = pct + "%";
+    track.appendChild(fill);
+    right.appendChild(track);
+    var num = document.createElement("span");
+    num.className = "v mono";
+    num.textContent = count + "（" + pct + "%）";
+    right.appendChild(num);
+    rowEl.appendChild(right);
+    return rowEl;
+  }
+
+  function devNumCard(num, label) {
+    var d = document.createElement("div");
+    d.className = "devcard";
+    var b = document.createElement("b");
+    b.textContent = String(num);
+    var s = document.createElement("span");
+    s.textContent = label;
+    d.appendChild(b);
+    d.appendChild(s);
+    return d;
+  }
+
+  function renderDevDataReport(report, cacheAgeMs) {
+    var body = $("devdata-body");
+    if (!body || !report) { return; }
+    body.innerHTML = "";
+
+    /* 顶行：时间范围 + 刷新 + 缓存标注 */
+    var head = document.createElement("div");
+    head.className = "devdata-head";
+    [["今日", 1], ["7 天", 7], ["30 天", 30]].forEach(function (def) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "devtab devrange" + (devDataDays === def[1] ? " active" : "");
+      b.textContent = def[0];
+      b.addEventListener("click", function () {
+        devDataDays = def[1];
+        refreshDevData(false);
+      });
+      head.appendChild(b);
+    });
+    var refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "devtab devrange";
+    refresh.textContent = "刷新";
+    refresh.addEventListener("click", function () { refreshDevData(true); });
+    head.appendChild(refresh);
+    body.appendChild(head);
+    if (cacheAgeMs > 0) {
+      var cacheNote = document.createElement("p");
+      cacheNote.className = "sample-note";
+      var stale = !MSQTelemetry.isDashboardCacheFresh(cacheAgeMs);
+      cacheNote.textContent = "缓存数据（" + (stale ? "已超过" : "距今 ") +
+        Math.round(cacheAgeMs / 60000) + " 分钟" + (stale ? "" : "前") + "）";
+      body.appendChild(cacheNote);
+    }
+
+    /* 核心数字卡 */
+    var core = document.createElement("div");
+    core.className = "devcards";
+    core.appendChild(devNumCard(report.dau, "活跃设备（今日）"));
+    core.appendChild(devNumCard(report.newDevicesInWindow, "新设备"));
+    core.appendChild(devNumCard(report.coldStarts, "冷启动"));
+    core.appendChild(devNumCard(report.resumes, "恢复次数"));
+    body.appendChild(core);
+
+    /* 分组卡片 */
+    var cards = document.createElement("div");
+    cards.appendChild(devDataCard("文字搜题", [
+      ["搜题次数", report.search.textSearch],
+      ["有结果率", report.search.withResultsRate + "（" + report.search.withResults + "）"],
+      ["无结果率", report.search.noResultRate + "（" + report.search.noResult + "）"],
+      ["搜索结果打开", report.search.resultOpen]
+    ]));
+    cards.appendChild(devDataCard("拍题", [
+      ["尝试", report.photo.attempt],
+      ["拍摄成功", report.photo.captureSuccess],
+      ["取消", report.photo.cancel],
+      ["失败", report.photo.failure],
+      ["处理成功 / 失败", report.photo.processSuccess + " / " + report.photo.processFailure]
+    ]));
+    var recRows = [
+      ["识别题目总数", report.recognition.questionTotal],
+      devBar("高置信", report.recognition.confidenceHigh, report.recognition.questionTotal),
+      devBar("中置信", report.recognition.confidenceMedium, report.recognition.questionTotal),
+      devBar("低置信", report.recognition.confidenceLow, report.recognition.questionTotal),
+      devBar("未匹配", report.recognition.confidenceNone, report.recognition.questionTotal)
+    ];
+    cards.appendChild(devDataCard("整页识别", recRows));
+    cards.appendChild(devDataCard("AUTO 题型", [
+      ["自动：单选", report.auto.single],
+      ["自动：多选", report.auto.multi],
+      ["自动：判断", report.auto.judge],
+      ["人工题型纠正", report.auto.manualCorrections]
+    ]));
+    cards.appendChild(devDataCard("用户反馈", [
+      ["漏题", report.feedback.missingQuestion],
+      ["题号异常", report.feedback.wrongScreenNumber],
+      ["题型判断错误", report.feedback.wrongPageType],
+      ["答案有误（题目级）", report.feedback.wrongAnswer],
+      ["其他", report.feedback.other]
+    ]));
+    cards.appendChild(devDataCard("学习模式启动", [
+      ["顺序", report.modes.sequence], ["随机", report.modes.random],
+      ["单选", report.modes.single], ["多选", report.modes.multi],
+      ["判断", report.modes.judge], ["错题", report.modes.wrong],
+      ["背题", report.modes.recite], ["模拟考试", report.modes.exam]
+    ]));
+    var verRows = report.versionDistribution.length
+      ? report.versionDistribution.map(function (v) {
+          return ["vc" + v.versionCode + " · " + v.versionName +
+            "（" + v.channel + "）", v.devices + " 台设备"];
+        })
+      : [["（窗口内无上报）", "—"]];
+    cards.appendChild(devDataCard("App 版本分布", verRows));
+    while (cards.firstChild) { body.appendChild(cards.firstChild); }
   }
 
   /* ---------------- 应用内自更新（SELF_UPDATE_V1，仅手动"检查更新"） ----------------
@@ -2264,10 +2510,10 @@
       };
       renderUpdateView("当前版本：" + updateInfo.versionName +
         "（versionCode " + updateInfo.versionCode + "）");
-      /* VC16：DEV 隐藏诊断入口 = 「当前版本」整行 7 连击（仅 DEV 构建绑定）。
-         整行 <p> 是块级元素，全宽可点（DIAG-2）；MAIN 直接跳过，不绑不响应。 */
+      /* IN_APP_TELEMETRY_DASHBOARD_V1：DEV + stable 两个合法包均绑定隐藏手势；
+         未知包（null）仍不绑定。手势门槛不变（3 秒内 7 连击）。 */
       if (typeof MSQSample !== "undefined" && MSQSample &&
-          MSQSample.diagnosticsChannel(updateInfo.id) === "dev") {
+          MSQSample.diagnosticsChannel(updateInfo.id) !== null) {
         var statusEl = $("update-body").querySelector("p.dim");
         bindDevDiagTap(statusEl);
       }
@@ -2735,6 +2981,8 @@
     $("btn-batch-photo").addEventListener("click", startBatchPageSearch);
     $("btn-batch-results-back").addEventListener("click", handleBatchResultsBack);
     $("btn-devdiag-back").addEventListener("click", function () { openUpdateView(false, "backward"); });
+    $("devtab-diag").addEventListener("click", function () { switchDevTab("diag"); });
+    $("devtab-data").addEventListener("click", function () { switchDevTab("data"); });
     initSampleResultTools();
     initSampleQueue();
     $("btn-update").addEventListener("click", function () { openUpdateView(); });

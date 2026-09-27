@@ -98,6 +98,7 @@ async function main() {
       allowAnonymousWrites: true,
       telemetryDbPath: dbPath,
       telemetrySecret: TEST_SECRET,
+      telemetryAdminIds: [DEV_DEVICE_ID],   /* admin = 当前测试设备 */
       telemetryRateLimitPerMin: 1000000   /* 限流单独测 */
     });
     const port = await collector.listen("127.0.0.1", 0);
@@ -340,6 +341,95 @@ async function main() {
       rawLower.indexOf("sqlite") < 0 && rawLower.indexOf("select ") < 0);
 
     db2.store.close();
+
+    /* ---------- IN_APP_TELEMETRY_DASHBOARD_V1：admin summary 只读端点 ---------- */
+    section("TEL-ADMIN admin/summary 鉴权与口径");
+    {
+      const summaryPayload = (days, overrides) => {
+        const o = overrides || {};
+        return {
+          deviceId: o.deviceId || DEV_DEVICE_ID,
+          deviceToken: "deviceToken" in o ? o.deviceToken : DEV_TOKEN,
+          days: days
+        };
+      };
+      /* 先灌一点数据（合法 batch），让 200 响应有内容可对比 */
+      const bSeed = makeBatch({ counters: { text_search: 2, app_cold_start: 1 } });
+      await request(port, "POST", "/api/telemetry/batch", batchPayload([bSeed]));
+
+      let r = await request(port, "POST", "/api/telemetry/admin/summary",
+        summaryPayload(7));
+      check("admin 正确 token → 200", r.status === 200 && r.body.ok === true, r.status);
+      check("报告结构：核心字段齐全",
+        r.body.report && typeof r.body.report.dau === "number" &&
+        typeof r.body.report.coldStarts === "number" &&
+        typeof r.body.report.search === "object" &&
+        typeof r.body.report.recognition === "object" &&
+        Array.isArray(r.body.report.versionDistribution));
+      check("days=1 / days=30 均 200",
+        (await request(port, "POST", "/api/telemetry/admin/summary",
+          summaryPayload(1))).status === 200 &&
+        (await request(port, "POST", "/api/telemetry/admin/summary",
+          summaryPayload(30))).status === 200);
+
+      /* 口径与 report.js 完全一致（同一 DB、同一实现） */
+      const reportMod = require("./report.js");
+      const dbCheck = telemetryStore.openTelemetryStore({ path: dbPath });
+      const local = reportMod.buildReport(dbCheck.store, 7, Date.now());
+      dbCheck.store.close();
+      /* generatedAt 含毫秒时间戳，口径对比时剔除 */
+      const wire = Object.assign({}, r.body.report); delete wire.generatedAt;
+      const loc = Object.assign({}, local); delete loc.generatedAt;
+      check("REPORT_PARITY：HTTP 聚合 === report.js buildReport",
+        JSON.stringify(wire) === JSON.stringify(loc));
+
+      /* 非 admin：合法 token 但 deviceId 不在 allowlist */
+      const otherId = telemetryStore.telemetryDeviceId(TEST_SECRET, ANDROID_ID_B);
+      r = await request(port, "POST", "/api/telemetry/admin/summary",
+        summaryPayload(7, { deviceId: otherId }));
+      check("非 admin → 403", r.status === 403, r.status);
+      /* 错 token */
+      r = await request(port, "POST", "/api/telemetry/admin/summary",
+        summaryPayload(7, { deviceToken: "f".repeat(64) }));
+      check("错 token → 403", r.status === 403, r.status);
+      /* 缺 token */
+      const noTok = summaryPayload(7);
+      delete noTok.deviceToken;
+      r = await request(port, "POST", "/api/telemetry/admin/summary", noTok);
+      check("缺 token → 403", r.status === 403, r.status);
+      /* days 白名单 */
+      for (const badDays of [0, 2, 8, 31, -1, "7", 1.5]) {
+        r = await request(port, "POST", "/api/telemetry/admin/summary",
+          summaryPayload(badDays));
+        check("拒绝 days=" + JSON.stringify(badDays) + "（400）", r.status === 400, r.status);
+      }
+      /* 响应不泄露 token / allowlist / 任何完整设备 ID / raw batch */
+      const rawAdmin = (await request(port, "POST", "/api/telemetry/admin/summary",
+        summaryPayload(7))).raw || "";
+      check("响应不含 deviceToken / secret",
+        rawAdmin.indexOf(DEV_TOKEN) < 0 && rawAdmin.indexOf(TEST_SECRET) < 0);
+      check("响应不含完整 deviceId / raw batches",
+        rawAdmin.indexOf(DEV_DEVICE_ID) < 0 && rawAdmin.indexOf("telemetry_batches") < 0);
+      check("响应不含 payload 原文（无 counters 字段名）",
+        rawAdmin.indexOf('"counters"') < 0);
+
+      /* allowlist 装载分支 */
+      const tmpAdm = fs.mkdtempSync(path.join(os.tmpdir(), "msq-admin-"));
+      try {
+        fs.writeFileSync(path.join(tmpAdm, "ids"), "# 注释\n" + DEV_DEVICE_ID.toUpperCase() +
+          "\nnot-an-id\n" + "b".repeat(64) + "\n");
+        const envBak = process.env.MSQ_TELEMETRY_ADMIN_DEVICE_IDS;
+        delete process.env.MSQ_TELEMETRY_ADMIN_DEVICE_IDS;
+        const fromFile = telemetryStore.loadTelemetryAdminIds({
+          adminFile: path.join(tmpAdm, "ids") });
+        if (envBak !== undefined) { process.env.MSQ_TELEMETRY_ADMIN_DEVICE_IDS = envBak; }
+        check("allowlist 文件装载：去重/小写归一/跳过非法行",
+          fromFile.length === 2 && fromFile[0] === DEV_DEVICE_ID &&
+          fromFile[1] === "b".repeat(64), JSON.stringify(fromFile).slice(0, 40));
+      } finally {
+        fs.rmSync(tmpAdm, { recursive: true, force: true });
+      }
+    }
 
     /* ---------- secret 缺失 → 503 FAIL CLOSED，业务端点不受影响 ---------- */
     section("TEL-SERVER secret 缺失 → 503 FAIL CLOSED（App 业务不受影响）");

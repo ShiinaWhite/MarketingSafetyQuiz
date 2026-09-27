@@ -864,3 +864,28 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); o
 .diag-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); }
 .diag-actions .barbtn { flex: 1; }
 .diag-actions .barbtn svg { width: 18px; height: 18px; }
+
+/* ---- IN_APP_TELEMETRY_DASHBOARD_V1：开发者中心双 Tab + 数据 Dashboard ---- */
+.devtabs { display: flex; gap: var(--sp-2); padding: 0 var(--sp-3) var(--sp-2); }
+.devtabs + main { padding-top: 0; }
+.devtab { flex: 1 1 0; padding: 9px 12px; border-radius: var(--r-card);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-secondary);
+  font-size: 13.5px; font-weight: 600; font-family: var(--font-sans); }
+.devtab.active { background: var(--primary); border-color: var(--primary);
+  color: #fff; }
+.devdata-head { display: flex; gap: var(--sp-2); padding: var(--sp-1) 0 var(--sp-2); }
+.devrange { flex: 0 0 auto; padding: 7px 12px; font-size: 12.5px; }
+.devcards { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2);
+  margin-bottom: var(--sp-3); }
+.devcard { background: var(--surface); border-radius: var(--r-card);
+  box-shadow: var(--e-card); padding: var(--sp-3) var(--sp-2); text-align: center;
+  display: flex; flex-direction: column; gap: 2px; }
+.devcard b { font-size: 19px; color: var(--text-primary); }
+.devcard span { font-size: 10.5px; color: var(--text-muted); }
+.devbar-row { align-items: center; }
+.devbar-wrap { display: flex; align-items: center; gap: var(--sp-2); flex: 1 1 auto;
+  justify-content: flex-end; min-width: 0; }
+.devbar { display: inline-block; width: 72px; max-width: 34vw; height: 6px;
+  border-radius: 3px; background: var(--border); overflow: hidden; flex: 0 0 auto; }
+.devbar-fill { display: block; height: 100%; border-radius: 3px;
+  background: var(--primary); }

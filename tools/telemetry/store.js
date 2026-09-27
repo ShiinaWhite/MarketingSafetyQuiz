@@ -286,6 +286,37 @@ function loadTelemetrySecret(options) {
   return null;
 }
 
+/* ---------------- admin allowlist（IN_APP_TELEMETRY_DASHBOARD_V1） ----------------
+   MSQ_TELEMETRY_ADMIN_DEVICE_IDS：环境变量（逗号分隔）优先，其次
+   .secrets/telemetry-admin-devices 文件（每行一个 64hex，# 注释）。
+   只存完整 telemetryDeviceId（本身即 HMAC 派生物）；不进 Git、不打印、不进日志。 */
+function parseAdminIdsText(text) {
+  const out = [];
+  const seen = {};
+  String(text || "").split(/[\s,;]+/).forEach(function (tok) {
+    const v = tok.trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(v) && !seen[v]) { seen[v] = true; out.push(v); }
+  });
+  return out;
+}
+
+function loadTelemetryAdminIds(options) {
+  const opts = options || {};
+  if (Array.isArray(opts.adminIds)) {
+    return parseAdminIdsText(opts.adminIds.join(","));
+  }
+  const fromEnv = (process.env.MSQ_TELEMETRY_ADMIN_DEVICE_IDS || "").trim();
+  if (fromEnv) { return parseAdminIdsText(fromEnv); }
+  const file = opts.adminFile ||
+    path.resolve(__dirname, "..", "..", ".secrets", "telemetry-admin-devices");
+  try {
+    const lines = fs.readFileSync(file, "utf8").split(/\r?\n/)
+      .map(function (l) { return l.replace(/#.*$/, ""); }).join("\n");
+    return parseAdminIdsText(lines);
+  } catch (e) { /* 文件不存在 */ }
+  return [];
+}
+
 /* ---------------- SQLite 存储 ---------------- */
 
 const MIGRATIONS = [
@@ -547,5 +578,7 @@ module.exports = {
   telemetryDeviceId: telemetryDeviceId,
   telemetryBatchToken: telemetryBatchToken,
   loadTelemetrySecret: loadTelemetrySecret,
+  loadTelemetryAdminIds: loadTelemetryAdminIds,
+  parseAdminIdsText: parseAdminIdsText,
   openTelemetryStore: openTelemetryStore
 };

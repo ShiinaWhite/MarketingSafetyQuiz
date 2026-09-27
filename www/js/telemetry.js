@@ -52,6 +52,9 @@
   var MAX_BATCHES_PER_POST = 20;
   var MAX_BODY_BYTES = 128 * 1024;
   var DRAIN_TAIL_DELAY_MS = 60000;
+  /* IN_APP_TELEMETRY_DASHBOARD_V1：数据 Tab 本地缓存（仅聚合并报，非敏感） */
+  var DASH_CACHE_KEY = "msq.telemetryDash.v1";
+  var DASH_CACHE_TTL_MS = 10 * 60000;
 
   /* DATA_PLATFORM_V1_1 元数据白名单（与 tools/telemetry/store.js 同源）：
      客户端上传前本地预校验 —— 元数据坏（如旧版把 prefetch r.info 直接透传，
@@ -635,6 +638,24 @@
       return "可上传";
     }
 
+    /* IN_APP_TELEMETRY_DASHBOARD_V1：admin 聚合查询。deviceId/deviceToken 只在
+       本模块内部读取并随请求体发送，绝不暴露给 DOM/UI/诊断/日志 */
+    function adminSummary(days) {
+      try {
+        if (!state.deviceId || !state.deviceToken) {
+          return Promise.reject(new Error("not-registered"));
+        }
+        return d.transport.post(d.serverUrl + "/api/telemetry/admin/summary",
+          { deviceId: state.deviceId, deviceToken: state.deviceToken, days: days }, 15000)
+          .then(function (resp) {
+            if (resp && resp.ok && resp.report && typeof resp.report === "object") {
+              return resp.report;
+            }
+            return Promise.reject(new Error("bad-summary-response"));
+          });
+      } catch (e) { return Promise.reject(e); }
+    }
+
     function diagnostics() {
       try {
         var id = state.deviceId;
@@ -670,8 +691,46 @@
       onAppResume: onAppResume,
       attemptFlush: attemptFlush,
       diagnostics: diagnostics,
+      adminSummary: adminSummary,
       stateSnapshot: stateSnapshot
     };
+  }
+
+  /* ---------------- Dashboard 缓存（纯函数；store = localStorage 形状） ---------------- */
+
+  function loadDashboardCache(store, days) {
+    try {
+      var raw = (store && typeof store.getItem === "function")
+        ? store.getItem(DASH_CACHE_KEY) : null;
+      if (!raw) { return null; }
+      var root = JSON.parse(raw);
+      var entry = root && root.reports ? root.reports[String(days)] : null;
+      if (!entry || typeof entry.savedAt !== "number" || !entry.report) { return null; }
+      return { report: entry.report, savedAt: entry.savedAt,
+        ageMs: Date.now() - entry.savedAt };
+    } catch (e) { return null; }
+  }
+
+  function saveDashboardCache(store, days, report) {
+    try {
+      var root = null;
+      try {
+        var raw = (store && typeof store.getItem === "function")
+          ? store.getItem(DASH_CACHE_KEY) : null;
+        root = raw ? JSON.parse(raw) : null;
+      } catch (e) { root = null; }
+      if (!root || typeof root !== "object") { root = {}; }
+      if (!root.reports || typeof root.reports !== "object") { root.reports = {}; }
+      root.reports[String(days)] = { savedAt: Date.now(), report: report };
+      if (store && typeof store.setItem === "function") {
+        store.setItem(DASH_CACHE_KEY, JSON.stringify(root));
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function isDashboardCacheFresh(ageMs) {
+    return typeof ageMs === "number" && ageMs >= 0 && ageMs <= DASH_CACHE_TTL_MS;
   }
 
   /* ---------------- 浏览器环境装配（原生缺位 → telemetry 关闭，返回 null） ----------------
@@ -799,6 +858,11 @@
     localDayString: localDayString,
     bucketize: bucketize,
     normalizePrefetchInfo: normalizePrefetchInfo,
+    DASH_CACHE_KEY: DASH_CACHE_KEY,
+    DASH_CACHE_TTL_MS: DASH_CACHE_TTL_MS,
+    loadDashboardCache: loadDashboardCache,
+    saveDashboardCache: saveDashboardCache,
+    isDashboardCacheFresh: isDashboardCacheFresh,
     validAppInfo: validAppInfo,
     CHANNELS: CHANNELS,
     PACKAGES: PACKAGES,
