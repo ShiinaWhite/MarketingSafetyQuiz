@@ -2202,6 +2202,8 @@ section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
 section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
 {
   const gradleSrc = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const secretScanSrc = fs.readFileSync(path.join(__dirname, "tools/r2/secret_scan.js"), "utf8");
+  const pkgSrc = fs.readFileSync(path.join(__dirname, "package.json"), "utf8");
   const mainStrings = fs.readFileSync(path.join(__dirname,
     "android/app/src/main/res/values/strings.xml"), "utf8");
   const devStrings = fs.readFileSync(path.join(__dirname,
@@ -2260,7 +2262,7 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     serverSrcMain.includes('dev: "营销安规刷题-DEV.apk"') &&
     serverSrcMain.includes('stable: "营销安规刷题.apk"'));
 
-  /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1，源码守卫） —— */
+  /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1 + PREFLIGHT_HARDENING_V1） —— */
   check("STP-1/2 publisher 渠道配置：stable package/label 正确且与 dev 隔离",
     pubSrc.includes('packageName: "com.jty.safetyquiz"') &&
     pubSrc.includes('label: "营销安规搜题"') &&
@@ -2269,8 +2271,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("STP-3 stable ABI 核验要求全 4 ABI（build 后 aapt 实测）",
     pubSrc.includes("REQUIRED_STABLE_ABIS = [\"'arm64-v8a'\", \"'armeabi-v7a'\", \"'x86'\", \"'x86_64'\"]") &&
     pubSrc.includes("stable 全 ABI 核验失败"));
-  check("STP 版本注入：STABLE_VERSION_CODE/NAME 仅 debug buildType，无 -dev 后缀追加",
-    gradleSrc.includes('withBuildType("debug")') &&
+  /* PREFLIGHT_HARDENING_V1（P0-A）：stable 独立 buildType，版本注入随之迁移 */
+  check("STP 版本注入：STABLE_VERSION_CODE/NAME 走 stable buildType，无 -dev 后缀追加",
+    gradleSrc.includes('withBuildType("stable")') &&
+    !gradleSrc.includes('withBuildType("debug")') &&
     gradleSrc.includes("STABLE_VERSION_CODE") &&
     !/STABLE_VERSION_NAME[^\n]*-dev/.test(gradleSrc));
   check("STP-8~11 fail-closed：stable 复用同一 releaseApk/cospublish 状态机",
@@ -2289,6 +2293,47 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("STP dry-run：不上传、不写 latest.json（本地校验完成后即返回）",
     pubSrc.includes("args.dryRun") && pubSrc.includes("== DRY-RUN 完成 ==") &&
     pubSrc.indexOf("args.dryRun") < pubSrc.indexOf("const rel = await releaseApk"));
+
+  /* —— STP2：STABLE_RELEASE_PREFLIGHT_HARDENING_V1（P0-A/P0-B 机械门禁源码守卫） —— */
+  check("STP2-1 stable 不再引用 assembleDebug（gradleTask 与产物路径均迁移）",
+    pubSrc.includes('gradleTask: ":app:assembleStable"') &&
+    pubSrc.includes('"apk", "stable", "app-stable.apk"') &&
+    !pubSrc.includes('gradleTask: ":app:assembleDebug"'));
+  check("STP2-2 stable buildType：debuggable=false / R8 / 同签名 / 无后缀 / 全 ABI",
+    gradleSrc.includes("stable {") &&
+    /stable \{[\s\S]{0,600}?debuggable false/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?minifyEnabled true/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?shrinkResources true/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?signingConfig signingConfigs\.debug/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?applicationIdSuffix/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?versionNameSuffix/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?abiFilters/.test(gradleSrc));
+  check("STP2-3 stable 不合并 cleartext overlay（无 src/stable 目录；overlay 仅 debug/dev）",
+    !fs.existsSync(path.join(__dirname, "android/app/src/stable")) &&
+    fs.existsSync(path.join(__dirname, "android/app/src/debug/AndroidManifest.xml")) &&
+    fs.existsSync(path.join(__dirname, "android/app/src/dev/AndroidManifest.xml")));
+  check("STP2-4 stable junit 剔除：stableRuntimeClasspath 进入排除列表",
+    gradleSrc.includes("'stableRuntimeClasspath'"));
+  check("STP2-5 stable sample 凭据注入（P0-B）：stable 块读 -PMSQ_SAMPLE_WRITE_TOKEN",
+    /stable \{[\s\S]{0,600}?findProperty\("MSQ_SAMPLE_WRITE_TOKEN"\)/.test(gradleSrc) &&
+    pubSrc.includes("-PMSQ_SAMPLE_WRITE_TOKEN=") &&
+    pubSrc.includes("App 凭据注入核验失败") &&
+    /* dex 在 APK 内压缩存储：核验必须是 zip 感知（解压后搜），非裸字节 */
+    pubSrc.includes("function apkDexContains") &&
+    pubSrc.includes("apkDexContains(apkBytes, writeToken)"));
+  check("STP2-6 secret_scan 分类：sample token 不再作 provider secret；COS/R2/private key 保留",
+    !secretScanSrc.includes('"MSQ_SAMPLE_WRITE_TOKEN", "COS_SECRET_ID"') &&
+    secretScanSrc.includes('"COS_SECRET_ID", "COS_SECRET_KEY"') &&
+    /* private key 扫描在 publisher forbidden 列表（发布期 APK 字节检查），不放松 */
+    pubSrc.includes('"BEGIN RSA PRIVATE KEY", "BEGIN PRIVATE KEY"') &&
+    pubSrc.includes("不再作为 provider secret 误判"));
+  check("STP2-7 stable 机械门禁：debuggable/cleartext 发布期实测（aapt）",
+    pubSrc.includes("application-debuggable") &&
+    pubSrc.includes("usesCleartextTraffic") &&
+    pubSrc.includes("stable 门禁失败"));
+  check("STP2-8 npm test = 统一 preflight 入口",
+    pkgSrc.includes('"test": "node tools/preflight.js"') &&
+    fs.existsSync(path.join(__dirname, "tools/preflight.js")));
 }
 
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */

@@ -1,10 +1,11 @@
 {
   "name": "marketingsafetyquiz",
   "version": "1.0.0",
-  "description": "完全离线的本地刷题工具（Python 标准库 + Tkinter），零联网、零遥测。 题库：《20260210营销安规题库.xlsx》共 392 题 = 单选 160 + 多选 110 + 判断 122。",
-  "main": "test_core.js",
+  "description": "营销安规搜题：题库本地离线刷题 + 拍照搜题（端侧 OCR），Capacitor Android App；dev/stable 双渠道应用内更新与样本回传（Cloudflare Tunnel 控制面 + COS/CDN 数据面），可选匿名使用统计。",
+  "main": "tools/preflight.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node tools/preflight.js",
+    "test:quick": "node tools/preflight.js --quick"
   },
   "keywords": [],
   "author": "",

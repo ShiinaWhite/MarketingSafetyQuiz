@@ -68,8 +68,11 @@ function realSecrets() {
   } catch (e) { /* 无 telemetry secret：跳过 */ }
   const tkEnv = (process.env.MSQ_TELEMETRY_HMAC_KEY || "").trim();
   if (tkEnv.length >= 32) { out.push({ kind: "MSQ_TELEMETRY_HMAC_KEY (env)", value: tkEnv }); }
+  /* STABLE_RELEASE_PREFLIGHT_HARDENING_V1 分类修正：MSQ_SAMPLE_WRITE_TOKEN 是
+     App 随包写凭据（BuildConfig 注入 SampleQueue 认证），不是 provider secret，
+     从本扫描移除；COS/R2/private key 扫描不放松。 */
   for (const k of ["R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "CLOUDFLARE_API_TOKEN",
-    "MSQ_SAMPLE_WRITE_TOKEN", "COS_SECRET_ID", "COS_SECRET_KEY"]) {
+    "COS_SECRET_ID", "COS_SECRET_KEY"]) {
     const v = (process.env[k] || "").trim();
     if (v.length >= 16) { out.push({ kind: k + " (env)", value: v }); }
   }

@@ -1,9 +1,10 @@
 /* APK_SIZE_OPTIMIZATION_V1：修复 ioncamera-android 1.0.2 的 POM 把 junit:junit:4.13.2
    声明为 runtime scope（打包 bug）导致的 junit/hamcrest 泄漏。
-   只从三个 variant 的 RuntimeClasspath 剔除；禁止改成 endsWith('RuntimeClasspath') ——
+   只从各发布 variant 的 RuntimeClasspath 剔除；禁止改成 endsWith('RuntimeClasspath') ——
    那会连 devUnitTestRuntimeClasspath 一起命中，JVM 单测将 NoClassDefFoundError（已实测）。
-   testImplementation / unit test classpath 不受影响。 */
-configurations.matching { it.name in ['debugRuntimeClasspath', 'devRuntimeClasspath', 'releaseRuntimeClasspath'] }.all {
+   STABLE_RELEASE_PREFLIGHT_HARDENING_V1：stable 发布改走独立 stable buildType，
+   stableRuntimeClasspath 必须一并剔除，否则 stable APK 会泄漏 junit/hamcrest。 */
+configurations.matching { it.name in ['debugRuntimeClasspath', 'devRuntimeClasspath', 'stableRuntimeClasspath', 'releaseRuntimeClasspath'] }.all {
     exclude group: 'junit', module: 'junit'
     exclude group: 'org.hamcrest', module: 'hamcrest-core'
 }
@@ -79,6 +80,31 @@ android {
             def sampleToken = project.findProperty("MSQ_SAMPLE_WRITE_TOKEN") ?: ""
             buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '"' + sampleToken.toString() + '"'
         }
+        /* STABLE_RELEASE_PREFLIGHT_HARDENING_V1：正式 stable 独立 buildType，
+           取代沿用多年的 assembleDebug 路径（debug overlay 的
+           usesCleartextTraffic=true 不得进入 stable）。
+           - applicationId = com.jty.safetyquiz（无 suffix，继承 defaultConfig）
+           - versionName 无 -dev 后缀；label 继承 main（营销安规搜题，
+             src/dev 的 strings 覆盖只作用于 dev buildType）
+           - debuggable=false（显式覆盖 initWith debug 继承的 true）
+           - 无 cleartext：stable 无 src/stable overlay，src/debug 只属于 debug
+           - R8 与 dev 同一套（initWith debug 继承 + 显式重申）
+           - 全 ABI（不设 abiFilters；arm64-only 是 dev 发布专属）
+           - 签名沿用现有 stable 同一证书（signingConfigs.debug，不得换签）
+           - PUBLIC_SAMPLE_AUTH_V1（P0-B）：与 dev 同模型注入
+             -PMSQ_SAMPLE_WRITE_TOKEN（BuildConfig.MSQ_SAMPLE_WRITE_TOKEN），
+             修复 stable 静默 401 */
+        stable {
+            initWith debug
+            matchingFallbacks = ['debug']
+            debuggable false
+            signingConfig signingConfigs.debug
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            def sampleToken = project.findProperty("MSQ_SAMPLE_WRITE_TOKEN") ?: ""
+            buildConfigField "String", "MSQ_SAMPLE_WRITE_TOKEN", '"' + sampleToken.toString() + '"'
+        }
     }
 }
 
@@ -101,10 +127,12 @@ androidComponents {
             if (devNameProp) { output.versionName.set(devNameProp.toString() + "-dev") }
         }
     }
-    /* STABLE_RELEASE_PIPELINE_V1：stable 版本注入（仅 debug buildType，且只在
-       显式传 -P 时生效——日常 assembleDebug 不传参数则保持 versionCode 1 / 1.0）。
-       stable versionName 无 -dev 后缀。 */
-    onVariants(selector().withBuildType("debug")) { variant ->
+    /* STABLE_RELEASE_PREFLIGHT_HARDENING_V1：stable 版本注入改为独立 stable
+       buildType（-PSTABLE_VERSION_CODE / -PSTABLE_VERSION_NAME，只在显式传 -P
+       时生效——日常 assembleStable 不传参则保持 versionCode 1 / 1.0）。
+       stable versionName 无 -dev 后缀。debug buildType 不再是 stable 发布路径，
+       版本注入随之移除。 */
+    onVariants(selector().withBuildType("stable")) { variant ->
         def stableCodeProp = project.findProperty("STABLE_VERSION_CODE")
         def stableNameProp = project.findProperty("STABLE_VERSION_NAME")
         variant.outputs.each { output ->

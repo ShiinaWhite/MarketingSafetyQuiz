@@ -77,7 +77,9 @@ const CHANNELS = {
     title: "STABLE",
     packageName: "com.jty.safetyquiz",
     label: "营销安规搜题",
-    gradleTask: ":app:assembleDebug",
+    /* STABLE_RELEASE_PREFLIGHT_HARDENING_V1：独立 stable buildType
+       （debuggable=false、无 cleartext overlay、全 ABI、R8、同证书） */
+    gradleTask: ":app:assembleStable",
     versionProps: { code: "STABLE_VERSION_CODE", name: "STABLE_VERSION_NAME" },
     versionNameSuffix: "",
     cosPrefix: "stable",
@@ -87,7 +89,7 @@ const CHANNELS = {
     baselineApk: path.join(ROOT, "release", "updates", "stable", "营销安规刷题.apk"),
     shippedApk: path.join(ROOT, "release", "营销安规刷题.apk"),
     fallbackApkUrl: "/api/update/stable/apk",
-    outApk: path.join(ANDROID, "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+    outApk: path.join(ANDROID, "app", "build", "outputs", "apk", "stable", "app-stable.apk"),
     requireCosCdn: true,
     requireExplicitVersion: true
   }
@@ -111,13 +113,14 @@ function fail(msg) {
   process.exit(1);
 }
 
-/* STABLE_RELEASE_PIPELINE_V1：发布前 secret scan —— APK 字节不得包含任何凭据。
-   forbidden 来源：sample write token、.env.cos.updates.local 的 SECRET/TOKEN/KEY 值、
-   通用 private key 标记。凭据值只进内存参与匹配，绝不打印、绝不写入任何输出。 */
+/* STABLE_RELEASE_PIPELINE_V1 + PREFLIGHT_HARDENING_V1：发布前 secret scan。
+   分类修正：MSQ_SAMPLE_WRITE_TOKEN 是 App 随包写凭据（BuildConfig 注入，
+   SampleQueue 认证必需），不再作为 provider secret 误判——它被**要求**存在于
+   candidate APK 中（见 verifyAppCredentialInjection）；provider secret
+   （COS/R2 SecretId/SecretKey/access key/private key）仍一律 forbidden，
+   发现即 FAIL，扫描不放松。凭据值只进内存参与匹配，绝不打印。 */
 function loadSecretScanForbidden() {
   const list = ["BEGIN RSA PRIVATE KEY", "BEGIN PRIVATE KEY"];
-  const tok = loadSampleWriteToken();
-  if (tok && tok.length >= 32) { list.push(tok); }
   try {
     const env = r2.parseEnvFile(fs.readFileSync(
       path.join(ROOT, ".env.cos.updates.local"), "utf8"));
@@ -127,6 +130,50 @@ function loadSecretScanForbidden() {
     });
   } catch (e) { /* env 文件不存在：跳过（cos-cdn 发布时本就需要它） */ }
   return list;
+}
+
+
+/* PREFLIGHT_HARDENING_V1：APK 内 dex 是 deflate 压缩存储，明文子串必须解压后搜。
+   零依赖 mini zip reader：EOCD → central directory → .dex entries → raw deflate
+   inflate。仅用于 App 随包凭据存在性验证（MUTF-8 ASCII 与 UTF-8 字节相同）。 */
+function apkDexContains(apkBytes, needle) {
+  const u16 = (o) => apkBytes.readUInt16LE(o);
+  const u32 = (o) => apkBytes.readUInt32LE(o);
+  let eocd = -1;
+  for (let i = apkBytes.length - 22; i >= Math.max(0, apkBytes.length - 65557); i--) {
+    if (u32(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) { return false; }
+  const count = u16(eocd + 10);
+  let ptr = u32(eocd + 16);
+  const needleBuf = Buffer.from(needle, "utf8");
+  for (let e = 0; e < count; e++) {
+    if (u32(ptr) !== 0x02014b50) { return false; }
+    const method = u16(ptr + 10);
+    const compSize = u32(ptr + 20);
+    const nameLen = u16(ptr + 28);
+    const extraLen = u16(ptr + 30);
+    const commentLen = u16(ptr + 32);
+    const localOff = u32(ptr + 42);
+    const name = apkBytes.slice(ptr + 46, ptr + 46 + nameLen).toString("utf8");
+    if (/\.dex$/.test(name)) {
+      const lNameLen = u16(localOff + 26);
+      const lExtraLen = u16(localOff + 28);
+      const dataStart = localOff + 30 + lNameLen + lExtraLen;
+      let dexBytes;
+      if (method === 0) {
+        dexBytes = apkBytes.slice(dataStart, dataStart + compSize);
+      } else if (method === 8) {
+        try {
+          dexBytes = require("zlib").inflateRawSync(
+            apkBytes.slice(dataStart, dataStart + compSize));
+        } catch (e) { return false; }
+      } else { return false; }
+      if (dexBytes.includes(needleBuf)) { return true; }
+    }
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  return false;
 }
 
 /* 返回 { ok, hits }；hits 只含编号与长度（如 "forbidden[1](48B)"），绝不含内容。 */
@@ -370,6 +417,21 @@ async function main() {
   }
   console.log("native-code：" + nativeCodeStr);
 
+  /* PREFLIGHT_HARDENING_V1：stable 候选机械门禁 —— debuggable/cleartext 必须非 true */
+  if (channel.id === "stable") {
+    const manifestDump = withAsciiCopy(channel.outApk,
+      (p) => run(AAPT, ["dump", "xmltree", p, "AndroidManifest.xml"])).stdout || "";
+    const badgingAll = withAsciiCopy(channel.outApk, (p) => run(AAPT, ["dump", "badging", p])).stdout || "";
+    if (/application-debuggable/.test(badgingAll)) {
+      fail("stable 门禁失败：android:debuggable=true（aapt badging application-debuggable）。拒绝发布。");
+    }
+    const ct = /usesCleartextTraffic\s*\(raw[^)]*\)=\s*"?(0xffffffff|true)"?/i.exec(manifestDump);
+    if (ct) {
+      fail("stable 门禁失败：android:usesCleartextTraffic=true 出现在 merged manifest。拒绝发布。");
+    }
+    console.log("→ stable 门禁：debuggable=false ✓ usesCleartextTraffic!=true ✓");
+  }
+
   /* 5) 签名证书与该渠道现有 APK 一致性 */
   const newSigner = signerSha256(channel.outApk);
   if (!newSigner) { fail("无法读取新 APK 签名证书"); }
@@ -395,7 +457,18 @@ async function main() {
     fail("secret scan 失败：APK 内检测到疑似凭据（" + scan.hits.join(", ") +
       "）。拒绝发布，latest.json 未改动。");
   }
-  console.log("→ secret scan：通过（" + scanForbidden.length + " 项模式，APK 无凭据）");
+  console.log("→ secret scan：通过（" + scanForbidden.length + " 项 provider secret 模式，APK 无凭据）");
+
+  /* PREFLIGHT_HARDENING_V1（P0-B 实证）：App 随包写凭据必须已注入 candidate APK
+     （BuildConfig.MSQ_SAMPLE_WRITE_TOKEN），否则 SampleQueue 将静默 401。
+     只验证存在性（字节包含），值与长度语义绝不打印。 */
+  const credOk = writeToken.length >= 32 &&
+    apkDexContains(apkBytes, writeToken);
+  if (!credOk) {
+    fail("App 凭据注入核验失败：候选 APK 未包含 SampleQueue 写凭据（将 401）。拒绝发布。");
+  }
+  console.log("→ App 凭据注入核验：通过（SampleQueue 写凭据已随包，长度 " +
+    writeToken.length + " B，值不打印）");
 
   /* dry-run（STABLE_RELEASE_PIPELINE_V1）：完成全部本地校验后停止，
      绝不上传 COS、绝不写 latest.json —— 用于正式发布前的机械验证。 */
