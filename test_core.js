@@ -3463,6 +3463,26 @@ async function runTelemetryTests() {
           telSrc.indexOf("function diagnostics"));
         return adminFn.indexOf("console.") < 0;
       })());
+
+    /* dispose()（DASHBOARD_POLISH_V1）：只取消 searchTimer/flushTimer，
+       不改业务状态——测试用它保证零真实 timer 泄漏、进程自然退出 */
+    const envDisp = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000002d1",
+          localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+          counters: { text_search: 1 }, histograms: {} }] }
+    });
+    envDisp.ctrl.observeSearch("dispose-probe", 1);
+    envDisp.ctrl.attemptFlush("cold");   /* 节流窗口内 → flushNow 成功 → outbox 清空 */
+    await flush();
+    check("dispose 前：pending timer 仅剩 search 空闲 timer",
+      envDisp.timer.pendingCount() === 1, "pending=" + envDisp.timer.pendingCount());
+    envDisp.ctrl.dispose();
+    check("dispose 后：全部 timer 取消（pendingCount=0）",
+      envDisp.timer.pendingCount() === 0);
+    envDisp.ctrl.record("text_search");   /* dispose 后仍可用，业务状态不受影响 */
+    check("dispose 后 record 仍正常（计数照常、无异常）",
+      envDisp.ctrl.stateSnapshot().currentBucket.counters.text_search === 1);
   }
 
   /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */

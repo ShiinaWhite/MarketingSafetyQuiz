@@ -52,7 +52,9 @@
   var MAX_BATCHES_PER_POST = 20;
   var MAX_BODY_BYTES = 128 * 1024;
   var DRAIN_TAIL_DELAY_MS = 60000;
-  /* IN_APP_TELEMETRY_DASHBOARD_V1：数据 Tab 本地缓存（仅聚合并报，非敏感） */
+  /* IN_APP_TELEMETRY_DASHBOARD_V1：数据 Tab 本地缓存（仅聚合并报，非敏感）。
+     DASH_CACHE_TTL_MS 是 fresh/stale 分界（10min），不是删除时限——stale 缓存
+     仍继续展示并由后台 revalidate，绝不强制过期删除（DASHBOARD_POLISH_V1） */
   var DASH_CACHE_KEY = "msq.telemetryDash.v1";
   var DASH_CACHE_TTL_MS = 10 * 60000;
 
@@ -682,6 +684,18 @@
       return JSON.parse(JSON.stringify(state));
     }
 
+    /* TELEMETRY_DASHBOARD_POLISH_V1：内部安全清理——只取消两个内存 timer
+       （searchTimer / flushTimer），不改业务状态、不清 outbox、不影响生产；
+       供测试在用例结束时归还 event loop，杜绝真实 timer 泄漏 */
+    function dispose() {
+      try {
+        if (searchTimer) { (d.clearTimeout || clearTimeout)(searchTimer); searchTimer = null; }
+      } catch (e) { /* swallow */ }
+      try { cancelFlushTimer(); } catch (e2) { /* swallow */ }
+      pendingSearch = null;
+      lastCountedQuery = null;
+    }
+
     return {
       record: record,
       add: add,
@@ -692,7 +706,8 @@
       attemptFlush: attemptFlush,
       diagnostics: diagnostics,
       adminSummary: adminSummary,
-      stateSnapshot: stateSnapshot
+      stateSnapshot: stateSnapshot,
+      dispose: dispose
     };
   }
 
@@ -729,6 +744,7 @@
     } catch (e) { return false; }
   }
 
+  /* fresh/stale 判定：超过 10min = stale（仍展示、后台刷新），不删缓存 */
   function isDashboardCacheFresh(ageMs) {
     return typeof ageMs === "number" && ageMs >= 0 && ageMs <= DASH_CACHE_TTL_MS;
   }

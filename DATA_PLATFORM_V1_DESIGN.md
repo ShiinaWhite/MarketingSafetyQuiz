@@ -617,3 +617,11 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    剩余合法 batch 自动续传；(d) 401/403 清凭据与注册失败：registerRetryAt 到点自动
    重注册（attemptFlush 无凭据分支同样挂唯一 one-shot timer）。原则不变：不轮询、
    timer 唯一、不绕 30min 节流、不绕 backoff、ACK 前不删。诊断新增「等待注册」状态。
+
+7. **口径与卫生（TELEMETRY_DASHBOARD_POLISH_V1，vc31）**：versionDistribution 改为
+   「当前活跃版本分布」——窗口内每个 deviceId 取 received_at 最新的一条 batch
+   （ORDER BY received_at DESC, id DESC，同刻 id 新者胜，ROW_NUMBER window），
+   各版本设备数之和 = 窗口内 distinct deviceId；历史 telemetry_batches 零删除，
+   纯查询口径。Dashboard 缓存语义澄清：10min 是 fresh/stale 分界，stale 缓存
+   继续展示 + 后台 revalidate，不做强制过期删除。开发者中心隐藏入口注释统一为
+   双合法包（dev+stable）真实语义。

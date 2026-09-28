@@ -88,6 +88,23 @@ function makeBatch(overrides) {
   };
 }
 
+/* Windows：SQLite WAL 句柄释放有延迟，rmSync 偶发 EBUSY —— 异步重试；
+   重试耗尽则降级为 warning（tmp 目录由 OS 清理，不影响测试结论） */
+async function rmSyncRetry(dir, attempts) {
+  for (let i = 0; i < (attempts || 6); i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (i === (attempts || 6) - 1) {
+        console.warn("[warn] 临时目录清理失败（忽略，不影响结果）：" + dir);
+        return;
+      }
+      await new Promise(function (r) { setTimeout(r, 400 * (i + 1)); });
+    }
+  }
+}
+
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "msq-telemetry-test-"));
   const dbPath = path.join(tmp, "telemetry.db");
@@ -431,6 +448,112 @@ async function main() {
       }
     }
 
+    /* ---------- TELEMETRY_DASHBOARD_POLISH_V1：版本分布 latest-per-device ---------- */
+    section("TEL-VERSIONS 当前活跃版本分布（每设备只计最新 batch 版本）");
+    {
+      /* db2 已关闭：本段重开独立连接 */
+      const dbV = telemetryStore.openTelemetryStore({ path: dbPath });
+      const vq = (sql, ...p2) => dbV.db.prepare(sql).all(...p2);
+      const now = Date.now();
+      const FUTURE = now + 3600 * 1000;   /* 超出服务端 sanity 上限的远期（仅直灌 DB 用） */
+      const mk = (deviceId, vc, vn, receivedAt, channel) => ({
+        batchId: nextBatchId(), localDay: new Date(receivedAt).toISOString().slice(0, 10),
+        periodStart: receivedAt - 60000, periodEnd: receivedAt,
+        versionCode: vc, versionName: vn,
+        channel: channel || (vc >= 25 ? "dev" : "dev"),
+        packageName: "com.jty.safetyquiz.dev",
+        counters: { app_cold_start: 1 }, histograms: {}
+      });
+      const ingestRaw = (deviceId, vc, vn, receivedAt) => {
+        const b = telemetryStore.validateSingleBatch(
+          mk(deviceId, vc, vn, Math.min(receivedAt, now)), Math.min(receivedAt, now) + 60000);
+        if (!b.ok) { throw new Error(b.error); }
+        dbV.store.ingestBatches({
+          schemaVersion: 1, deviceId: deviceId, batches: [b.batch]
+        }, Math.min(receivedAt, now) + 120000);
+      };
+      const seedDev = (n) => telemetryStore.telemetryDeviceId(TEST_SECRET,
+        String(n).padStart(16, "0"));
+
+      const beforeVc = vq("SELECT COUNT(*) AS n FROM telemetry_batches")[0].n;
+      /* 设备 A：vc27 → vc28 → vc30（旧→新依次上报，batch 全保留） */
+      const devA = seedDev(101);
+      ingestRaw(devA, 27, "1.0.27-dev", now - 3 * 86400000);
+      ingestRaw(devA, 28, "1.0.28-dev", now - 2 * 86400000);
+      ingestRaw(devA, 30, "1.0.30-dev", now - 60000);
+      /* 设备 B：只上过 vc28 */
+      const devB = seedDev(102);
+      ingestRaw(devB, 28, "1.0.28-dev", now - 120000);
+      /* 设备 C：旧版本在窗口外（91 天前，直灌 DB 模拟历史 batch——
+         服务端上报 sanity 只对在线请求，历史行当年合法），窗口内只有 vc30 */
+      const devC = seedDev(103);
+      dbV.db.prepare(
+        `INSERT OR IGNORE INTO devices
+           (device_id, first_seen_at, last_seen_at, first_version, last_version,
+            first_channel, last_channel)
+         VALUES (?, ?, ?, '1.0.23-dev', '1.0.23-dev', 'dev', 'dev')`
+      ).run(devC, now - 91 * 86400000, now - 91 * 86400000);
+      dbV.db.prepare(
+        `INSERT INTO telemetry_batches
+           (batch_id, device_id, local_day, period_start, period_end, received_at,
+            version_code, version_name, channel, package_name, payload)
+         VALUES (?, ?, '2026-06-29', ?, ?, ?, 23, '1.0.23-dev', 'dev',
+                 'com.jty.safetyquiz.dev', '{}')`
+      ).run(nextBatchId(), devC, now - 91 * 86400000 - 60000, now - 91 * 86400000,
+        now - 91 * 86400000);
+      ingestRaw(devC, 30, "1.0.30-dev", now - 180000);
+      const afterVc = vq("SELECT COUNT(*) AS n FROM telemetry_batches")[0].n;
+      check("历史 batch 全保留（6 条新 batch 入库）", afterVc === beforeVc + 6,
+        beforeVc + " → " + afterVc);
+
+      const win = now - 7 * 86400000;
+      const dist = dbV.store.versionDistribution(win);
+      const total = dist.reduce(function (s, r) { return s + r.devices; }, 0);
+      const byVc = {};
+      for (const r of dist) { byVc[r.versionCode] = r.devices; }
+      check("单设备 vc27/28/30 → 只计 vc30 1台",
+        byVc[30] === 2 && byVc[27] === undefined && byVc[28] === 1,
+        JSON.stringify(dist));
+      const distinctDevs = vq(
+        "SELECT COUNT(DISTINCT device_id) AS n FROM telemetry_batches WHERE received_at >= ?",
+        win)[0].n;
+      check("多设备各计最新：版本设备数之和 = 窗口内 distinct deviceId",
+        total === distinctDevs, "total=" + total + " distinct=" + distinctDevs);
+
+      /* 同 received_at：id 较新的 batch 胜出 */
+      const devD = seedDev(104);
+      const tieAt = now - 300000;
+      const b1 = telemetryStore.validateSingleBatch(
+        mk(devD, 28, "1.0.28-dev", tieAt), tieAt + 60000);
+      dbV.store.ingestBatches({ schemaVersion: 1, deviceId: devD, batches: [b1.batch] },
+        tieAt + 120000);
+      const b2 = telemetryStore.validateSingleBatch(
+        mk(devD, 30, "1.0.30-dev", tieAt), tieAt + 60000);
+      dbV.store.ingestBatches({ schemaVersion: 1, deviceId: devD, batches: [b2.batch] },
+        tieAt + 120000);
+      /* 确认两条 batch received_at 相同（同毫秒） */
+      const tieRows = vq(
+        "SELECT id, version_code, received_at FROM telemetry_batches WHERE device_id = ? ORDER BY id",
+        devD);
+      check("并列夹具：同 received_at 两条（id 递增）",
+        tieRows.length === 2 && tieRows[0].received_at !== undefined, "");
+      const distD = dbV.store.versionDistribution(win);
+      const dVcs = distD.filter(function (r) { return r.versionCode === 30; })[0];
+      check("同 received_at → id 较新（vc30）胜出：D 计入 vc30（A/C/D 共 3 台）",
+        dVcs && dVcs.devices === 3, JSON.stringify(distD));
+
+      /* 窗口外旧版本不参与：devC 的 vc23 不出现在任何窗口口径 */
+      const distAll = dbV.store.versionDistribution(win);
+      check("窗口外 vc23 不参与（无 1.0.23-dev 行）",
+        distAll.every(function (r) { return r.versionCode !== 23; }));
+
+      /* recompute 不受影响（不删任何 batch） */
+      const cntAfter = vq("SELECT COUNT(*) AS n FROM telemetry_batches")[0].n;
+      check("口径变化零删除（batches 行数不变）",
+        cntAfter === afterVc + 2, cntAfter + " vs " + (afterVc + 2));
+      dbV.store.close();
+    }
+
     /* ---------- secret 缺失 → 503 FAIL CLOSED，业务端点不受影响 ---------- */
     section("TEL-SERVER secret 缺失 → 503 FAIL CLOSED（App 业务不受影响）");
     serverModule._resetRateLimitsForTest();
@@ -517,7 +640,7 @@ async function main() {
     }
   } finally {
     if (collector) { await collector.close(); }
-    fs.rmSync(tmp, { recursive: true, force: true });
+    await rmSyncRetry(tmp);
   }
 
   console.log("\n==============================================");

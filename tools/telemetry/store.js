@@ -534,12 +534,27 @@ function makeStore(db) {
     return db.prepare("SELECT COUNT(*) AS n FROM devices").get().n;
   }
 
+  /* 当前活跃版本分布（TELEMETRY_DASHBOARD_POLISH_V1）：
+     窗口内每个 deviceId 只取 received_at 最新的一条 telemetry_batch
+     （ORDER BY received_at DESC, id DESC，同刻并列由 id 较新者胜出），
+     再按 version_name/version_code/channel 分组 —— 同一设备跨版本只计其当前
+     版本 1 台；所有版本设备数之和 = 窗口内有 batch 的 distinct deviceId 数。
+     历史 telemetry_batches 全部保留，本口径只是查询层。 */
   function versionDistribution(fromEpochMs) {
     return db.prepare(
       `SELECT version_name AS versionName, version_code AS versionCode, channel,
-              COUNT(DISTINCT device_id) AS devices
-       FROM telemetry_batches WHERE received_at >= ?
-       GROUP BY version_name, version_code, channel ORDER BY devices DESC`
+              COUNT(*) AS devices
+       FROM (
+         SELECT version_name, version_code, channel, device_id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY device_id
+                  ORDER BY received_at DESC, id DESC) AS rn
+         FROM telemetry_batches
+         WHERE received_at >= ?
+       )
+       WHERE rn = 1
+       GROUP BY version_name, version_code, channel
+       ORDER BY devices DESC`
     ).all(fromEpochMs);
   }
 

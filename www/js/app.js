@@ -1883,9 +1883,9 @@
     }
   }
 
-  /* ---------------- DEV 隐藏诊断（VC16_UI_POLISH_V1） ----------------
-     入口 = 检查更新页的「当前版本：…」整行，3 秒内 7 连击；仅 DEV 构建绑定手势。
-     MAIN：不绑定、不响应、不暴露（openUpdateView 内 diagnosticsChannel 早退）。
+  /* ---------------- 开发者中心·诊断 Tab（VC16 + IN_APP_TELEMETRY_DASHBOARD_V1） ----------------
+     入口 = 检查更新页的「当前版本：…」整行，3 秒内 7 连击；两个合法包
+     （com.jty.safetyquiz.dev / com.jty.safetyquiz）均绑定手势，未知包不绑定。
      只展示非敏感队列诊断（计数/字节/janitor 记录），绝不显示任何凭据、
      签名下载地址或服务器域名（test_core 有内容守卫）。 */
   var devDiagTaps = { count: 0, firstAt: 0 };
@@ -1969,7 +1969,7 @@
         } else {
           groups[1].rows.push(["诊断数据", "需升级安装包"]);
         }
-        /* 最近一次更新下载链路（非敏感，仅 DEV 诊断） */
+        /* 最近一次更新下载链路（非敏感，仅开发者中心诊断 Tab） */
         var dl = (typeof MSQDownloadDiag !== "undefined" && MSQDownloadDiag)
           ? MSQDownloadDiag.load(typeof localStorage !== "undefined" ? localStorage : null) : null;
         if (dl) {
@@ -1986,7 +1986,7 @@
           groups[4].rows.push(["下载结果", dl.downloadOk ? "成功（已通过校验）" : "失败",
             dl.downloadOk ? "ok" : "err"]);
         }
-        /* DATA_PLATFORM_V1：Telemetry 诊断组（A14，仅 DEV）。
+        /* DATA_PLATFORM_V1：Telemetry 诊断组（仅开发者中心，DEV+stable）。
            只展示计数/时间/掩码设备 ID——绝不显示完整 deviceId、原始 ANDROID_ID
            （JS 侧从未持有）、任何内容文本或服务器域名。 */
         var telDiag = Telemetry ? Telemetry.diagnostics() : null;
@@ -2248,9 +2248,12 @@
     if (cacheAgeMs > 0) {
       var cacheNote = document.createElement("p");
       cacheNote.className = "sample-note";
-      var stale = !MSQTelemetry.isDashboardCacheFresh(cacheAgeMs);
-      cacheNote.textContent = "缓存数据（" + (stale ? "已超过" : "距今 ") +
-        Math.round(cacheAgeMs / 60000) + " 分钟" + (stale ? "" : "前") + "）";
+      /* 缓存语义（DASHBOARD_POLISH_V1）：10min 是 fresh/stale 分界；stale 缓存
+         仍继续展示并由后台刷新，绝不强制删除 */
+      var mins = Math.round(cacheAgeMs / 60000);
+      cacheNote.textContent = MSQTelemetry.isDashboardCacheFresh(cacheAgeMs)
+        ? "缓存数据（" + mins + "分钟前）"
+        : "旧缓存（" + mins + "分钟前，正在刷新）";
       body.appendChild(cacheNote);
     }
 
@@ -2311,7 +2314,14 @@
             "（" + v.channel + "）", v.devices + " 台设备"];
         })
       : [["（窗口内无上报）", "—"]];
-    cards.appendChild(devDataCard("App 版本分布", verRows));
+    /* TELEMETRY_DASHBOARD_POLISH_V1：口径 = 窗口内每台设备按最近一次上报版本
+       统计（服务端 latest-per-device 查询），标题与语义对齐 */
+    var verCard = devDataCard("当前活跃版本分布", verRows);
+    var verNote = document.createElement("div");
+    verNote.className = "diag-title";
+    verNote.textContent = "窗口内每台设备按最近一次上报版本统计";
+    verCard.insertBefore(verNote, verCard.querySelector(".diag-kv"));
+    cards.appendChild(verCard);
     while (cards.firstChild) { body.appendChild(cards.firstChild); }
   }
 
