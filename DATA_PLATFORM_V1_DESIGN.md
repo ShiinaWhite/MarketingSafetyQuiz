@@ -261,7 +261,11 @@ Outbox 保证：
    （超限从尾部裁剪，防御性；计数器报文实际 ~1KB/batch）。
 5. 成功（200）：移除 accepted ∪ alreadyAccepted 对应批次；`lastFlushSuccessAt = now`、
    `lastUploadAttemptAt = now`、`flushAttempts = 0`、`nextRetryAt = 0`；
-   若 outbox 仍有余量（>20 的长尾），`nextRetryAt = now + 1min` 立即排空，不受 30min 限制。
+   若 outbox 仍有余量（>20 的长尾），仍设置 drain/retry marker
+   （`nextRetryAt = now + DRAIN_TAIL_DELAY_MS`），但**所有后续上传统一服从
+   `nextAttemptAt = max(lastUploadAttemptAt + 30min, nextRetryAt)`** ——
+   长尾不得绕过 30min throttle；retry/backoff 也不得被 throttle 绕过
+   （SCHEDULER_RETRY_GATE_V1 起的统一时间门，见 §23.5）。
 6. 失败：见 RETRY_POLICY。
 
 明确不做：`setInterval` 高频轮询、逐点击 POST、后台无限唤醒、WorkManager 高频任务。
