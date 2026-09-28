@@ -1549,8 +1549,10 @@ function runSucOrchestrationTests() {
       c.trigger(); c.trigger(); await flush();
       check("SUC-7/8 任何后续 trigger（=后台恢复/相机返回）都不再 fetch",
         n1 === 1 && io.calls.fetch === 1 && c.flags().started === true);
-      check("SUC-7/8b app.js 无 resume/appStateChange/visibilitychange 监听器（源码守卫）",
-        !/addListener\("(resume|appStateChange)"/.test(appSrc) &&
+      check("SUC-7/8b 启动更新不监听 resume/appStateChange（DATA_PLATFORM_V1 后全文件仅 telemetry 一处 resume 监听，只调 t.onAppResume，绝不触发更新检查）",
+        appSrc.match(/addListener\("(?:resume|appStateChange)"/g).length === 1 &&
+        /Telemetry = t;[\s\S]{0,300}addListener\("resume"/.test(appSrc) &&
+        /t\.onAppResume\(\)/.test(appSrc) &&
         !appSrc.includes("visibilitychange"));
       check("SUC17-1/2 启动检查在 bootstrap 期即触发（早于 loadBank），modal 门与题库解耦（INSTANT_V2）",
         appSrc.indexOf("startupUpdateCtrl.trigger();") > 0 &&
@@ -1963,17 +1965,19 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
     !indexSrc.includes("shiinalab") && !appSrc.includes("shiinalab") &&
     !indexSrc.includes("apk.shiinalab") && !indexSrc.includes("update.shiinalab"));
 
-  /* —— DIAG 系列：DEV 隐藏诊断入口 = 检查更新页「当前版本」整行 7 连击 —— */
-  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（仅 dev 渠道；块级整行可点）",
-    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) === "dev"') &&
+  /* —— DIAG 系列：开发者中心隐藏入口 = 检查更新页「当前版本」整行 3 秒 7 连击
+     （IN_APP_TELEMETRY_DASHBOARD_V1：DEV + stable 两个合法包均绑定；未知包不绑） —— */
+  check("DIAG-1/2 更新页当前版本整行绑定 7 连击（dev+stable 渠道；块级整行可点）",
+    appSrc.includes('MSQSample.diagnosticsChannel(updateInfo.id) !== null') &&
     appSrc.indexOf('renderUpdateView("当前版本："') < appSrc.indexOf("bindDevDiagTap(statusEl)") &&
     appSrc.includes("function bindDevDiagTap(el)") &&
     appSrc.includes("devDiagTaps.count >= 7"));
   check("DIAG-3/4 计数逻辑：>=7 才进入，超 3 秒重置",
     appSrc.includes("now - devDiagTaps.firstAt > 3000") &&
     appSrc.includes("if (devDiagTaps.count >= 7) {"));
-  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel 非 dev 直接跳过）",
-    appSrc.includes('=== "dev"') && appSrc.includes("bindDevDiagTap(statusEl)") &&
+  check("DIAG-5 MAIN 不绑定手势（diagnosticsChannel null 直接跳过；dev/stable 均绑定）",
+    appSrc.includes('diagnosticsChannel(updateInfo.id) !== null') &&
+    appSrc.includes("bindDevDiagTap(statusEl)") &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.other.app") === null);
   check("DIAG-6 诊断页 Back → 检查更新页（按钮与系统 Back 同路，方向仅影响动画）",
@@ -2011,8 +2015,11 @@ section("拍摄流程收口与样本静默化（CAP 系列，源码守卫 + 纯�
       !dd.includes('"Retry queue now"'));
     check("DIAG17-3 两个操作按钮中文（立即清理/立即重试）",
       dd.includes('"立即清理"') && dd.includes('"立即重试"'));
-    check("DIAG17-1b 诊断页标题中文（开发者诊断）",
-      indexSrc.includes("开发者诊断") && !indexSrc.includes("Developer Diagnostics"));
+    check("DIAG17-1b 标题中文（开发者中心；双 Tab 诊断|数据；数据面板独立）",
+      indexSrc.includes("开发者中心") && !indexSrc.includes("Developer Diagnostics") &&
+      indexSrc.includes('id="devtab-diag"') && indexSrc.includes('id="devtab-data"') &&
+      indexSrc.includes('id="devdata-body"') && indexSrc.includes(">诊断</button>") &&
+      indexSrc.includes(">数据</button>"));
     check("DIAG17 诊断页不渲染任何域名/endpoint/objectKey",
       !dd.includes("shiinalab") && !dd.includes("objectKey") &&
       !dd.includes("presigned") && !dd.includes("serverUrl"));
@@ -2195,6 +2202,8 @@ section("下载诊断：apk-download-diag.js（CDN-D 系列，纯函数）");
 section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
 {
   const gradleSrc = fs.readFileSync(path.join(__dirname, "android/app/build.gradle"), "utf8");
+  const secretScanSrc = fs.readFileSync(path.join(__dirname, "tools/r2/secret_scan.js"), "utf8");
+  const pkgSrc = fs.readFileSync(path.join(__dirname, "package.json"), "utf8");
   const mainStrings = fs.readFileSync(path.join(__dirname,
     "android/app/src/main/res/values/strings.xml"), "utf8");
   const devStrings = fs.readFileSync(path.join(__dirname,
@@ -2211,10 +2220,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     mainStrings.includes(">营销安规搜题<") &&
     !mainStrings.includes("营销安规搜题 DEV") &&
     devStrings.includes(">营销安规搜题 DEV<"));
-  check("MAIN-3 stable 渠道 DEV diagnostics 无入口（diagnosticsChannel=stable 不绑定手势）",
+  check("MAIN-3 stable 渠道与 DEV 均绑定隐藏开发者中心入口（未知包仍不绑定）",
     MSQSample.diagnosticsChannel("com.jty.safetyquiz") === "stable" &&
     MSQSample.diagnosticsChannel("com.jty.safetyquiz.dev") === "dev" &&
-    appSrc.includes('diagnosticsChannel(updateInfo.id) === "dev"'));
+    appSrc.includes('diagnosticsChannel(updateInfo.id) !== null'));
   check("MAIN-4 sample config UI 不存在（stable 与 dev 共用同一收口后 UI）",
     !indexSrcMain.includes("sample-panel") && !indexSrcMain.includes("自动上传测试样本") &&
     !indexSrcMain.includes("测试连接") && !indexSrcMain.includes("sample-enabled"));
@@ -2253,7 +2262,7 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
     serverSrcMain.includes('dev: "营销安规刷题-DEV.apk"') &&
     serverSrcMain.includes('stable: "营销安规刷题.apk"'));
 
-  /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1，源码守卫） —— */
+  /* —— STP：channel-aware publisher（STABLE_RELEASE_PIPELINE_V1 + PREFLIGHT_HARDENING_V1） —— */
   check("STP-1/2 publisher 渠道配置：stable package/label 正确且与 dev 隔离",
     pubSrc.includes('packageName: "com.jty.safetyquiz"') &&
     pubSrc.includes('label: "营销安规搜题"') &&
@@ -2262,8 +2271,10 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("STP-3 stable ABI 核验要求全 4 ABI（build 后 aapt 实测）",
     pubSrc.includes("REQUIRED_STABLE_ABIS = [\"'arm64-v8a'\", \"'armeabi-v7a'\", \"'x86'\", \"'x86_64'\"]") &&
     pubSrc.includes("stable 全 ABI 核验失败"));
-  check("STP 版本注入：STABLE_VERSION_CODE/NAME 仅 debug buildType，无 -dev 后缀追加",
-    gradleSrc.includes('withBuildType("debug")') &&
+  /* PREFLIGHT_HARDENING_V1（P0-A）：stable 独立 buildType，版本注入随之迁移 */
+  check("STP 版本注入：STABLE_VERSION_CODE/NAME 走 stable buildType，无 -dev 后缀追加",
+    gradleSrc.includes('withBuildType("stable")') &&
+    !gradleSrc.includes('withBuildType("debug")') &&
     gradleSrc.includes("STABLE_VERSION_CODE") &&
     !/STABLE_VERSION_NAME[^\n]*-dev/.test(gradleSrc));
   check("STP-8~11 fail-closed：stable 复用同一 releaseApk/cospublish 状态机",
@@ -2282,6 +2293,104 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("STP dry-run：不上传、不写 latest.json（本地校验完成后即返回）",
     pubSrc.includes("args.dryRun") && pubSrc.includes("== DRY-RUN 完成 ==") &&
     pubSrc.indexOf("args.dryRun") < pubSrc.indexOf("const rel = await releaseApk"));
+
+  /* —— STP2：STABLE_RELEASE_PREFLIGHT_HARDENING_V1（P0-A/P0-B 机械门禁源码守卫） —— */
+  check("STP2-1 stable 不再引用 assembleDebug（gradleTask 与产物路径均迁移）",
+    pubSrc.includes('gradleTask: ":app:assembleStable"') &&
+    pubSrc.includes('"apk", "stable", "app-stable.apk"') &&
+    !pubSrc.includes('gradleTask: ":app:assembleDebug"'));
+  check("STP2-2 stable buildType：debuggable=false / R8 / 同签名 / 无后缀 / 全 ABI",
+    gradleSrc.includes("stable {") &&
+    /stable \{[\s\S]{0,600}?debuggable false/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?minifyEnabled true/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?shrinkResources true/.test(gradleSrc) &&
+    /stable \{[\s\S]{0,600}?signingConfig signingConfigs\.debug/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?applicationIdSuffix/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?versionNameSuffix/.test(gradleSrc) &&
+    !/stable \{[\s\S]{0,600}?abiFilters/.test(gradleSrc));
+  check("STP2-3 stable 不合并 cleartext overlay（无 src/stable 目录；overlay 仅 debug/dev）",
+    !fs.existsSync(path.join(__dirname, "android/app/src/stable")) &&
+    fs.existsSync(path.join(__dirname, "android/app/src/debug/AndroidManifest.xml")) &&
+    fs.existsSync(path.join(__dirname, "android/app/src/dev/AndroidManifest.xml")));
+  check("STP2-4 stable junit 剔除：stableRuntimeClasspath 进入排除列表",
+    gradleSrc.includes("'stableRuntimeClasspath'"));
+  check("STP2-5 stable sample 凭据注入（P0-B）：stable 块读 -PMSQ_SAMPLE_WRITE_TOKEN",
+    /stable \{[\s\S]{0,600}?findProperty\("MSQ_SAMPLE_WRITE_TOKEN"\)/.test(gradleSrc) &&
+    pubSrc.includes("-PMSQ_SAMPLE_WRITE_TOKEN=") &&
+    pubSrc.includes("App 凭据注入核验失败") &&
+    /* dex 在 APK 内压缩存储：核验必须是 zip 感知（解压后搜），非裸字节 */
+    pubSrc.includes("function apkDexContains") &&
+    pubSrc.includes("apkDexContains(apkBytes, writeToken)"));
+  check("STP2-6 secret_scan 分类：sample token 不再作 provider secret；COS/R2/private key 保留",
+    !secretScanSrc.includes('"MSQ_SAMPLE_WRITE_TOKEN", "COS_SECRET_ID"') &&
+    secretScanSrc.includes('"COS_SECRET_ID", "COS_SECRET_KEY"') &&
+    /* private key 扫描在 publisher forbidden 列表（发布期 APK 字节检查），不放松 */
+    pubSrc.includes('"BEGIN RSA PRIVATE KEY", "BEGIN PRIVATE KEY"') &&
+    pubSrc.includes("不再作为 provider secret 误判"));
+  check("STP2-7 stable 机械门禁：debuggable/cleartext 发布期实测（aapt）",
+    pubSrc.includes("application-debuggable") &&
+    pubSrc.includes("usesCleartextTraffic") &&
+    pubSrc.includes("stable 门禁失败"));
+  check("STP2-8 npm test = 统一 preflight 入口",
+    pkgSrc.includes('"test": "node tools/preflight.js"') &&
+    fs.existsSync(path.join(__dirname, "tools/preflight.js")));
+
+  /* —— BKP：Android Backup 数据隔离（STABLE_BACKUP_AND_FINAL_GATE_V1） ——
+     allowBackup=true 保留；两套 rules（6~11 fullBackupContent / 12+
+     dataExtractionRules）都排除整个 sample_queue/telemetry 目录（目录级排除，
+     未来新增文件自动覆盖）；学习记录（WebView localStorage）不受影响。 */
+  const manifestSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/AndroidManifest.xml"), "utf8");
+  const bkpRules = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/xml/backup_rules.xml"), "utf8");
+  const derRules = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/xml/data_extraction_rules.xml"), "utf8");
+  /* readFileSync 顶部 wrapper 已统一 CRLF→LF，无需再 replace */
+  const dirExcluded = (xml, tag) =>
+    xml.indexOf('<exclude domain="file" path="' + tag + '"') >= 0;
+  check("BKP-1 allowBackup=true 保留（不全局关备份）",
+    manifestSrc.includes('android:allowBackup="true"'));
+  check("BKP-2 两套 rules 已接入 manifest（6~11 fullBackupContent / 12+ dataExtractionRules）",
+    manifestSrc.includes('android:fullBackupContent="@xml/backup_rules"') &&
+    manifestSrc.includes('android:dataExtractionRules="@xml/data_extraction_rules"'));
+  check("BKP-3 Android 6~11：sample_queue 被 cloud backup 排除",
+    bkpRules.includes("<full-backup-content>") && dirExcluded(bkpRules, "sample_queue"));
+  check("BKP-4 Android 6~11：telemetry 被排除（整目录）",
+    dirExcluded(bkpRules, "telemetry"));
+  check("BKP-5 Android 12+：sample_queue 在 cloud-backup 与 device-transfer 双排除",
+    (function () {
+      const cb = bkpRules;
+      void cb;
+      const cloud = derRules.slice(derRules.indexOf("<cloud-backup>"),
+        derRules.indexOf("</cloud-backup>"));
+      const transfer = derRules.slice(derRules.indexOf("<device-transfer>"),
+        derRules.indexOf("</device-transfer>"));
+      return derRules.includes("<cloud-backup>") &&
+        derRules.includes("<device-transfer>") &&
+        dirExcluded(cloud, "sample_queue") &&
+        dirExcluded(transfer, "sample_queue");
+    })());
+  check("BKP-6 Android 12+：telemetry 在 cloud-backup 与 device-transfer 双排除",
+    (function () {
+      const cloud = derRules.slice(derRules.indexOf("<cloud-backup>"),
+        derRules.indexOf("</cloud-backup>"));
+      const transfer = derRules.slice(derRules.indexOf("<device-transfer>"),
+        derRules.indexOf("</device-transfer>"));
+      return dirExcluded(cloud, "telemetry") && dirExcluded(transfer, "telemetry");
+    })());
+  check("BKP-7 目录级排除（path=目录名，非单文件——目录新增文件自动覆盖）",
+    dirExcluded(bkpRules, "sample_queue") &&
+    bkpRules.indexOf('path="sample_queue/') < 0 &&
+    bkpRules.indexOf('path="telemetry/') < 0 &&
+    bkpRules.indexOf('path="state.json"') < 0 &&
+    derRules.indexOf('path="sample_queue"') > 0 &&
+    derRules.indexOf('path="sample_queue/') < 0);
+  check("BKP-8 排除范围不扩大（仅这两个目录；学习记录/数据库/共享偏好不受影响）",
+    (bkpRules.match(/<exclude /g) || []).length === 2 &&
+    (derRules.match(/<exclude /g) || []).length === 4);
+  check("BKP-9 发布期门禁：stable dry-run 校验 backup rules 已接入 merged manifest",
+    pubSrc.includes("backup rules 未接入 merged manifest") &&
+    pubSrc.includes("fullBackupContent"));
 }
 
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
@@ -2555,10 +2664,1057 @@ function finish() {
   if (fails.length) { console.log(`结果：${fails.length} 项未通过 -> ${fails}`); process.exit(1); }
   console.log("结果：全部通过 ✓");
 }
+
+/* ================= USAGE_TELEMETRY_V1（DATA_PLATFORM_V1，TEL-* 客户端族） =================
+   服务端 TEL-SERVER / TEL-SQLITE 在 tools/telemetry/test_telemetry.js；
+   SDB-* 在 tools/sample_db/test_sample_db.js。 */
+const MSQTelemetry = require("./www/js/telemetry.js");
+
+async function runTelemetryTests() {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const DEV64 = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
+  const TOKEN64 = "ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56";
+
+  function fakeClock(startDay) {
+    /* 起点 ≥ 30min（上传节流窗口），避免 lastUploadAttemptAt=0 干扰判定 */
+    const c = { nowMs: 10000000000, day: startDay || "2026-09-27" };
+    return {
+      clock: { now: () => c.nowMs, localDay: () => c.day },
+      c: c
+    };
+  }
+
+  function fakeTimer() {
+    /* 多 timer 版：observeSearch 的空闲 timer 与 flush scheduler 共存互不干扰；
+       fire() 触发 delay 最小的 pending（模拟时钟推进到最近到期点） */
+    let seq = 0;
+    let lastDelayVal = 0;
+    const pending = new Map();
+    return {
+      setTimeout: (fn, delay) => {
+        const id = ++seq; lastDelayVal = delay; pending.set(id, { fn: fn, delay: delay });
+        return id;
+      },
+      clearTimeout: (id) => { pending.delete(id); },
+      fire: () => {
+        if (!pending.size) { return; }
+        let bestId = null, best = null;
+        for (const [id, t2] of pending) { if (!best || t2.delay < best.delay) { best = t2; bestId = id; } }
+        pending.delete(bestId);
+        best.fn();
+      },
+      pending: () => pending.size > 0,
+      pendingCount: () => pending.size,
+      lastDelay: () => lastDelayVal
+    };
+  }
+
+  /* ACK 语义与真实服务端一致：register 返回 deviceId+deviceToken，batch 全部 accepted。
+     fail = 全通道失败；batchFail/registerFail = 仅对应通道失败。 */
+  function fakeTransport(options) {
+    const o = options || {};
+    const calls = [];
+    return {
+      calls: calls,
+      post: (url, body) => {
+        calls.push({ url: url, body: body });
+        if (o.fail) { return Promise.reject(o.fail()); }
+        if (url.endsWith("/api/telemetry/register")) {
+          if (o.registerFail) {
+            const err = o.registerFail();   /* 返回 null = 本次放行（一次性失败注入） */
+            if (err) { return Promise.reject(err); }
+          }
+          return Promise.resolve({ ok: true, deviceId: DEV64, deviceToken: TOKEN64 });
+        }
+        if (o.batchFail) {
+          const err = o.batchFail();   /* 返回 null = 本次放行（一次性失败注入） */
+          if (err) { return Promise.reject(err); }
+        }
+        return Promise.resolve({ ok: true,
+          accepted: body.batches.map((b) => b.batchId), alreadyAccepted: [] });
+      },
+      postUrls: () => calls.map((c) => c.url),
+      batchPosts: () => calls.filter((c) => c.url.endsWith("/api/telemetry/batch")),
+      registerPosts: () => calls.filter((c) => c.url.endsWith("/api/telemetry/register"))
+    };
+  }
+
+  function savedJson(saves) {
+    return saves.map((s) => JSON.stringify(s)).join("\n");
+  }
+
+  function makeCtrl(overrides) {
+    const o = overrides || {};
+    const saves = [];
+    const fc = o.clock || fakeClock();
+    const timer = o.timer || fakeTimer();
+    const transport = o.transport || fakeTransport();
+    /* DATA_PLATFORM_V1_1：有 deviceId 的种子 state 自动补 deviceToken，
+       除非用例显式构造 token 缺失/失效场景 */
+    let initialState = o.initialState || null;
+    if (initialState && initialState.deviceId && !initialState.deviceToken) {
+      initialState = Object.assign({}, initialState, { deviceToken: TOKEN64 });
+    }
+    /* 真实 prefetch 形状（TELEMETRY_APP_INFO_BRIDGE_V1）：channel 在外层、
+       包名字段叫 id —— appInfo 一律经 normalizePrefetchInfo 规范化，
+       禁止直接手写理想化 { packageName, channel } 输入 */
+    const REAL_PREFETCH = { ok: true,
+      info: { id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 },
+      channel: "dev" };
+    const ctrl = MSQTelemetry.createController({
+      storage: {
+        load: () => initialState,
+        save: (s) => { saves.push(JSON.parse(JSON.stringify(s))); }
+      },
+      clock: fc.clock,
+      setTimeout: timer.setTimeout,
+      clearTimeout: timer.clearTimeout,
+      transport: transport,
+      native: o.native === undefined
+        ? { /* 真实 Capacitor 桥接形状（TelemetryPlugin.getAndroidId resolve 对象） */
+          getAndroidId: () => Promise.resolve({ androidId: "0123456789abcdef" }) }
+        : o.native,
+      serverUrl: "https://example.test",
+      appInfo: o.appInfo === undefined
+        ? () => MSQTelemetry.normalizePrefetchInfo(REAL_PREFETCH)
+        : o.appInfo,
+      random: o.random || (() => 0.5)
+    });
+    return { ctrl: ctrl, saves: saves, timer: timer, transport: transport, fc: fc,
+      REAL_PREFETCH: REAL_PREFETCH };
+  }
+
+  /* ---------- TEL-ID：注册与缓存（服务端确定性在 test_telemetry.js） ---------- */
+  section("TEL-ID 客户端注册与 deviceId/deviceToken 缓存");
+  {
+    const env = makeCtrl({});
+    env.ctrl.attemptFlush("cold");
+    await flush();
+    check("首次注册成功 → deviceId 缓存", env.ctrl.stateSnapshot().deviceId === DEV64);
+    check("deviceToken 同步缓存（DATA_PLATFORM_V1_1）",
+      env.ctrl.stateSnapshot().deviceToken === TOKEN64);
+    check("register 恰一次", env.transport.registerPosts().length === 1);
+    env.ctrl.attemptFlush("resume");
+    await flush();
+    check("已缓存 → 不再注册", env.transport.registerPosts().length === 1);
+
+    const failEnv = makeCtrl({ transport: fakeTransport({ fail: () => new Error("net down") }) });
+    failEnv.ctrl.attemptFlush("cold");
+    await flush();
+    check("注册失败 → registerAttempts=1 且安排退避",
+      failEnv.ctrl.stateSnapshot().registerAttempts === 1 &&
+      failEnv.ctrl.stateSnapshot().registerRetryAt > failEnv.fc.c.nowMs);
+    failEnv.ctrl.attemptFlush("resume");
+    await flush();
+    check("退避窗口内不重试注册（仍只有首次失败尝试）",
+      failEnv.transport.registerPosts().length === 1);
+  }
+
+  /* ---------- TEL-BRIDGE：真桥接形状（TELEMETRY_ANDROID_ID_BRIDGE_V1） ---------- */
+  section("TEL-BRIDGE {androidId} 对象形状 / 非法形状拒绝 / outbox 恢复上传");
+  {
+    /* 真实 Capacitor 形状：getAndroidId resolve { androidId } 对象 */
+    const envOk = makeCtrl({});
+    envOk.ctrl.attemptFlush("cold");
+    await flush();
+    check("对象形状 {androidId} → 注册成功", envOk.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envOk.ctrl.stateSnapshot().deviceToken === TOKEN64);
+    check("POST body androidId = result.androidId", envOk.transport.registerPosts().length === 1 &&
+      envOk.transport.registerPosts()[0].body.androidId === "0123456789abcdef");
+    check("注册成功 → 积压 outbox 立即续传（不等 30min）",
+      envOk.transport.batchPosts().length === 0);
+
+    const envUp = makeCtrl({ native: {
+      getAndroidId: () => Promise.resolve({ androidId: "ABCDEF0123456789" }) } });
+    envUp.ctrl.attemptFlush("cold");
+    await flush();
+    check("大写 ANDROID_ID → 小写归一后上行", envUp.transport.registerPosts().length === 1 &&
+      envUp.transport.registerPosts()[0].body.androidId === "abcdef0123456789");
+
+    /* 旧 bug 形状（裸 string）必须被拒绝 —— 防止 [object Object] 回归 */
+    const envStr = makeCtrl({ native: {
+      getAndroidId: () => Promise.resolve("0123456789abcdef") } });
+    envStr.ctrl.attemptFlush("cold");
+    await flush();
+    check("裸 string 形状 → 拒绝注册（绝不上传对象字符串）",
+      envStr.transport.registerPosts().length === 0 &&
+      envStr.ctrl.stateSnapshot().registerAttempts === 1);
+    check("拒绝路径零 batch 上行", envStr.transport.batchPosts().length === 0);
+
+    for (const [label, shape] of [
+      ["15 hex", { androidId: "0123456789abcde" }],
+      ["非 hex", { androidId: "zz23456789abcdef" }],
+      ["null androidId", { androidId: null }]
+    ]) {
+      const envBad = makeCtrl({ native: { getAndroidId: () => Promise.resolve(shape) } });
+      envBad.ctrl.attemptFlush("cold");
+      await flush();
+      check("拒绝：" + label, envBad.transport.registerPosts().length === 0);
+    }
+
+    /* outbox 不丢：注册失败期冻结的批次，注册恢复后自动继续上传 */
+    let regFails = 1;
+    const envKeep = makeCtrl({ transport: fakeTransport({
+      registerFail: () => (regFails-- > 0 ? new Error("reg down") : null) }) });
+    for (let i = 0; i < 30; i++) { envKeep.ctrl.record("text_search"); }
+    await flush();
+    check("注册失败期 outbox 保留、零 batch 上行",
+      envKeep.ctrl.stateSnapshot().outbox.length === 1 &&
+      envKeep.transport.batchPosts().length === 0);
+    envKeep.fc.c.nowMs += 10 * 60000;   /* 越过 register 退避（首退 5min×jitter） */
+    envKeep.ctrl.attemptFlush("resume");
+    await flush();
+    check("注册恢复 → 自动续传积压 batch（ACK 后清空）",
+      envKeep.ctrl.stateSnapshot().outbox.length === 0 &&
+      envKeep.transport.batchPosts().length === 1 &&
+      envKeep.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envKeep.ctrl.stateSnapshot().deviceToken === TOKEN64);
+
+    /* 源码守卫：字段读取 + 16hex 校验；禁止 String(androidId) / string mock 回归 */
+    const telBridgeSrc = fs.readFileSync(path.join(__dirname, "www/js/telemetry.js"), "utf8");
+    check("telemetry.js 读取 result.androidId 并按 16 hex 校验",
+      /result && result\.androidId/.test(telBridgeSrc) &&
+      /\/\^\[0-9a-f\]\{16\}\$\/i\.test\(id\)/.test(telBridgeSrc));
+    check("telemetry.js 无 String(androidId) 旧 bug 模式",
+      !telBridgeSrc.includes("String(androidId)"));
+    check("默认 mock 为对象形状；string 形状 mock 仅允许 TEL-BRIDGE 拒绝测试一处",
+      /getAndroidId: \(\) => Promise\.resolve\(\{ androidId: "0123456789abcdef" \}\)/.test(
+        fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")) &&
+      (fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")
+        .match(/getAndroidId: \(\) => Promise\.resolve\("[^"]*"\)/g) || []).length === 1);
+  }
+
+  /* ---------- TEL-BATCH：payload 形状 / 合并上限 ---------- */
+  section("TEL-BATCH payload 形状与合并上限");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    env.ctrl.record("app_cold_start");
+    env.ctrl.record("text_search");
+    env.ctrl.record("text_search_with_results");
+    env.ctrl.observeHistogram("photo_total_ms", 2500);
+    for (let i = 0; i < 26; i++) { env.ctrl.record("app_resume"); }
+    await flush();
+    check("30 动作冻结 → 上行一次 batch POST", env.transport.batchPosts().length === 1);
+    const body = env.transport.batchPosts()[0].body;
+    check("payload 顶层 = schemaVersion/deviceId/deviceToken/batches",
+      body.schemaVersion === 1 && body.deviceId === DEV64 &&
+      body.deviceToken === TOKEN64 && Array.isArray(body.batches));
+    const b = body.batches[0];
+    const keys = Object.keys(b).sort();
+    check("batch 恰 10 个字段", JSON.stringify(keys) === JSON.stringify([
+      "batchId", "channel", "counters", "histograms", "localDay",
+      "packageName", "periodEnd", "periodStart", "versionCode", "versionName"]), keys.join(","));
+    check("元数据来自真实 prefetch 形状（id→packageName，vc=当前 DEV vc）",
+      b.versionCode === 27 && b.versionName === "1.0.27-dev" &&
+      b.channel === "dev" && b.packageName === "com.jty.safetyquiz.dev");
+    check("counters/直方图形状", b.counters.app_cold_start === 1 &&
+      b.counters.text_search === 1 && b.histograms.photo_total_ms["2000-4000"] === 1);
+    check("batchId 为 uuid v4 形态",
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(b.batchId));
+    check("localDay 来自客户端本地日", b.localDay === "2026-09-27");
+
+    /* 合并上限 20 */
+    const outbox = [];
+    for (let i = 0; i < 25; i++) {
+      const ob = {
+        batchId: "a1b2c3d4-0000-4000-8000-" + String(i).padStart(12, "0"),
+        localDay: "2026-09-27", periodStart: 1, periodEnd: 2, counters: { app_resume: 1 },
+        histograms: {}
+      };
+      outbox.push(ob);
+    }
+    const env2 = makeCtrl({ initialState: { deviceId: DEV64, outbox: outbox } });
+    env2.ctrl.attemptFlush("cold");
+    await flush();
+    check("outbox 25 → 单次 POST 只带 20 个", env2.transport.batchPosts().length === 1 &&
+      env2.transport.batchPosts()[0].body.batches.length === 20);
+    check("ACK 后剩余 5 且安排 60s 排空标记", env2.ctrl.stateSnapshot().outbox.length === 5 &&
+      env2.ctrl.stateSnapshot().nextRetryAt === env2.fc.c.nowMs + 60000);
+    /* SCHEDULER_RETRY_GATE_V1：长尾排空服从统一时间门 —— 60s 标记被 30min 节流
+       压住，61s 时零 POST；到 nextAttemptAt = 上传尝试+30min 才排空 */
+    env2.fc.c.nowMs += 61000;
+    env2.ctrl.attemptFlush("drain");
+    await flush();
+    check("统一门：60s 标记不绕过 30min 节流（零 POST）",
+      env2.transport.batchPosts().length === 1 &&
+      env2.ctrl.stateSnapshot().outbox.length === 5);
+    env2.fc.c.nowMs = env2.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env2.ctrl.attemptFlush("drain");
+    await flush();
+    check("统一门到期排空长尾（ACK 才删除）", env2.ctrl.stateSnapshot().outbox.length === 0);
+    check("MSQTelemetry.MAX_BODY_BYTES = 128KiB", MSQTelemetry.MAX_BODY_BYTES === 128 * 1024);
+  }
+
+  /* ---------- TEL-OUTBOX：三冻结条件 / 重启恢复 / 上限 ---------- */
+  section("TEL-OUTBOX 30 动作 / 6h / 跨日冻结，重启恢复，ACK 删除");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    let st = env.ctrl.stateSnapshot();
+    check("30 动作 → 冻结 1 个 batch，新桶归零", st.outbox.length === 1 &&
+      st.currentBucket.meaningfulActionCount === 0);
+
+    const env6h = makeCtrl({ initialState: { deviceId: DEV64 } });
+    env6h.ctrl.record("text_search");
+    env6h.fc.c.nowMs += 6 * 3600000 + 1;
+    env6h.ctrl.record("text_search");
+    st = env6h.ctrl.stateSnapshot();
+    check("6h 桶龄 → 冻结", st.outbox.length === 1 &&
+      st.currentBucket.meaningfulActionCount === 0 && st.currentBucket.periodStart > 0);
+
+    const envDay = makeCtrl({ initialState: { deviceId: DEV64 } });
+    envDay.ctrl.record("text_search");
+    envDay.fc.c.day = "2026-09-28";
+    envDay.ctrl.record("text_search");
+    st = envDay.ctrl.stateSnapshot();
+    check("本地跨日 → 冻结", st.outbox.length === 1 &&
+      st.currentBucket.localDay === "2026-09-28");
+
+    /* 重启恢复：deviceId 缓存生效（不再注册），恢复后直接 batch 上传，ACK → outbox 删除 */
+    const envKeep2 = makeCtrl({
+      initialState: { deviceId: DEV64, outbox: [
+        { batchId: "a1b2c3d4-0000-4000-8000-0000000000c1", localDay: "2026-09-27",
+          periodStart: 1, periodEnd: 2, counters: { text_search: 5 }, histograms: {} }
+      ] },
+      native: { getAndroidId: () => { throw new Error("should not be called"); } }
+    });
+    envKeep2.ctrl.attemptFlush("resume");
+    await flush();
+    check("重启后直接 batch 上传（零注册）", envKeep2.transport.registerPosts().length === 0 &&
+      envKeep2.transport.batchPosts().length === 1);
+    check("ACK → outbox 删除", envKeep2.ctrl.stateSnapshot().outbox.length === 0);
+
+    /* outbox 上限 120 */
+    const many = [];
+    for (let i = 0; i < 130; i++) {
+      many.push({ batchId: "a1b2c3d4-0000-4000-8000-" + String(i).padStart(12, "0"),
+        localDay: "2026-09-27", periodStart: 1, periodEnd: 2, counters: {}, histograms: {} });
+    }
+    const envCap = makeCtrl({ initialState: { deviceId: DEV64, outbox: many } });
+    check("outbox 上限 120（超限丢最老）", envCap.ctrl.stateSnapshot().outbox.length === 120);
+  }
+
+  /* ---------- TEL-FLUSH：30min 节流 / 触发点 / 排空 ---------- */
+  section("TEL-FLUSH 30min 最小间隔与触发点");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    /* t0：先完成一次真实上传，确立 lastUploadAttemptAt 基线 */
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("首次冻结正常上传", env.transport.batchPosts().length === 1);
+    const t0 = env.fc.c.nowMs;
+    env.fc.c.nowMs = t0 + 10 * 60000;
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("距上次上传 <30min → 冻结但不 POST", env.transport.batchPosts().length === 1 &&
+      env.ctrl.stateSnapshot().outbox.length === 1);
+    env.fc.c.nowMs = t0 + 31 * 60000;
+    env.ctrl.attemptFlush("resume");
+    await flush();
+    check(">30min → 正常上传（ACK 后 outbox 清空）", env.transport.batchPosts().length === 2 &&
+      env.ctrl.stateSnapshot().outbox.length === 0);
+
+    const emptyEnv = makeCtrl({});
+    emptyEnv.ctrl.onColdStart();
+    emptyEnv.ctrl.onAppResume();
+    await flush();
+    check("无 deviceId → 只有 register 尝试（无 batch POST）",
+      emptyEnv.transport.batchPosts().length === 0 &&
+      emptyEnv.transport.registerPosts().length === 1);
+  }
+
+  /* ---------- TEL-RETRY：退避表 / jitter / 400 语义 ---------- */
+  section("TEL-RETRY 退避表与 jitter 界");
+  {
+    const rand05 = () => 0.5;
+    check("退避 = 5min/30min/2h/6h/24h（jitter=1.0）",
+      MSQTelemetry.backoffMs(1, rand05) === 300000 &&
+      MSQTelemetry.backoffMs(2, rand05) === 1800000 &&
+      MSQTelemetry.backoffMs(3, rand05) === 7200000 &&
+      MSQTelemetry.backoffMs(4, rand05) === 21600000 &&
+      MSQTelemetry.backoffMs(9, rand05) === 86400000 &&
+      MSQTelemetry.backoffMs(99, rand05) === 86400000);
+    check("jitter 下界 0.8× / 上界 1.2×",
+      MSQTelemetry.backoffMs(1, () => 0) === 240000 &&
+      MSQTelemetry.backoffMs(1, () => 1) === 360000);
+
+    let gateFails = 1;   /* 首次 batch POST 失败，其后放行 */
+    const env = makeCtrl({
+      initialState: { deviceId: DEV64 },
+      transport: fakeTransport({ batchFail: () => (gateFails-- > 0 ? new Error("down") : null) })
+    });
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("网络失败 → 数据留 outbox + 退避", env.ctrl.stateSnapshot().outbox.length === 1 &&
+      env.ctrl.stateSnapshot().flushAttempts === 1 &&
+      env.ctrl.stateSnapshot().nextRetryAt > env.fc.c.nowMs);
+    check("最近结果记录失败原因", env.ctrl.stateSnapshot().lastFlushResult === "network error");
+    /* SCHEDULER_RETRY_GATE_V1：5min retryAt 不再绕过 30min 节流 —— 统一到
+       nextAttemptAt = max(throttleAt, retryAt) = 失败时刻+30min 才重试 */
+    const failAt = env.ctrl.stateSnapshot().lastUploadAttemptAt;
+    env.fc.c.nowMs = env.ctrl.stateSnapshot().nextRetryAt + 1;
+    env.ctrl.attemptFlush("retry-due");
+    await flush();
+    check("统一门：5min retryAt 被节流压住（30min 前零 POST）",
+      env.transport.batchPosts().length === 1 &&
+      env.ctrl.stateSnapshot().outbox.length === 1 &&
+      env.timer.pendingCount() === 1);
+    env.fc.c.nowMs = failAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env.timer.fire();
+    await flush();
+    check("统一门到期（30min）timer 自动重试成功", env.transport.batchPosts().length === 2 &&
+      env.ctrl.stateSnapshot().outbox.length === 0);
+
+    /* 成功 → attempts 归零 */
+    const envOk = makeCtrl({ initialState: { deviceId: DEV64 } });
+    for (let i = 0; i < 30; i++) { envOk.ctrl.record("text_search"); }
+    await flush();
+    check("成功 → flushAttempts=0 / nextRetryAt=0",
+      envOk.ctrl.stateSnapshot().flushAttempts === 0 &&
+      envOk.ctrl.stateSnapshot().nextRetryAt === 0);
+
+    /* 400 + rejected 明细 → 只丢被拒批次，不进退避循环 */
+    const bA = "a1b2c3d4-0000-4000-8000-00000000000a";
+    const bB = "a1b2c3d4-0000-4000-8000-00000000000b";
+    const seed = { deviceId: DEV64, outbox: [
+      { batchId: bA, localDay: "2026-09-27", periodStart: 1, periodEnd: 2,
+        counters: { app_resume: 1 }, histograms: {} },
+      { batchId: bB, localDay: "2026-09-27", periodStart: 3, periodEnd: 4,
+        counters: { text_search: 2 }, histograms: {} }
+    ] };
+    const env400 = makeCtrl({
+      initialState: seed,
+      transport: fakeTransport({ fail: () => Object.assign(new Error("HTTP 400"),
+        { status: 400, rejected: [{ batchId: bA, error: "unknown counter metric" }] }) })
+    });
+    env400.ctrl.attemptFlush("cold");
+    await flush();
+    const st400 = env400.ctrl.stateSnapshot();
+    check("400 → 只丢被拒批次（B2 保留）", st400.outbox.length === 1 &&
+      st400.outbox[0].batchId === bB);
+    check("400 不进退避（60s 排空）", st400.nextRetryAt === st400.lastUploadAttemptAt + 60000);
+    check("telemetry_upload_error 计入当前桶",
+      st400.currentBucket.counters.telemetry_upload_error === 1);
+
+    const env400b = makeCtrl({
+      initialState: JSON.parse(JSON.stringify(seed)),
+      transport: fakeTransport({ fail: () => Object.assign(new Error("HTTP 400"), { status: 400 }) })
+    });
+    env400b.ctrl.attemptFlush("cold");
+    await flush();
+    check("400 无明细 → 丢弃本次发送全部批次（防毒循环）",
+      env400b.ctrl.stateSnapshot().outbox.length === 0);
+
+    /* 503 / 404 → 可重试不丢数据 */
+    for (const status of [503, 404]) {
+      const envX = makeCtrl({
+        initialState: JSON.parse(JSON.stringify(seed)),
+        transport: fakeTransport({ fail: () => Object.assign(new Error("HTTP " + status), { status: status }) })
+      });
+      envX.ctrl.attemptFlush("cold");
+      await flush();
+      check("HTTP " + status + " → 数据保留 + 退避", envX.ctrl.stateSnapshot().outbox.length === 2 &&
+        envX.ctrl.stateSnapshot().flushAttempts === 1);
+    }
+
+    /* DATA_PLATFORM_V1_1：401/403 → 凭据清除 + 重新注册退避，outbox 保留 */
+    for (const status of [401, 403]) {
+      const envAuth = makeCtrl({
+        initialState: JSON.parse(JSON.stringify(seed)),
+        transport: fakeTransport({
+          batchFail: () => Object.assign(new Error("HTTP " + status), { status: status })
+        })
+      });
+      envAuth.ctrl.attemptFlush("cold");
+      await flush();
+      const stAuth = envAuth.ctrl.stateSnapshot();
+      check("HTTP " + status + " → deviceId/deviceToken 清空，outbox 保留",
+        stAuth.deviceId === null && stAuth.deviceToken === null &&
+        stAuth.outbox.length === 2);
+      check("HTTP " + status + " → 安排 register 退避",
+        stAuth.registerAttempts === 1 && stAuth.registerRetryAt > stAuth.lastUploadAttemptAt);
+      /* 退避窗口内不重试注册；到期后重新注册拿新凭据 */
+      envAuth.fc.c.nowMs = stAuth.registerRetryAt + 1;
+      envAuth.ctrl.attemptFlush("resume");
+      await flush();
+      check("HTTP " + status + " → 到期重新注册并恢复凭据",
+        envAuth.ctrl.stateSnapshot().deviceId === DEV64 &&
+        envAuth.ctrl.stateSnapshot().deviceToken === TOKEN64);
+    }
+  }
+
+  /* ---------- TEL-APPINFO：prefetch 真实形状规范化（TELEMETRY_APP_INFO_BRIDGE_V1） ---------- */
+  section("TEL-APPINFO {info:{id,…},channel} 规范化 / 坏元数据不上传 / outbox 保留");
+  {
+    /* 真实 prefetch 形状 → withMeta 契约形状 */
+    const nf = MSQTelemetry.normalizePrefetchInfo({ ok: true,
+      info: { id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 },
+      channel: "dev" });
+    check("normalizePrefetchInfo：id→packageName、r.channel→channel",
+      nf.packageName === "com.jty.safetyquiz.dev" && nf.channel === "dev" &&
+      nf.versionName === "1.0.27-dev" && nf.versionCode === 27);
+    check("normalizePrefetchInfo：r.channel 缺失 → 包名推导回退",
+      MSQTelemetry.normalizePrefetchInfo({ info: {
+        id: "com.jty.safetyquiz.dev", versionName: "1.0.27-dev", versionCode: 27 }
+      }).channel === "dev");
+    for (const [label, shape] of [
+      ["无 info", {}],
+      ["包名不在白名单", { info: { id: "com.other.app", versionName: "x", versionCode: 1 } }],
+      ["versionCode 缺失", { info: { id: "com.jty.safetyquiz.dev", versionName: "x" } }]
+    ]) {
+      check("normalizePrefetchInfo 拒绝：" + label,
+        MSQTelemetry.normalizePrefetchInfo(shape) === null);
+    }
+    check("validAppInfo 拒绝旧 bug 形状（packageName=undefined → String 化）",
+      MSQTelemetry.validAppInfo({ versionCode: 24, versionName: "1.0.24-dev" }) === false &&
+      MSQTelemetry.validAppInfo({
+        packageName: "com.jty.safetyquiz.dev", channel: "dev",
+        versionName: "1.0.27-dev", versionCode: 27 }) === true);
+
+    /* 真 bug 重演：理想化/透传形状的 appInfo → 绝不出网，outbox 保留 */
+    const seedOut = { deviceId: DEV64, deviceToken: TOKEN64, outbox: [
+      { batchId: "a1b2c3d4-0000-4000-8000-0000000000e1", localDay: "2026-09-28",
+        periodStart: 1, periodEnd: 2, counters: { text_search: 1 }, histograms: {} }] };
+    const envBad = makeCtrl({
+      initialState: JSON.parse(JSON.stringify(seedOut)),
+      appInfo: () => ({ versionCode: 27, versionName: "1.0.27-dev", channel: "dev",
+        packageName: undefined })
+    });
+    envBad.ctrl.attemptFlush("cold");
+    await flush();
+    check("坏元数据 → 零 batch 上行，outbox 保留（防自伤式丢弃）",
+      envBad.transport.batchPosts().length === 0 &&
+      envBad.ctrl.stateSnapshot().outbox.length === 1);
+    check("坏元数据 → 诊断结果标记 bad app metadata",
+      envBad.ctrl.stateSnapshot().lastFlushResult === "bad app metadata");
+    check("坏元数据 → 不进退避循环（nextRetryAt 不变）",
+      envBad.ctrl.stateSnapshot().nextRetryAt === 0);
+
+    /* 修复后（真实形状 appInfo）共享同一 state → 自动恢复上传 */
+    const envFixed = makeCtrl({ initialState: envBad.ctrl.stateSnapshot() });
+    envFixed.ctrl.attemptFlush("resume");
+    await flush();
+    check("元数据修复 → 同一 outbox 自动上传（ACK 后清空）",
+      envFixed.transport.batchPosts().length === 1 &&
+      envFixed.ctrl.stateSnapshot().outbox.length === 0);
+    const sentBody = envFixed.transport.batchPosts()[0].body;
+    check("最终 batch 元数据：packageName=com.jty.safetyquiz.dev / channel=dev / versionCode=27",
+      sentBody.deviceId === DEV64 &&
+      sentBody.batches[0].packageName === "com.jty.safetyquiz.dev" &&
+      sentBody.batches[0].channel === "dev" &&
+      sentBody.batches[0].versionCode === 27);
+
+    /* 源码守卫：app.js 接线必须经 normalizePrefetchInfo，禁止直接透传 r.info */
+    const appInfoSrc = fs.readFileSync(path.join(__dirname, "www/js/app.js"), "utf8");
+    check("app.js Telemetry 接线经 normalizePrefetchInfo",
+      /MSQTelemetry\.normalizePrefetchInfo\(r\)/.test(appInfoSrc) &&
+      !appInfoSrc.includes("telemetryAppInfo = (r && r.info) ? r.info : null"));
+    check("test_core appInfo mock 均经真实 prefetch 形状或显式坏形状（无理想化直写默认）",
+      !/appInfo: o\.appInfo === undefined\s*\?\s*\(\) => \(\{ versionCode/.test(
+        fs.readFileSync(path.join(__dirname, "test_core.js"), "utf8")));
+  }
+
+  /* ---------- TEL-SCHED：节流 scheduler（TELEMETRY_FLUSH_SCHEDULER_V1） ---------- */
+  section("TEL-SCHED 30min 到期 timer 自动 POST（唯一/可取消/无需 resume）");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("首次上传成功（节流时钟基线）", env.transport.batchPosts().length === 1);
+    const t0 = env.fc.c.nowMs;
+
+    /* 节流窗口内冻结：零 POST、outbox 保留、scheduler 已排定 */
+    env.fc.c.nowMs = t0 + 10 * 60000;
+    for (let i = 0; i < 30; i++) { env.ctrl.record("text_search"); }
+    await flush();
+    check("throttle 内零 POST（outbox 完整保留）", env.transport.batchPosts().length === 1 &&
+      env.ctrl.stateSnapshot().outbox.length === 1);
+    check("被节流阻挡时已安排自动重试 timer", env.timer.pendingCount() === 1);
+    check("节流内诊断 uploadState = 等待节流",
+      env.ctrl.diagnostics().uploadState === "等待节流");
+    check("诊断含上次上传尝试 / 下次允许上传",
+      env.ctrl.diagnostics().lastUploadAttemptAt === t0 &&
+      env.ctrl.diagnostics().nextEligibleAt === t0 + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS);
+
+    /* 唯一性：任意触发点进入节流分支复用同一 timer，不重复创建 */
+    env.ctrl.attemptFlush("resume");
+    await flush();
+    env.ctrl.onAppResume();
+    await flush();
+    check("重复触发（resume/显式）不重复创建 timer", env.timer.pendingCount() === 1);
+    check("resume/cold-start 不绕过 30min 限制（零 POST）",
+      env.transport.batchPosts().length === 1 && env.ctrl.stateSnapshot().outbox.length === 1);
+
+    /* 到期：无需任何 resume/freeze，timer 自动 POST → ACK 清 outbox → timer 取消 */
+    env.fc.c.nowMs = t0 + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    env.timer.fire();
+    await flush();
+    check("30min timer 到期自动 POST", env.transport.batchPosts().length === 2);
+    check("ACK → outbox 清空、scheduler 取消", env.ctrl.stateSnapshot().outbox.length === 0 &&
+      env.timer.pendingCount() === 0);
+    check("清空后诊断 uploadState = 可上传", env.ctrl.diagnostics().uploadState === "可上传");
+
+    /* 等待重试状态优先于等待节流：网络失败退避期间诊断显示等待重试 */
+    const envRetry = makeCtrl({
+      initialState: { deviceId: DEV64 },
+      transport: fakeTransport({ batchFail: () => new Error("down") })
+    });
+    for (let i = 0; i < 30; i++) { envRetry.ctrl.record("text_search"); }
+    await flush();
+    check("失败退避中诊断 uploadState = 等待重试",
+      envRetry.ctrl.diagnostics().uploadState === "等待重试");
+    /* outbox 保留（scheduler 修复不改变失败保留语义） */
+    check("退避中 outbox 保留", envRetry.ctrl.stateSnapshot().outbox.length === 1);
+  }
+
+  /* ---------- TEL-GATE：统一时间门（TELEMETRY_SCHEDULER_RETRY_GATE_V1） ----------
+     nextAttemptAt = max(throttleAt, retryAt)，两个绕过方向全部堵死。 */
+  section("TEL-GATE retry=5min+throttle=30min → 30min；retry=2h+throttle=30min → 2h");
+  {
+    const seed1 = (retryAt) => ({
+      deviceId: DEV64, deviceToken: TOKEN64,
+      lastUploadAttemptAt: 10000000000,   /* 失败/上传尝试时刻 T_FAIL */
+      nextRetryAt: retryAt, flushAttempts: retryAt ? 1 : 0,
+      outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000000f1",
+        localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+        counters: { text_search: 1 }, histograms: {} }]
+    });
+    const T_FAIL = 10000000000;
+    const THROTTLE_AT = T_FAIL + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+
+    /* 场景 A：retry=5min + throttle=30min → 30min 才上传（5min 时零 POST） */
+    const envA = makeCtrl({ initialState: seed1(T_FAIL + 5 * 60000) });
+    envA.fc.c.nowMs = T_FAIL + 5 * 60000;
+    envA.ctrl.attemptFlush("retry-due");
+    await flush();
+    check("A: retryAt=5min 到期但被 30min 门压住（零 POST、outbox 保留）",
+      envA.transport.batchPosts().length === 0 &&
+      envA.ctrl.stateSnapshot().outbox.length === 1 &&
+      envA.timer.pendingCount() === 1);
+    envA.fc.c.nowMs = THROTTLE_AT;
+    envA.timer.fire();
+    await flush();
+    check("A: 30min 门到期 timer 自动上传（无需 resume，ACK 后清空取消）",
+      envA.transport.batchPosts().length === 1 &&
+      envA.ctrl.stateSnapshot().outbox.length === 0 &&
+      envA.timer.pendingCount() === 0);
+
+    /* 场景 B：retry=2h + throttle=30min → 2h 才上传（30min 到期不绕过 backoff） */
+    const envB = makeCtrl({ initialState: seed1(T_FAIL + 2 * 3600000) });
+    envB.fc.c.nowMs = THROTTLE_AT;
+    envB.ctrl.attemptFlush("throttle-due");
+    await flush();
+    check("B: 30min 节流到期但不绕过 2h retry backoff（零 POST、outbox 保留）",
+      envB.transport.batchPosts().length === 0 &&
+      envB.ctrl.stateSnapshot().outbox.length === 1 &&
+      envB.timer.pendingCount() === 1);
+    envB.fc.c.nowMs = T_FAIL + 2 * 3600000;
+    envB.timer.fire();
+    await flush();
+    check("B: 2h backoff 到期 timer 自动上传（ACK 后清空取消）",
+      envB.transport.batchPosts().length === 1 &&
+      envB.ctrl.stateSnapshot().outbox.length === 0 &&
+      envB.timer.pendingCount() === 0);
+
+    /* timer 唯一：gate 分支反复触发复用同一 timer；且新退避推远门后照常尊重 */
+    let cFails = 1;   /* 2h 到期的那次尝试失败，其后放行 */
+    const envC = makeCtrl({
+      initialState: seed1(T_FAIL + 2 * 3600000),
+      transport: fakeTransport({ batchFail: () => (cFails-- > 0 ? new Error("down") : null) })
+    });
+    envC.ctrl.attemptFlush("a");
+    envC.ctrl.attemptFlush("b");
+    envC.ctrl.onAppResume();
+    await flush();
+    check("C: 多触发点下 scheduler 唯一", envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000;
+    envC.timer.fire();   /* 旧门到期：尝试失败 → 退避推远 nextRetryAt */
+    await flush();
+    { const stC = envC.ctrl.stateSnapshot();
+    check("C: 2h 到期尝试失败 → 新退避（flushAttempts=2 → 30min）",
+      envC.transport.batchPosts().length === 1 &&
+      stC.flushAttempts === 2 &&
+      stC.nextRetryAt === T_FAIL + 2 * 3600000 + 30 * 60000,
+      "posts=" + envC.transport.batchPosts().length + " attempts=" + stC.flushAttempts +
+      " nextRetryAt=" + stC.nextRetryAt + " last=" + stC.lastFlushResult); }
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000 + 5 * 60000;
+    envC.ctrl.attemptFlush("early");
+    await flush();
+    check("C: 新退避被统一门尊重（5min 后零新 POST、timer 唯一）",
+      envC.transport.batchPosts().length === 1 &&
+      envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = T_FAIL + 2 * 3600000 + 30 * 60000;
+    envC.timer.fire();
+    await flush();
+    check("C: 新退避到期 timer 自动重试成功（ACK 清空取消）",
+      envC.transport.batchPosts().length === 2 &&
+      envC.ctrl.stateSnapshot().outbox.length === 0 &&
+      envC.timer.pendingCount() === 0);
+  }
+
+  /* ---------- TEL-REARM：异步完成路径自动重挂 scheduler（SCHEDULER_REARM_V1） ----------
+     核心断言：所有完成回调之后零外部触发，仅推进时钟 + timer.fire() 即自动续传。 */
+  section("TEL-REARM 失败/长尾/400部分/401-403/register 全路径自动恢复");
+  {
+    /* A. retryable 网络失败 → backoff 落库 → 零外部触发自动重试成功 */
+    let aFails = 1;
+    const envA = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: fakeTransport({ batchFail: () => (aFails-- > 0 ? new Error("down") : null) })
+    });
+    for (let i = 0; i < 30; i++) { envA.ctrl.record("text_search"); }
+    await flush();
+    check("A: 失败后自动 re-arm（零外部触发，timer 已挂）",
+      envA.ctrl.stateSnapshot().outbox.length === 1 && envA.timer.pendingCount() === 1);
+    envA.fc.c.nowMs = Math.max(
+      envA.ctrl.stateSnapshot().lastUploadAttemptAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS,
+      envA.ctrl.stateSnapshot().nextRetryAt);
+    envA.timer.fire();
+    await flush();
+    check("A: 到点自动重试成功（ACK 清空、timer 归零）",
+      envA.transport.batchPosts().length === 2 &&
+      envA.ctrl.stateSnapshot().outbox.length === 0 &&
+      envA.timer.pendingCount() === 0);
+
+    /* B. >20 batches：首批成功后剩余自动续传（30min 统一门） */
+    const longOutbox = [];
+    for (let i = 0; i < 25; i++) {
+      longOutbox.push({ batchId: "a1b2c3d4-0000-4000-8000-" + String(i).padStart(12, "0"),
+        localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+        counters: { app_resume: 1 }, histograms: {} });
+    }
+    const envB = makeCtrl({ initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+      outbox: longOutbox } });
+    envB.ctrl.attemptFlush("cold");
+    await flush();
+    check("B: 首批 20 上传后自动 re-arm（timer 唯一）",
+      envB.transport.batchPosts().length === 1 && envB.timer.pendingCount() === 1);
+    envB.fc.c.nowMs = envB.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    envB.timer.fire();
+    await flush();
+    check("B: 长尾自动续传（剩余 5 全部 ACK、timer 归零）",
+      envB.transport.batchPosts().length === 2 &&
+      envB.ctrl.stateSnapshot().outbox.length === 0 &&
+      envB.timer.pendingCount() === 0);
+
+    /* C. 400 部分 rejected：被拒批次删除，剩余合法 batch 自动续传 */
+    const bA = "a1b2c3d4-0000-4000-8000-00000000010a";
+    const bB = "a1b2c3d4-0000-4000-8000-00000000010b";
+    const pastAttempt = 10000000000 - 40 * 60000;   /* 上次尝试在 40min 前：门已到 */
+    let cFails400 = 1;
+    const envC = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        lastUploadAttemptAt: pastAttempt,
+        outbox: [
+          { batchId: bA, localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+            counters: { app_resume: 1 }, histograms: {} },
+          { batchId: bB, localDay: "2026-09-28", periodStart: 3, periodEnd: 4,
+            counters: { text_search: 2 }, histograms: {} }] },
+      transport: fakeTransport({ batchFail: () => (cFails400-- > 0
+        ? Object.assign(new Error("HTTP 400"),
+          { status: 400, rejected: [{ batchId: bA, error: "unknown counter metric" }] })
+        : null) })
+    });
+    envC.ctrl.attemptFlush("cold");
+    await flush();
+    check("C: 400 partial → 被拒批次删除、合法批次保留",
+      envC.ctrl.stateSnapshot().outbox.length === 1 &&
+      envC.ctrl.stateSnapshot().outbox[0].batchId === bB);
+    check("C: 400 后自动 re-arm（timer 唯一）", envC.timer.pendingCount() === 1);
+    envC.fc.c.nowMs = Math.max(
+      envC.ctrl.stateSnapshot().lastUploadAttemptAt + MSQTelemetry.MIN_UPLOAD_INTERVAL_MS,
+      envC.ctrl.stateSnapshot().nextRetryAt);
+    envC.timer.fire();
+    await flush();
+    check("C: 剩余合法批次自动续传成功（ACK 清空、timer 归零）",
+      envC.transport.batchPosts().length === 2 &&
+      envC.ctrl.stateSnapshot().outbox.length === 0 &&
+      envC.timer.pendingCount() === 0);
+
+    /* D. register 失败 → registerRetryAt 到点自动重注册（零外部触发） */
+    let dRegFails = 1;
+    const envD = makeCtrl({
+      transport: fakeTransport({ registerFail: () => (dRegFails-- > 0
+        ? new Error("reg down") : null) })
+    });
+    envD.ctrl.attemptFlush("cold");
+    await flush();
+    check("D: 注册失败后自动 re-arm register timer（零外部触发）",
+      envD.ctrl.stateSnapshot().deviceId === null && envD.timer.pendingCount() === 1);
+    envD.fc.c.nowMs = envD.ctrl.stateSnapshot().registerRetryAt;
+    envD.timer.fire();
+    await flush();
+    check("D: 到点自动重注册成功并恢复凭据",
+      envD.ctrl.stateSnapshot().deviceId === DEV64 &&
+      envD.ctrl.stateSnapshot().deviceToken === TOKEN64 &&
+      envD.transport.registerPosts().length === 2);
+
+    /* E. 401/403 token 失效 → 清凭据 → registerRetryAt 到点自动恢复 */
+    let eBatch403 = 1;
+    const envE = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000001e1",
+          localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+          counters: { text_search: 1 }, histograms: {} }] },
+      transport: fakeTransport({ batchFail: () => (eBatch403-- > 0
+        ? Object.assign(new Error("HTTP 403"), { status: 403 }) : null) })
+    });
+    envE.ctrl.attemptFlush("cold");
+    await flush();
+    check("E: 403 → 清凭据 + 自动 re-arm register timer（零外部触发）",
+      envE.ctrl.stateSnapshot().deviceId === null &&
+      envE.ctrl.stateSnapshot().outbox.length === 1 &&
+      envE.timer.pendingCount() === 1);
+    envE.fc.c.nowMs = envE.ctrl.stateSnapshot().registerRetryAt;
+    envE.timer.fire();
+    await flush();
+    { const stE = envE.ctrl.stateSnapshot();
+    check("E: 到点自动重注册成功（凭据恢复；outbox 仍被 30min 节流压住——不绕过）",
+      stE.deviceId === DEV64 &&
+      stE.deviceToken === TOKEN64 &&
+      envE.transport.registerPosts().length === 1 &&
+      stE.outbox.length === 1 &&
+      envE.timer.pendingCount() === 1,
+      "deviceId=" + (stE.deviceId === DEV64 ? "ok" : stE.deviceId) +
+      " regPosts=" + envE.transport.registerPosts().length +
+      " outbox=" + stE.outbox.length + " pending=" + envE.timer.pendingCount() +
+      " last=" + stE.lastFlushResult + " now=" + envE.fc.c.nowMs +
+      " regRetryAt=" + stE.registerRetryAt); }
+    envE.fc.c.nowMs = envE.ctrl.stateSnapshot().lastUploadAttemptAt +
+      MSQTelemetry.MIN_UPLOAD_INTERVAL_MS;
+    envE.timer.fire();
+    await flush();
+    check("E: 节流到期自动上传积压 outbox（全链路无人值守恢复）",
+      envE.ctrl.stateSnapshot().outbox.length === 0 &&
+      envE.transport.batchPosts().length === 2 &&
+      envE.timer.pendingCount() === 0);
+
+    /* F. 诊断状态：无凭据期显示 等待注册 */
+    const envF = makeCtrl({});
+    check("F: 无凭据期诊断 uploadState = 等待注册",
+      envF.ctrl.diagnostics().uploadState === "等待注册");
+  }
+
+  /* ---------- TELE-DASH：adminSummary + 缓存（IN_APP_TELEMETRY_DASHBOARD_V1） ---------- */
+  section("TELE-DASH adminSummary 内部凭据 / 10min 缓存 / 源码守卫");
+  {
+    /* adminSummary：内部读取 deviceId/deviceToken，days 透传，响应解包 resp.report */
+    const dashCalls = [];
+    const env = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: { post: (url, body) => {
+        dashCalls.push({ url: url, body: body });
+        return Promise.resolve({ ok: true, report: { dau: 3, windowDays: body.days } });
+      } }
+    });
+    const rep = await new Promise(function (resolve, reject) {
+      env.ctrl.adminSummary(7).then(resolve, reject);
+    });
+    check("adminSummary 请求 admin endpoint 且携带内部凭据",
+      dashCalls.length === 1 &&
+      dashCalls[0].url.endsWith("/api/telemetry/admin/summary") &&
+      dashCalls[0].body.deviceId === DEV64 &&
+      dashCalls[0].body.deviceToken === TOKEN64 &&
+      dashCalls[0].body.days === 7);
+    check("adminSummary 解包 resp.report", rep.dau === 3 && rep.windowDays === 7);
+
+    const envNoCred = makeCtrl({});
+    const noCred = await envNoCred.ctrl.adminSummary(7).then(function () { return "ok"; },
+      function (e) { return e && e.message; });
+    check("未注册 → adminSummary 拒绝（不发起请求）",
+      noCred === "not-registered" && dashCalls.length === 1);
+    const envBad = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64 },
+      transport: { post: () => Promise.resolve({ ok: false }) }
+    });
+    const badResp = await envBad.ctrl.adminSummary(7).then(function () { return "ok"; },
+      function (e) { return e && e.message; });
+    check("非 ok 响应 → 拒绝", badResp === "bad-summary-response");
+
+    /* 缓存：10min TTL、按 days 分键、损坏 store 容错 */
+    const memStore = (function () { const m = {}; return {
+      getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = v; } }; })();
+    check("空缓存 → null", MSQTelemetry.loadDashboardCache(memStore, 7) === null);
+    MSQTelemetry.saveDashboardCache(memStore, 7, { dau: 5 });
+    MSQTelemetry.saveDashboardCache(memStore, 30, { dau: 9 });
+    const c7 = MSQTelemetry.loadDashboardCache(memStore, 7);
+    const c30 = MSQTelemetry.loadDashboardCache(memStore, 30);
+    check("缓存按 days 分键读取", c7 && c7.report.dau === 5 && c30 && c30.report.dau === 9);
+    check("新鲜缓存 ageMs < 10min", MSQTelemetry.isDashboardCacheFresh(c7.ageMs) &&
+      c7.ageMs < MSQTelemetry.DASH_CACHE_TTL_MS);
+    check("DASH_CACHE_TTL_MS = 10min", MSQTelemetry.DASH_CACHE_TTL_MS === 600000);
+    const staleEntry = { reports: { "7": { savedAt: Date.now() - 11 * 60000, report: { dau: 1 } } } };
+    const staleStore = { getItem: () => JSON.stringify(staleEntry), setItem: () => {} };
+    const staleC = MSQTelemetry.loadDashboardCache(staleStore, 7);
+    check("过期缓存仍可读但 isDashboardCacheFresh=false",
+      staleC && !MSQTelemetry.isDashboardCacheFresh(staleC.ageMs));
+    const badStore = { getItem: () => "{corrupted", setItem: () => { throw new Error("x"); } };
+    check("损坏缓存读取 → null（不抛出）",
+      MSQTelemetry.loadDashboardCache(badStore, 7) === null &&
+      MSQTelemetry.saveDashboardCache(badStore, 7, {}) === false);
+
+    /* 源码守卫：token 不进 UI 层；adminSummary 无日志面 */
+    check("app.js 不出现 deviceToken（token 只在 MSQTelemetry 内部）",
+      !appSrc.includes("deviceToken"));
+    check("telemetry.js adminSummary 无 console 输出面",
+      (function () {
+        const telSrc = fs.readFileSync(path.join(__dirname, "www/js/telemetry.js"), "utf8");
+        const adminFn = telSrc.slice(telSrc.indexOf("function adminSummary"),
+          telSrc.indexOf("function diagnostics"));
+        return adminFn.indexOf("console.") < 0;
+      })());
+
+    /* dispose()（DASHBOARD_POLISH_V1）：只取消 searchTimer/flushTimer，
+       不改业务状态——测试用它保证零真实 timer 泄漏、进程自然退出 */
+    const envDisp = makeCtrl({
+      initialState: { deviceId: DEV64, deviceToken: TOKEN64,
+        outbox: [{ batchId: "a1b2c3d4-0000-4000-8000-0000000002d1",
+          localDay: "2026-09-28", periodStart: 1, periodEnd: 2,
+          counters: { text_search: 1 }, histograms: {} }] }
+    });
+    envDisp.ctrl.observeSearch("dispose-probe", 1);
+    envDisp.ctrl.attemptFlush("cold");   /* 节流窗口内 → flushNow 成功 → outbox 清空 */
+    await flush();
+    check("dispose 前：pending timer 仅剩 search 空闲 timer",
+      envDisp.timer.pendingCount() === 1, "pending=" + envDisp.timer.pendingCount());
+    envDisp.ctrl.dispose();
+    check("dispose 后：全部 timer 取消（pendingCount=0）",
+      envDisp.timer.pendingCount() === 0);
+    envDisp.ctrl.record("text_search");   /* dispose 后仍可用，业务状态不受影响 */
+    check("dispose 后 record 仍正常（计数照常、无异常）",
+      envDisp.ctrl.stateSnapshot().currentBucket.counters.text_search === 1);
+  }
+
+  /* ---------- TEL-PRIVACY：无 query/内容文本；逐字输入只计 1 次 ---------- */
+  section("TEL-PRIVACY 逻辑搜题口径与内容红线");
+  {
+    const env = makeCtrl({ initialState: { deviceId: DEV64 } });
+    env.ctrl.observeSearch("第三十四题供电安全", 5);
+    env.timer.fire();
+    check("稳定 query → text_search + with_results 各 1",
+      env.ctrl.stateSnapshot().currentBucket.counters.text_search === 1 &&
+      env.ctrl.stateSnapshot().currentBucket.counters.text_search_with_results === 1);
+    check("上行/持久化不包含 query 子串",
+      !savedJson(env.saves).includes("第三十四题") &&
+      !JSON.stringify(env.ctrl.stateSnapshot()).includes("第三十四题"));
+
+    env.ctrl.observeSearch("某关键词", 0);
+    env.timer.fire();
+    check("0 结果 → no_result 计数",
+      env.ctrl.stateSnapshot().currentBucket.counters.text_search_no_result === 1);
+
+    /* 逐字输入：每个键重置空闲定时器，只产出 1 次计数 */
+    env.ctrl.observeSearch("安", 0);
+    env.ctrl.observeSearch("安规", 0);
+    env.ctrl.observeSearch("安规考", 1);
+    env.ctrl.observeSearch("安规考试", 2);
+    check("输入期间定时器待触发（1200ms 空闲门）", env.timer.pending() &&
+      env.timer.lastDelay() === MSQTelemetry.SEARCH_IDLE_MS);
+    env.timer.fire();
+    check("逐字输入最终只计 1 次", env.ctrl.stateSnapshot().currentBucket.counters.text_search === 3);
+    /* 同 query 重渲染（筛选切换）不重复计数 */
+    env.ctrl.observeSearch("安规考试", 2);
+    env.timer.fire();
+    check("同 query 筛选重渲染不重复计数", env.ctrl.stateSnapshot().currentBucket.counters.text_search === 3);
+    /* 清空 → 重新输入视为新意图 */
+    env.ctrl.observeSearch("", 0);
+    check("空 query 重置意图（不计数）", env.timer.pending() === false);
+    env.ctrl.observeSearch("安规考试", 2);
+    env.timer.fire();
+    check("清空后再输入 → 新计数", env.ctrl.stateSnapshot().currentBucket.counters.text_search === 4);
+
+    /* state 结构白名单：无 raw events / 时间线 / 内容字段 */
+    const st = env.ctrl.stateSnapshot();
+    const stateKeys = Object.keys(st).sort();
+    check("state 顶层字段固定", JSON.stringify(stateKeys) === JSON.stringify([
+      "currentBucket", "deviceId", "deviceToken", "flushAttempts", "lastFlushResult",
+      "lastFlushSuccessAt", "lastUploadAttemptAt", "nextRetryAt", "outbox",
+      "registerAttempts", "registerRetryAt", "schemaVersion"]), stateKeys.join(","));
+    check("桶字段固定（无事件列表）", Object.keys(st.currentBucket).every((k) =>
+      ["periodStart", "periodEnd", "localDay", "counters", "histograms",
+        "meaningfulActionCount", "batchId"].indexOf(k) >= 0));
+    const diag = env.ctrl.diagnostics();
+    check("诊断只出掩码 deviceId（6+…+4，绝无完整 64 hex）",
+      diag.deviceIdMasked === MSQTelemetry.maskDeviceId(DEV64) &&
+      diag.deviceIdMasked.length === 11 &&
+      !JSON.stringify(diag).includes(DEV64));
+
+    /* 故障隔离：存储/传输全抛异常时公开方法绝不抛出 */
+    const hostile = MSQTelemetry.createController({
+      storage: { load: () => { throw new Error("x"); }, save: () => { throw new Error("x"); } },
+      clock: { now: () => 1, localDay: () => "2026-09-27" },
+      setTimeout: (fn) => 0, clearTimeout: () => {},
+      transport: { post: () => Promise.reject(new Error("x")) },
+      native: { getAndroidId: () => Promise.reject(new Error("x")) },
+      serverUrl: "https://example.test",
+      appInfo: () => { throw new Error("x"); }
+    });
+    let hostileOk = true;
+    try {
+      hostile.record("text_search");
+      hostile.add("recognized_question_total", 3);
+      hostile.observeHistogram("ocr_ms", 1234);
+      hostile.observeSearch("q", 1);
+      hostile.attemptFlush("t");
+      hostile.onColdStart();
+      hostile.onAppResume();
+      hostile.diagnostics();
+    } catch (e) { hostileOk = false; }
+    await flush();
+    check("存储/传输/appInfo 全故障 → 公开方法零抛出", hostileOk);
+  }
+
+  /* ---------- TEL 源码守卫：埋点全旁路 + 指标目录落位 ---------- */
+  section("TEL 源码守卫（app.js / index.html / telemetry.js）");
+  {
+    const telSrc = fs.readFileSync(path.join(__dirname, "www/js/telemetry.js"), "utf8");
+    const telIndexSrc = fs.readFileSync(path.join(__dirname, "www/index.html"), "utf8");
+    check("index.html 在 app.js 前加载 telemetry.js",
+      telIndexSrc.indexOf('src="js/telemetry.js"') > 0 &&
+      telIndexSrc.indexOf('src="js/telemetry.js"') < telIndexSrc.indexOf('src="js/app.js"'));
+    check("app.js 埋点走 swallow 助手（tRecord/tAdd/tHist/tObserveSearch）",
+      ["function tRecord(metric)", "function tAdd(metric, n)", "function tHist(name, ms)",
+        "function tObserveSearch(query, resultCount)"].every((s) => appSrc.includes(s)));
+    check("拍题指标全部落位", ["photo_attempt", "photo_capture_success", "photo_cancel",
+      "camera_error", "ocr_error", "matcher_error", "photo_process_success",
+      "photo_process_failure"].every((m) => appSrc.includes('"' + m + '"')));
+    check("AUTO 指标 + 人工纠正落位", appSrc.includes('"auto_" + resolved.type') &&
+      appSrc.includes('"type_manual_correction"'));
+    check("识别题量与置信度计数落位", appSrc.includes('"recognized_question_total"') &&
+      appSrc.includes('"confidence_" + k'));
+    check("耗时直方图落位（只入桶）", appSrc.includes('"photo_total_ms"') &&
+      appSrc.includes('"ocr_ms"'));
+    check("反馈指标落位", appSrc.includes('"feedback_" + t') &&
+      appSrc.includes('"feedback_wrong_answer"'));
+    const modeMetrics = ["mode_sequence_start", "mode_random_start", "mode_single_start",
+      "mode_multi_start", "mode_judge_start", "mode_wrong_start", "mode_recite_start",
+      "mode_exam_start"];
+    check("8 个学习模式指标落位", modeMetrics.every((m) => appSrc.includes('"' + m + '"')));
+    check("search_result_open 只计文字搜题（batch 候选不计）",
+      appSrc.includes('if (source !== "batch-results") { tRecord("search_result_open"); }'));
+    check("DEV 诊断含 Telemetry 组（掩码 ID，无完整 ID/ANDROID_ID）",
+      appSrc.includes('"Telemetry", rows: [') && appSrc.includes("deviceIdMasked") &&
+      !/androidId|ANDROID_ID/.test(appSrc.split("Telemetry\", rows:")[1]?.split("]")[0] || ""));
+    check("telemetry.js 计数器目录与服务端 allowlist 同源",
+      JSON.stringify(MSQTelemetry.COUNTERS) ===
+      JSON.stringify(require("./tools/telemetry/store.js").COUNTER_METRICS));
+    check("telemetry.js 直方图桶与服务端一致",
+      JSON.stringify(MSQTelemetry.HISTOGRAM_EDGES.ocr_ms.labels) ===
+      JSON.stringify(["<500", "500-1000", "1000-2000", "2000-4000", ">=4000"]));
+  }
+}
+
 /* SUC 编排小节内部走 Promise 微任务（controller 的 getAppInfo/fetchLatest 是异步），
    统一结论推迟到它完成后输出；异常按失败项记录。 */
-runSucOrchestrationTests().then(finish, function (e) {
-  console.error("\n[SUC] 编排测试异常：", e && e.stack || e);
-  fails.push("SUC 编排测试异常");
-  finish();
-});
+runSucOrchestrationTests()
+  .then(runTelemetryTests, function (e) {
+    console.error("\n[SUC] 编排测试异常：", e && e.stack || e);
+    fails.push("SUC 编排测试异常");
+  })
+  .then(finish, function (e) {
+    console.error("\n[TEL] 客户端测试异常：", e && e.stack || e);
+    fails.push("TEL 客户端测试异常");
+    finish();
+  });

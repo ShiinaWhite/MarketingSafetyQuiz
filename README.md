@@ -1,7 +1,8 @@
-# 营销安规刷题（MarketingSafetyQuiz）
+# 营销安规搜题（MarketingSafetyQuiz）
 
-完全离线的营销安规刷题器：纯前端 Web/PWA 应用（原生 HTML/CSS/JS，无框架），
-通过 Capacitor 打包为 Android APK 侧载安装。无账号、无服务器、无网络请求、无遥测、无广告。
+营销安规搜题：题库本地离线刷题 + 拍照搜题（端侧中文 OCR），原生 HTML/CSS/JS 无前端框架，
+通过 Capacitor 打包为 Android APK。dev/stable 双渠道支持应用内更新与拍题样本回传
+（控制面经 Cloudflare Tunnel，图片数据面直传 COS/CDN）；使用统计为匿名聚合并可关闭构建。无账号、无广告。
 
 > **本项目不附带任何题库数据。** 请使用你自己的题库 Excel 运行导入脚本生成
 > `www/data/questions.json`（该文件不进入 Git 历史）。
@@ -76,7 +77,7 @@ gradlew.bat assembleDebug
 # 产物: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-应用名称“营销安规刷题”，包名 `com.jty.safetyquiz`（见 `capacitor.config.json`）。
+应用名称“营销安规搜题”，包名 `com.jty.safetyquiz`（见 `capacitor.config.json`）。
 Debug 签名，可直接侧载安装；请勿把签名密钥提交进仓库。
 
 ## 自检

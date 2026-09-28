@@ -78,3 +78,9 @@ tools/sample_collector/.env.cos.local
 
 # ---- 兜底：任何 provider 的本机 secret env（防止未来新增 provider 时遗漏） ----
 .env.*.local
+
+# ---- DATA_PLATFORM_V1：服务端数据库与备份（本机数据，绝不入库） ----
+# data/telemetry/telemetry.db  使用统计（设备指纹已 HMAC，仍属本机数据）
+# data/samples/samples.db      样本结构化索引（raw run.json 才是 source-of-truth）
+# data/backups/                backup.js 快照输出
+data/

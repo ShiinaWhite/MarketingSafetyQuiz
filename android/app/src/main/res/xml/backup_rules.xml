@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- STABLE_BACKUP_AND_FINAL_GATE_V1：Android 6~11 云备份排除（fullBackupContent）。
+     排除整个目录（非单文件）——sample_queue/telemetry 目录未来新增文件自动覆盖：
+     - files/sample_queue/：拍题照片 capture.jpg、run.json/feedback.json、上传队列状态
+       （用户页面照片不得上云备份）
+     - files/telemetry/：state.json 含 HMAC deviceId/deviceToken/outbox——
+       跨设备恢复会让新手机继承旧设备的统计身份，破坏"活跃设备"口径
+     不排除任何其他路径：学习记录（WebView localStorage，app_webview/ 不在
+     files/ 下）与本规则无关，备份行为不变。 -->
+<full-backup-content>
+    <exclude domain="file" path="sample_queue" />
+    <exclude domain="file" path="telemetry" />
+</full-backup-content>

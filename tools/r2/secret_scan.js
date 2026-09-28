@@ -57,8 +57,22 @@ function realSecrets() {
       if (c.config.secretAccessKey) { out.push({ kind: "COS_SECRET_KEY", value: c.config.secretAccessKey }); }
     }
   } catch (e) { /* 无 COS 配置：跳过 */ }
+  /* DATA_PLATFORM_V1：telemetry HMAC secret（.secrets/telemetry-hmac-key，≥32 bytes）。
+     值只用于比对，绝不打印。 */
+  try {
+    const telemetryStore = require("../telemetry/store.js");
+    const tk = telemetryStore.loadTelemetrySecret({
+      secretFile: path.join(ROOT, ".secrets", "telemetry-hmac-key")
+    });
+    if (tk) { out.push({ kind: "MSQ_TELEMETRY_HMAC_KEY", value: tk }); }
+  } catch (e) { /* 无 telemetry secret：跳过 */ }
+  const tkEnv = (process.env.MSQ_TELEMETRY_HMAC_KEY || "").trim();
+  if (tkEnv.length >= 32) { out.push({ kind: "MSQ_TELEMETRY_HMAC_KEY (env)", value: tkEnv }); }
+  /* STABLE_RELEASE_PREFLIGHT_HARDENING_V1 分类修正：MSQ_SAMPLE_WRITE_TOKEN 是
+     App 随包写凭据（BuildConfig 注入 SampleQueue 认证），不是 provider secret，
+     从本扫描移除；COS/R2/private key 扫描不放松。 */
   for (const k of ["R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "CLOUDFLARE_API_TOKEN",
-    "MSQ_SAMPLE_WRITE_TOKEN", "COS_SECRET_ID", "COS_SECRET_KEY"]) {
+    "COS_SECRET_ID", "COS_SECRET_KEY"]) {
     const v = (process.env[k] || "").trim();
     if (v.length >= 16) { out.push({ kind: k + " (env)", value: v }); }
   }
@@ -78,6 +92,9 @@ const SHAPE_RULES = [
     ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) },
   { kind: "COS_SECRET_KEY 被赋真实值",
     re: /COS_SECRET_KEY\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{16,})/,
+    ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) },
+  { kind: "MSQ_TELEMETRY_HMAC_KEY 被赋真实值",
+    re: /MSQ_TELEMETRY_HMAC_KEY\s*[=:]\s*["']?([A-Za-z0-9+/=_-]{32,})/,
     ignoreIf: (m) => /^(your|REPLACE|CHANGE|xxx|\.\.\.)/i.test(m[1]) }
 ];
 
