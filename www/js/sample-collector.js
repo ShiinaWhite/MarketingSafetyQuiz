@@ -68,7 +68,8 @@
     return true;
   }
 
-  /* 渠道判定（SIMPLIFY_CAPTURE_FLOW_V1）：仅 DEV 构建显示隐藏诊断入口。
+  /* 渠道判定（SIMPLIFY_CAPTURE_FLOW_V1；IN_APP_TELEMETRY_DASHBOARD_V1 起两个
+     合法包 dev + stable 均可经更新页 3 秒 7 连击进入开发者中心）。
      与 updater.js 的 updateChannelFor 同源包名表；放在本模块是因为诊断面板
      展示的是样本队列状态（不改动冻结的 updater/SELF_UPDATE）。 */
   var DEV_PACKAGE = "com.jty.safetyquiz.dev";

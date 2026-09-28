@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- STABLE_BACKUP_AND_FINAL_GATE_V1：Android 12+ 数据提取排除（dataExtractionRules）。
+     cloud-backup 与 device-transfer 两条通道都排除整个目录：
+     - files/sample_queue/（拍题照片与上传队列）
+     - files/telemetry/（HMAC deviceId/deviceToken/outbox——统计身份严禁跨设备迁移）
+     不扩大排除范围：学习记录（WebView localStorage）不受影响。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="sample_queue" />
+        <exclude domain="file" path="telemetry" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="sample_queue" />
+        <exclude domain="file" path="telemetry" />
+    </device-transfer>
+</data-extraction-rules>

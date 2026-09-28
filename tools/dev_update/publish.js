@@ -429,7 +429,24 @@ async function main() {
     if (ct) {
       fail("stable 门禁失败：android:usesCleartextTraffic=true 出现在 merged manifest。拒绝发布。");
     }
-    console.log("→ stable 门禁：debuggable=false ✓ usesCleartextTraffic!=true ✓");
+    /* STABLE_BACKUP_AND_FINAL_GATE_V1：备份隔离门禁 —— merged manifest 必须引用
+       两套 backup rules（Android 6~11 fullBackupContent / 12+ dataExtractionRules），
+       规则 XML 由仓库守卫保证排除 sample_queue 与 telemetry 整目录 */
+    /* aapt xmltree 中属性值是 resource 引用（@0x7f…），字面名在 resources 表：
+       属性存在性 + 资源表含两个 xml entry 双重校验 */
+    if (!/fullBackupContent\(0x[0-9a-f]+\)=@0x7f/.test(manifestDump) ||
+        !/dataExtractionRules\(0x[0-9a-f]+\)=@0x7f/.test(manifestDump)) {
+      fail("stable 门禁失败：backup rules 未接入 merged manifest"
+        + "（fullBackupContent/dataExtractionRules）。拒绝发布。");
+    }
+    const resDump = withAsciiCopy(channel.outApk,
+      (p) => run(AAPT, ["dump", "resources", p])).stdout || "";
+    if (!/xml\/backup_rules/.test(resDump) || !/xml\/data_extraction_rules/.test(resDump)) {
+      fail("stable 门禁失败：backup rules 资源缺失"
+        + "（xml/backup_rules、xml/data_extraction_rules）。拒绝发布。");
+    }
+    console.log("→ stable 门禁：debuggable=false ✓ usesCleartextTraffic!=true ✓"
+      + " backup-rules ✓");
   }
 
   /* 5) 签名证书与该渠道现有 APK 一致性 */

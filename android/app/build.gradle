@@ -42,10 +42,9 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
-        /* DEV_TO_MAIN_SYNC_V1：R8 + 资源收缩成为共享能力 —— stable 发布路径
-           （debug buildType，assembleDebug → 营销安规刷题.apk）与 dev 用同一套
-           minify 配置；ABI 差异仍仅由下方 dev 块内的发布属性控制，
-           stable 保持全 ABI 兼容 */
+        /* DEV_TO_MAIN_SYNC_V1 + PREFLIGHT_HARDENING_V1：R8 + 资源收缩是共享能力。
+           debug buildType 只服务日常开发/模拟器（stable 发布已迁移到独立 stable
+           buildType，见下方 stable 块）；ABI 差异仅由 dev 块内的发布属性控制 */
         debug {
             minifyEnabled true
             shrinkResources true
@@ -117,7 +116,8 @@ repositories {
 /* SELF_UPDATE_V1：DEV 版本号注入（仅 dev buildType 的最终产物生效）。
    用法：gradlew :app:assembleDev -PDEV_VERSION_CODE=2 -PDEV_VERSION_NAME=1.0.2
    不传参数时保持默认（versionCode 1 / versionName 1.0-dev）；
-   正式 assembleDebug / assembleRelease 完全不受影响。 */
+   stable 发布走独立 stable buildType（-PSTABLE_VERSION_CODE/NAME，
+   见 STABLE_RELEASE_PREFLIGHT_HARDENING_V1），与本注入互不影响。 */
 androidComponents {
     onVariants(selector().withBuildType("dev")) { variant ->
         def devCodeProp = project.findProperty("DEV_VERSION_CODE")

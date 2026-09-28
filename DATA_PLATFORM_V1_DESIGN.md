@@ -625,3 +625,11 @@ JVM：`./gradlew.bat :app:testDebugUnitTest`（SampleQueue/Feedback/UpdateVerifi
    纯查询口径。Dashboard 缓存语义澄清：10min 是 fresh/stale 分界，stale 缓存
    继续展示 + 后台 revalidate，不做强制过期删除。开发者中心隐藏入口注释统一为
    双合法包（dev+stable）真实语义。
+
+8. **Sample write credential 安全边界（STABLE_BACKUP_AND_FINAL_GATE_V1）**：
+   `MSQ_SAMPLE_WRITE_TOKEN` 随 APK 分发（BuildConfig 注入）是既定 V1 架构，
+   其安全边界必须明确：它**不是可保密的长期云凭据**——APK 持有者理论上可提取；
+   当前作用仅是 sample 写接口的 anti-abuse credential（抬高滥写门槛），
+   不承载任何机密性承诺。COS/R2 等对象存储的长期 SecretKey 属 provider
+   secret，**永远不得进 APK**（发布期 secret scan 强制）。token 轮换 =
+   重发版（MSQ_SAMPLE_AUTH_GENERATION 递增配合 auth_failed 自动恢复）。

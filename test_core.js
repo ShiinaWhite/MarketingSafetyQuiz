@@ -2334,6 +2334,63 @@ section("MAIN/STABLE 构建边界（DEV_TO_MAIN_SYNC_V1，MAIN-1~8）");
   check("STP2-8 npm test = 统一 preflight 入口",
     pkgSrc.includes('"test": "node tools/preflight.js"') &&
     fs.existsSync(path.join(__dirname, "tools/preflight.js")));
+
+  /* —— BKP：Android Backup 数据隔离（STABLE_BACKUP_AND_FINAL_GATE_V1） ——
+     allowBackup=true 保留；两套 rules（6~11 fullBackupContent / 12+
+     dataExtractionRules）都排除整个 sample_queue/telemetry 目录（目录级排除，
+     未来新增文件自动覆盖）；学习记录（WebView localStorage）不受影响。 */
+  const manifestSrc = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/AndroidManifest.xml"), "utf8");
+  const bkpRules = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/xml/backup_rules.xml"), "utf8");
+  const derRules = fs.readFileSync(path.join(__dirname,
+    "android/app/src/main/res/xml/data_extraction_rules.xml"), "utf8");
+  /* readFileSync 顶部 wrapper 已统一 CRLF→LF，无需再 replace */
+  const dirExcluded = (xml, tag) =>
+    xml.indexOf('<exclude domain="file" path="' + tag + '"') >= 0;
+  check("BKP-1 allowBackup=true 保留（不全局关备份）",
+    manifestSrc.includes('android:allowBackup="true"'));
+  check("BKP-2 两套 rules 已接入 manifest（6~11 fullBackupContent / 12+ dataExtractionRules）",
+    manifestSrc.includes('android:fullBackupContent="@xml/backup_rules"') &&
+    manifestSrc.includes('android:dataExtractionRules="@xml/data_extraction_rules"'));
+  check("BKP-3 Android 6~11：sample_queue 被 cloud backup 排除",
+    bkpRules.includes("<full-backup-content>") && dirExcluded(bkpRules, "sample_queue"));
+  check("BKP-4 Android 6~11：telemetry 被排除（整目录）",
+    dirExcluded(bkpRules, "telemetry"));
+  check("BKP-5 Android 12+：sample_queue 在 cloud-backup 与 device-transfer 双排除",
+    (function () {
+      const cb = bkpRules;
+      void cb;
+      const cloud = derRules.slice(derRules.indexOf("<cloud-backup>"),
+        derRules.indexOf("</cloud-backup>"));
+      const transfer = derRules.slice(derRules.indexOf("<device-transfer>"),
+        derRules.indexOf("</device-transfer>"));
+      return derRules.includes("<cloud-backup>") &&
+        derRules.includes("<device-transfer>") &&
+        dirExcluded(cloud, "sample_queue") &&
+        dirExcluded(transfer, "sample_queue");
+    })());
+  check("BKP-6 Android 12+：telemetry 在 cloud-backup 与 device-transfer 双排除",
+    (function () {
+      const cloud = derRules.slice(derRules.indexOf("<cloud-backup>"),
+        derRules.indexOf("</cloud-backup>"));
+      const transfer = derRules.slice(derRules.indexOf("<device-transfer>"),
+        derRules.indexOf("</device-transfer>"));
+      return dirExcluded(cloud, "telemetry") && dirExcluded(transfer, "telemetry");
+    })());
+  check("BKP-7 目录级排除（path=目录名，非单文件——目录新增文件自动覆盖）",
+    dirExcluded(bkpRules, "sample_queue") &&
+    bkpRules.indexOf('path="sample_queue/') < 0 &&
+    bkpRules.indexOf('path="telemetry/') < 0 &&
+    bkpRules.indexOf('path="state.json"') < 0 &&
+    derRules.indexOf('path="sample_queue"') > 0 &&
+    derRules.indexOf('path="sample_queue/') < 0);
+  check("BKP-8 排除范围不扩大（仅这两个目录；学习记录/数据库/共享偏好不受影响）",
+    (bkpRules.match(/<exclude /g) || []).length === 2 &&
+    (derRules.match(/<exclude /g) || []).length === 4);
+  check("BKP-9 发布期门禁：stable dry-run 校验 backup rules 已接入 merged manifest",
+    pubSrc.includes("backup rules 未接入 merged manifest") &&
+    pubSrc.includes("fullBackupContent"));
 }
 
 /* ---------- REAL_SAMPLE_FEEDBACK_V2：反馈状态与 payload 纯函数 ---------- */
