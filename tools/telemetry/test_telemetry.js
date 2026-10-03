@@ -170,8 +170,12 @@ async function main() {
       r.body.alreadyAccepted.length === 1 && r.body.accepted.length === 0,
       JSON.stringify(r.body));
 
-    const b2 = makeBatch({ counters: { photo_attempt: 1 }, localDay: "2026-09-26",
-      periodEnd: Date.now() - 24 * 3600000, periodStart: Date.now() - 25 * 3600000 });
+    /* localDay 从 periodEnd 派生（原硬编码 "2026-09-26" 是时间炸弹：服务器按
+       localDay 与 periodEnd 的 UTC 日差 <=1 校验，日期一过即误拒）。 */
+    const b2PeriodEnd = Date.now() - 24 * 3600000;
+    const b2 = makeBatch({ counters: { photo_attempt: 1 },
+      localDay: new Date(b2PeriodEnd).toISOString().slice(0, 10),
+      periodEnd: b2PeriodEnd, periodStart: b2PeriodEnd - 3600000 });
     r = await request(port, "POST", "/api/telemetry/batch",
       batchPayload([b1, b2]));
     check("多 batch 合并上报（重传+新）", r.status === 200 &&
