@@ -1423,12 +1423,27 @@ section("H2 judge gate：端到端（auto 路径 veto、manual 零影响、out �
 
 section("H2 冻结回归资产：39 张 parity + AUTO 漂移守卫（testbench/h2_layout_parity_fixture.json）");
 {
+  /* 命名纪律（不得混称）：
+     RECORDED_AUTO_JUDGE = 生产 run.json recorded resolvedPageType=judge 的 unique capture（全集 89 张中 24 张）
+     REPLAY_OLD_RESOLVED_JUDGE = 冻结重放（frozenPrev 仿真链路）old-resolved=judge 的 case（39 张 fixture 中 25 个）
+     差异仅 e6269f29cc74（recorded=multi/previous-page，重放=judge/previous-page：
+     previous-page 弱先验依赖设备端会话 lastResolvedPageType，离线无法完全重建）。 */
   const fixture = JSON.parse(
     fs.readFileSync(path.join(__dirname, "testbench", "h2_layout_parity_fixture.json"), "utf8"));
-  check("fixture 结构：39 张（discovery 10 / validation 20 / holdout 9），replay-judge 25",
+  check("fixture 结构：39 张（discovery 10 / validation 20 / holdout 9）",
     fixture.captures.length === 39 &&
     fixture.counts.bySet.discovery === 10 && fixture.counts.bySet.validation === 20 &&
-    fixture.counts.bySet.holdout === 9 && fixture.counts.judges === 25);
+    fixture.counts.bySet.holdout === 9);
+  const recJudgeN = fixture.captures.filter((c) => c.recordedResolvedType === "judge").length;
+  const replayJudgeN = fixture.captures.filter((c) => c.frozenOldResolved.type === "judge").length;
+  const diff = fixture.captures.filter((c) =>
+    (c.recordedResolvedType === "judge") !== (c.frozenOldResolved.type === "judge"));
+  check("RECORDED_AUTO_JUDGE = 24（生产 recorded 口径，fixture 含全部 24）",
+    recJudgeN === 24 && fixture.counts.recordedJudges === 24);
+  check("REPLAY_OLD_RESOLVED_JUDGE = 25（冻结重放口径；差异恰 1 张 = e6269f29cc74）",
+    replayJudgeN === 25 && fixture.counts.replayJudges === 25 &&
+    diff.length === 1 && diff[0].sha12 === "e6269f29cc74" &&
+    diff[0].recordedResolvedType === "multi" && diff[0].frozenOldResolved.type === "judge");
 
   /* 提取器 parity：必须 100%（冻结实现 final_gt_analysis.py OPT/KEYROW 的逐条移植） */
   let parity = 0;
