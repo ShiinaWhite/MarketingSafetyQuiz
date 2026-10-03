@@ -1856,6 +1856,11 @@
           pageTypeResolutionMethod: state.resolved ? state.resolved.method : "manual",
           autoTypeConfidence: (state.resolved && state.resolved.method !== "manual")
             ? state.resolved.confidence : undefined,
+          /* H2_JUDGE_GATE_V3：AUTO 诊断全量（含 judgeGate：触发/threshold/
+             distinctOptionLetters/letters/原 judge 决策/single·multi 分/最终选择）。
+             manual 时 diagnostics=null → 字段不落 JSON（向后兼容）。 */
+          pageTypeDiagnostics: (state.resolved && state.resolved.diagnostics)
+            ? state.resolved.diagnostics : undefined,
           text: state.text,
           lines: state.lines,
           out: state.out,

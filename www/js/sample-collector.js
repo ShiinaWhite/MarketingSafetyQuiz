@@ -190,8 +190,11 @@
       pageType: input.pageType || null,
       pageTypeMode: input.pageTypeMode || undefined,                       /* auto | manual */
       resolvedPageType: input.resolvedPageType || undefined,               /* single|multi|judge */
-      pageTypeResolutionMethod: input.pageTypeResolutionMethod || undefined, /* section-heading|match-quality|previous-page|manual */
+      pageTypeResolutionMethod: input.pageTypeResolutionMethod || undefined, /* section-heading|match-quality|previous-page|judge-layout-gate|manual */
       autoTypeConfidence: input.autoTypeConfidence || undefined,           /* strong|medium|ambiguous */
+      /* H2_JUDGE_GATE_V3：resolvePageTypeAuto+judgeLayoutGate 的完整 diagnostics
+         （含 judgeGate 子对象）。可选增量字段，缺省不落 JSON，旧 collector/读取方零影响。 */
+      pageTypeDiagnostics: input.pageTypeDiagnostics || undefined,
       /* bytes/sha256/width/height 由 collector 保存时补充；
          ocr.width/height 是 ML Kit 实际解码位图的尺寸（OcrPlugin 返回值） */
       image: { filename: "capture.jpg" },

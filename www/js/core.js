@@ -946,9 +946,88 @@
     return { type: best, confidence: "ambiguous", method: "match-quality", diagnostics: diag };
   }
 
+  /* ---------------- H2_JUDGE_GATE_V3：judge 精度后置门控 ----------------
+     预注册冻结规则（_analysis/REAL_EXAM_20260929_V1/JUDGE_GATE_HOLDOUT_V3_PROTOCOL.json，
+     frozenAt 2026-09-30T15:12:52+08:00；Holdout V3 独立 holdout 验证 SUPPORTED）：
+     仅当旧 AUTO 最终 resolvedPageType=judge 且页面 OCR 行中
+     distinctOptionLetters >= H2_JUDGE_GATE_THRESHOLD 时否决 judge，
+     在 runs.single / runs.multi 的 autoTypeScore 中取更高者；平分取 multi（冻结）。
+     distinctOptionLetters < 阈值时完全保持旧 AUTO 结果。
+     threshold=2 为冻结值，不得调参；section-heading / previous-page 判出的 judge
+     同样受本 gate 约束（协议不区分 method）。
+
+     distinctOptionLetters 提取器必须 100% 复刻冻结实现
+     （final_gt_analysis.py::layout_features 的 OPT / KEYROW 语义）：
+       1) 仅认行首 A~F 单个字母；
+       2) alt1：字母 + 可选空白 + 可选一个分隔符[.、,，。:：)）] + 至少一个空白 + 非空内容；
+          alt2：字母 + 恰一个分隔符 + 可选空白 + 非空内容；
+       3) KEYROW（字母后紧贴数字的题号行，如 A1/B2）一律排除；
+       4) 「A正确」「B错误」这类字母后无空白/分隔符的判断题选项行不满足任一分支，不计入；
+       5) distinct = 字母种类数（去重），不是行数。
+     本 gate 只否决 judge、只在已有 runs 中择优：不重写 resolvePageTypeAuto、
+     不改 single/multi 判定、不碰 matcher/splitter/confidence 阈值。 */
+  var H2_JUDGE_GATE_VERSION = "H2_V3";
+  var H2_JUDGE_GATE_THRESHOLD = 2;   /* 冻结（预注册），不得改为 1/3/4 */
+  var H2_OPT_RE = /^(?:([A-F])\s*[.、,，。:：)）]?\s+(\S[^\n]*)|([A-F])[.、,，。:：)）]\s*(\S[^\n]*))$/;
+  var H2_KEYROW_RE = /^[A-F]\d/;
+
+  function h2DistinctOptionLetters(lines) {
+    var seen = {};
+    var out = [];
+    (lines || []).forEach(function (l) {
+      var txt = String((l && l.text != null) ? l.text : "").trim();
+      if (!txt) { return; }
+      var m = txt.match(H2_OPT_RE);
+      if (m && !H2_KEYROW_RE.test(txt)) {
+        var L = m[1] || m[3];   /* 对应冻结实现 m.group(1) or m.group(3) */
+        if (L && !seen[L]) { seen[L] = true; out.push(L); }
+      }
+    });
+    out.sort();
+    return { count: out.length, letters: out };
+  }
+
+  /* 后置 gate：入参 resolved 必须来自 resolvePageTypeAuto（manual 结果不经过此处）。
+     非 judge 原样返回（同一对象）；judge 时在 diagnostics 上附加 judgeGate
+     （未触发也记录 triggered:false），触发时返回新的 resolved：
+     type=择优结果 / confidence=medium（judge 已被否决，不再沿用 strong）/
+     method=judge-layout-gate / 原 diagnostics 全字段保留。 */
+  function judgeLayoutGate(runs, lines, resolved) {
+    if (!resolved || resolved.type !== "judge") { return resolved; }
+    var lay = h2DistinctOptionLetters(lines);
+    var gate = {
+      version: H2_JUDGE_GATE_VERSION,
+      threshold: H2_JUDGE_GATE_THRESHOLD,
+      distinctOptionLetters: lay.count,
+      letters: lay.letters,
+      originalType: "judge",
+      originalMethod: resolved.method || null,
+      originalConfidence: resolved.confidence || null,
+      singleScore: (runs && runs.single) ? autoTypeScore(runs.single).score : null,
+      multiScore: (runs && runs.multi) ? autoTypeScore(runs.multi).score : null,
+      triggered: lay.count >= H2_JUDGE_GATE_THRESHOLD
+    };
+    var diagnostics = {};
+    var base = resolved.diagnostics || {};
+    for (var k in base) { diagnostics[k] = base[k]; }
+    diagnostics.judgeGate = gate;
+    if (!gate.triggered) {
+      return { type: resolved.type, confidence: resolved.confidence,
+        method: resolved.method, diagnostics: diagnostics };
+    }
+    var selected = gate.singleScore > gate.multiScore ? "single"
+      : (gate.multiScore > gate.singleScore ? "multi"
+        : "multi");   /* 冻结 tie-break：single/multi 平分取 multi */
+    gate.selectedType = selected;
+    return { type: selected, confidence: "medium",
+      method: "judge-layout-gate", diagnostics: diagnostics };
+  }
+
   /* 结果页"切题型/重算"与 AUTO 的统一入口：同一份 OCR lines 直接重跑
      split + match，绝不触碰相机或 Ocr.recognizeText。pageType 传 "auto" 时
-     在内存中三题型试跑并自动决策；传具体题型时等价于旧逻辑单次调用。 */
+     在内存中三题型试跑并自动决策；传具体题型时等价于旧逻辑单次调用。
+     auto 路径在旧 AUTO 决策之后执行 H2 judge 精度门控（judgeLayoutGate）；
+     手动题型（含手动 judge）绝不经过 gate。 */
   function recomputePageFromLines(ocrIndex, lines, pageType, options) {
     var opts = options || {};
     if (pageType === "auto") {
@@ -956,7 +1035,8 @@
       ["single", "multi", "judge"].forEach(function (t) {
         runs[t] = searchPageQuestionsByOcr(ocrIndex, lines, t, opts);
       });
-      var resolved = resolvePageTypeAuto(runs, lines, opts.previousType);
+      var resolved = judgeLayoutGate(runs, lines,
+        resolvePageTypeAuto(runs, lines, opts.previousType));
       return { out: runs[resolved.type], resolved: resolved, runs: runs };
     }
     return {
@@ -1003,6 +1083,8 @@
     AUTO_TYPE_SCORE: AUTO_TYPE_SCORE, AUTO_MARGIN_STRONG: AUTO_MARGIN_STRONG, AUTO_MARGIN_CLOSE: AUTO_MARGIN_CLOSE,
     autoTypeScore: autoTypeScore, pageSectionHeadings: pageSectionHeadings,
     resolvePageTypeAuto: resolvePageTypeAuto, recomputePageFromLines: recomputePageFromLines,
+    H2_JUDGE_GATE_VERSION: H2_JUDGE_GATE_VERSION, H2_JUDGE_GATE_THRESHOLD: H2_JUDGE_GATE_THRESHOLD,
+    h2DistinctOptionLetters: h2DistinctOptionLetters, judgeLayoutGate: judgeLayoutGate,
     suggestBetterPageType: suggestBetterPageType,
     generateExam: generateExam, scoreExam: scoreExam
   };

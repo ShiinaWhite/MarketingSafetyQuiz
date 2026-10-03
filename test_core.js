@@ -1131,7 +1131,13 @@ section("AUTO 题型：章节标题优先（真实题库 + pageSectionType 容�
     const lines = [];
     if (heading) { lines.push(line(heading)); }
     lines.push(line("31. " + q.stem));
-    q.options.forEach((o, i) => lines.push(line(MSQ.LETTERS[i] + ". " + o)));
+    /* judge 选项按真实 OCR 形态拼接（字母紧贴内容、无分隔符，如 "A正确"）：
+       该形态在 H2 冻结语义下不计 option letters（H2 单测 H），
+       判断题页不会被 gate 误触发（24 张真 judge 冻结回归同口径）。 */
+    const optLine = q.type === "judge"
+      ? (o, i) => line(MSQ.LETTERS[i] + o)
+      : (o, i) => line(MSQ.LETTERS[i] + ". " + o);
+    q.options.forEach(optLine);
     return lines;
   };
   const rAuto = (lines, prev) => MSQ.recomputePageFromLines(idxA, lines, "auto", { limit: 3, previousType: prev });
@@ -1238,6 +1244,225 @@ section("样本采集：AUTO 诊断字段（schemaVersion=1 增量）");
   check("不传诊断字段时不产生该键（旧行为不变）",
     !JSON.stringify(p2.manifest).includes("pageTypeMode") &&
     !JSON.stringify(p2.manifest).includes("autoTypeConfidence"));
+}
+
+/* ---------- H2_JUDGE_GATE_V3：judge 精度后置门控（预注册冻结规则） ----------
+   规则/阈值冻结于 _analysis/REAL_EXAM_20260929_V1/JUDGE_GATE_HOLDOUT_V3_PROTOCOL.json
+   （threshold=2 冻结、single/multi 平分取 multi；Holdout V3 独立验证 SUPPORTED）。
+   本节单测钉死门控行为（A~L）；真实 39 张冻结回归资产见下一节与
+   testbench/h2_layout_parity_fixture.json。 */
+section("H2 judge gate：单测（A~L）");
+{
+  const mkOut = (confList) => ({
+    blocks: confList.map((c) => ({ confidence: c })),
+    answered: confList.filter((c) => c !== "none").length
+  });
+  const S = (h, m, l) => mkOut([...Array(h).fill("high"), ...Array(m).fill("medium"), ...Array(l).fill("low")]);
+  const L = (t) => ({ text: t, left: 0, top: 100, right: 900, bottom: 130 });
+  const gateWith = (lines, sRuns, mRuns, method) =>
+    MSQ.judgeLayoutGate({ single: sRuns, multi: mRuns, judge: mkOut([]) }, lines,
+      { type: "judge", confidence: "strong", method: method || "match-quality",
+        diagnostics: { headings: ["judge"], scores: { single: 0, multi: 0, judge: 3000 } } });
+
+  check("导出：版本与冻结阈值常量（threshold=2 不得改动）",
+    MSQ.H2_JUDGE_GATE_VERSION === "H2_V3" && MSQ.H2_JUDGE_GATE_THRESHOLD === 2);
+
+  /* A：非 judge 的 AUTO 结果绝不经过 gate（原对象原样返回） */
+  const oldSingle = { type: "single", confidence: "strong", method: "match-quality", diagnostics: { scores: { single: 3000 } } };
+  check("A：oldResolved=single → 原对象原样返回（无 judgeGate 键）",
+    MSQ.judgeLayoutGate(null, [L("A. 内容")], oldSingle) === oldSingle &&
+    !oldSingle.diagnostics.judgeGate);
+  const oldMulti = { type: "multi", confidence: "medium", method: "previous-page", diagnostics: {} };
+  check("A：oldResolved=multi 同样不介入",
+    MSQ.judgeLayoutGate(null, [L("A. 内容"), L("B. 内容")], oldMulti) === oldMulti);
+
+  /* B/C：judge + distinctLetters < 2 → 完全保持旧 AUTO 结果 */
+  const bRes = gateWith([L("判断题"), L("1. 下列说法正确的是"), L("√")], S(0, 0, 1), S(0, 0, 1));
+  check("B：judge + dL=0 → 保持 judge，原 method/confidence 不变",
+    bRes.type === "judge" && bRes.confidence === "strong" && bRes.method === "match-quality");
+  check("B：diagnostics.judgeGate.triggered=false，原诊断字段保留",
+    bRes.diagnostics.judgeGate.triggered === false &&
+    bRes.diagnostics.judgeGate.distinctOptionLetters === 0 &&
+    JSON.stringify(bRes.diagnostics.judgeGate.letters) === "[]" &&
+    bRes.diagnostics.headings.length === 1);
+  const cRes = gateWith([L("A. 仅一个选项行")], S(3, 0, 0), S(0, 0, 1));
+  check("C：judge + dL=1 → 保持 judge（single 分更高也不触发）",
+    cRes.type === "judge" && cRes.diagnostics.judgeGate.distinctOptionLetters === 1 &&
+    cRes.diagnostics.judgeGate.triggered === false);
+
+  /* D/E/F/G：触发后按 autoTypeScore 择优 */
+  const dRes = gateWith([L("A. 甲"), L("B. 乙")], S(1, 0, 0), S(0, 3, 0));
+  check("D：judge + dL=2 → 触发，singleScore/multiScore 进诊断",
+    dRes.diagnostics.judgeGate.triggered === true &&
+    dRes.diagnostics.judgeGate.singleScore === 1000 &&
+    dRes.diagnostics.judgeGate.multiScore === 300);
+  check("E：singleScore > multiScore → single（medium / judge-layout-gate / 原决策保留）",
+    dRes.type === "single" && dRes.confidence === "medium" &&
+    dRes.method === "judge-layout-gate" &&
+    dRes.diagnostics.judgeGate.selectedType === "single" &&
+    dRes.diagnostics.judgeGate.originalType === "judge" &&
+    dRes.diagnostics.judgeGate.originalMethod === "match-quality" &&
+    dRes.diagnostics.judgeGate.originalConfidence === "strong");
+  const fRes = gateWith([L("A. 甲"), L("B. 乙")], S(0, 2, 0), S(1, 0, 0));
+  check("F：multiScore > singleScore → multi",
+    fRes.type === "multi" && fRes.method === "judge-layout-gate" &&
+    fRes.diagnostics.judgeGate.selectedType === "multi");
+  const gRes = gateWith([L("A. 甲"), L("B. 乙")], S(1, 0, 0), S(1, 0, 0));
+  check("G：singleScore == multiScore → 平分取 multi（冻结 tie-break）",
+    gRes.type === "multi" && gRes.method === "judge-layout-gate" &&
+    gRes.diagnostics.judgeGate.singleScore === gRes.diagnostics.judgeGate.multiScore);
+
+  /* H：判断题 UI 行「A正确/B错误」绝不计入 option letters（冻结语义） */
+  const hRes = gateWith([L("1. 题干"), L("A正确"), L("B错误")], S(1, 0, 0), S(0, 0, 0));
+  check("H：'A正确'/'B错误' 不计 letters（dL=0 → 保持 judge）",
+    hRes.type === "judge" && hRes.diagnostics.judgeGate.distinctOptionLetters === 0);
+  const hVar = MSQ.h2DistinctOptionLetters(
+    [L("A正确"), L("B错误"), L("A 正确"), L("B、错误"), L("A. 正确"), L("B：错误"), L("A)错误")]);
+  check("H：字母后有空白/分隔符+内容才计入（OPT 两个分支语义）",
+    JSON.stringify(hVar.letters) === JSON.stringify(["A", "B"]) && hVar.count === 2);
+
+  /* I：标准选项行识别 distinct 种类数（去重，非行数）；multi 分更高 → 选 multi */
+  const iRes = gateWith([L("A. 停电"), L("B. 送电"), L("C. 保护"), L("D. 随意"), L("A. 重复")],
+    S(0, 0, 0), S(0, 1, 0));
+  check("I：A~D 识别 4 个 distinct letters（去重）→ 触发选 multi",
+    iRes.diagnostics.judgeGate.distinctOptionLetters === 4 &&
+    JSON.stringify(iRes.diagnostics.judgeGate.letters) === JSON.stringify(["A", "B", "C", "D"]) &&
+    iRes.type === "multi");
+
+  /* J：字母+数字编号噪声不得触发 */
+  const jL = MSQ.h2DistinctOptionLetters([L("A1 内容"), L("B2 内容"), L("C3、内容"), L("D4. 内容")]);
+  check("J：A1/B2 题号行不计入（KEYROW/OPT 均拒绝 → dL=0）",
+    jL.count === 0 && JSON.stringify(jL.letters) === "[]");
+
+  /* L：previous-page 判出的 judge 同样受 gate 约束（K 端到端在下一节） */
+  const lRes = MSQ.judgeLayoutGate(
+    { single: S(1, 0, 1), multi: S(0, 0, 2), judge: S(1, 0, 1) },
+    [L("A. 甲"), L("B. 乙")],
+    { type: "judge", confidence: "medium", method: "previous-page", diagnostics: { previousType: "judge" } });
+  check("L：previous-page judge 被 veto，originalMethod 保留",
+    lRes.type === "single" && lRes.method === "judge-layout-gate" &&
+    lRes.confidence === "medium" &&
+    lRes.diagnostics.judgeGate.originalMethod === "previous-page");
+
+  /* 诊断持久化：buildRunManifest 新增可选 pageTypeDiagnostics（向后兼容） */
+  const pDiag = MSQSample.buildRunManifest({
+    sampleId: "20261002_120000_h2test", text: "x",
+    lines: [{ text: "A. 甲", left: 0, top: 1, right: 9, bottom: 2 }],
+    out: { blocks: [] }, pageType: "single", pageTypeMode: "auto",
+    resolvedPageType: "single", pageTypeResolutionMethod: "judge-layout-gate",
+    autoTypeConfidence: "medium",
+    pageTypeDiagnostics: { headings: ["judge"], judgeGate: { version: "H2_V3", triggered: true, threshold: 2, distinctOptionLetters: 2, letters: ["A", "B"], originalType: "judge", originalMethod: "previous-page", originalConfidence: "medium", singleScore: 1010, multiScore: 20, selectedType: "single" } },
+    timing: {}, bankById: null
+  });
+  const pDiagJson = JSON.stringify(pDiag);
+  check("run.json：judgeGate 诊断完整落盘（触发/阈值/字母/原决策/分数/选择）",
+    pDiagJson.includes('"judgeGate"') && pDiagJson.includes('"triggered":true') &&
+    pDiagJson.includes('"distinctOptionLetters":2') &&
+    pDiagJson.includes('"originalMethod":"previous-page"') &&
+    pDiagJson.includes('"selectedType":"single"'));
+  check("run.json：schemaVersion 仍为 1（旧 collector/读取方兼容）", pDiag.schemaVersion === 1);
+  const pNoDiag = MSQSample.buildRunManifest({
+    sampleId: "20261002_120001_h2test", text: "x", lines: [],
+    out: { blocks: [] }, pageType: "judge", timing: {}, bankById: null
+  });
+  check("run.json：不传 pageTypeDiagnostics 时键不出现（旧行为不变）",
+    !JSON.stringify(pNoDiag).includes("pageTypeDiagnostics") &&
+    !JSON.stringify(pNoDiag).includes("pageTypeMode"));
+}
+
+section("H2 judge gate：端到端（auto 路径 veto、manual 零影响、out 一致性）");
+{
+  const idxA = MSQ.buildBatchOcrIndex(qs);
+  const s1 = byType.single[30];
+  let y = 100;
+  const line = (t) => ({ text: t, left: 0, right: 900, top: y, bottom: (y += 34) - 6 });
+
+  /* K：判断题标题 + 真实单选题内容（A./B./C./D. 选项行 → dL>=2） */
+  const linesK = [line("判断题"), line("31. " + s1.stem),
+    ...s1.options.map((o, i) => line(MSQ.LETTERS[i] + ". " + o))];
+  const runsK = {};
+  ["single", "multi", "judge"].forEach((t) => {
+    runsK[t] = MSQ.searchPageQuestionsByOcr(idxA, linesK, t, { limit: 3 });
+  });
+  const oldK = MSQ.resolvePageTypeAuto(runsK, linesK, null);
+  check("K 前置：旧 AUTO 因标题判 judge（section-heading/strong，未加 gate）",
+    oldK.type === "judge" && oldK.method === "section-heading" && oldK.confidence === "strong");
+
+  const rK = MSQ.recomputePageFromLines(idxA, linesK, "auto", { limit: 3, previousType: null });
+  check("K：section-heading judge 被 H2 veto → judge-layout-gate/medium",
+    rK.resolved.method === "judge-layout-gate" && rK.resolved.confidence === "medium" &&
+    rK.resolved.type !== "judge");
+  check("K：gate 诊断保留标题证据与原决策",
+    JSON.stringify(rK.resolved.diagnostics.headings) === JSON.stringify(["judge"]) &&
+    rK.resolved.diagnostics.judgeGate.originalMethod === "section-heading" &&
+    rK.resolved.diagnostics.judgeGate.originalConfidence === "strong" &&
+    rK.resolved.diagnostics.judgeGate.triggered === true &&
+    rK.resolved.diagnostics.judgeGate.threshold === 2);
+  check("K：out = 最终题型 fresh run（matcher/splitter 零改动）",
+    JSON.stringify(rK.out) ===
+    JSON.stringify(MSQ.searchPageQuestionsByOcr(idxA, linesK, rK.resolved.type, { limit: 3 })));
+  check("K：三路 runs 原样保留（gate 不改写试跑结果）",
+    ["single", "multi", "judge"].every((t) =>
+      JSON.stringify(rK.runs[t]) ===
+      JSON.stringify(MSQ.searchPageQuestionsByOcr(idxA, linesK, t, { limit: 3 }))));
+
+  /* 无标题单选页：auto → 非 judge，gate 不介入（diagnostics 无 judgeGate 键） */
+  const linesS = [line("31. " + s1.stem),
+    ...s1.options.map((o, i) => line(MSQ.LETTERS[i] + ". " + o))];
+  const rS = MSQ.recomputePageFromLines(idxA, linesS, "auto", { limit: 3, previousType: null });
+  check("非 judge auto 路径零介入（method/类型不变、无 judgeGate 键）",
+    rS.resolved.type === "single" && rS.resolved.method === "match-quality" &&
+    rS.resolved.diagnostics.judgeGate === undefined);
+
+  /* 手动 judge（结果页人工切换）绝不经过 gate */
+  const rM = MSQ.recomputePageFromLines(idxA, linesK, "judge", { limit: 3 });
+  check("手动 judge 不经过 gate（method=manual、diagnostics=null）",
+    rM.resolved.method === "manual" && rM.resolved.type === "judge" &&
+    rM.resolved.diagnostics === null);
+}
+
+section("H2 冻结回归资产：39 张 parity + AUTO 漂移守卫（testbench/h2_layout_parity_fixture.json）");
+{
+  const fixture = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "testbench", "h2_layout_parity_fixture.json"), "utf8"));
+  check("fixture 结构：39 张（discovery 10 / validation 20 / holdout 9），replay-judge 25",
+    fixture.captures.length === 39 &&
+    fixture.counts.bySet.discovery === 10 && fixture.counts.bySet.validation === 20 &&
+    fixture.counts.bySet.holdout === 9 && fixture.counts.judges === 25);
+
+  /* 提取器 parity：必须 100%（冻结实现 final_gt_analysis.py OPT/KEYROW 的逐条移植） */
+  let parity = 0;
+  for (const c of fixture.captures) {
+    const got = MSQ.h2DistinctOptionLetters(c.ocrLines);
+    if (got.count === c.expectedDistinctLetters &&
+        JSON.stringify(got.letters) === JSON.stringify(c.expectedLetters)) { parity++; }
+  }
+  check("LAYOUT_FEATURE_PARITY = 39/39（100%，不得只“看起来差不多”）",
+    parity === fixture.captures.length, parity + "/" + fixture.captures.length);
+
+  /* 旧行为零漂移 + H2 新行为 = 冻结规则（真实题库 + 冻结 OCR lines + 冻结 prev） */
+  const idxF = MSQ.buildBatchOcrIndex(qs);
+  let oldOk = 0, newOk = 0;
+  for (const c of fixture.captures) {
+    const runs = {};
+    for (const t of ["single", "multi", "judge"]) {
+      runs[t] = MSQ.searchPageQuestionsByOcr(idxF, c.ocrLines, t, { limit: 3 });
+    }
+    const oldR = MSQ.resolvePageTypeAuto(runs, c.ocrLines, c.frozenPrev);
+    if (oldR.type === c.frozenOldResolved.type &&
+        oldR.confidence === c.frozenOldResolved.confidence &&
+        oldR.method === c.frozenOldResolved.method) { oldOk++; }
+    const newR = MSQ.judgeLayoutGate(runs, c.ocrLines, oldR);
+    const kept = c.expectedNewResolvedType === c.frozenOldResolved.type;
+    const expMethod = kept ? c.frozenOldResolved.method : "judge-layout-gate";
+    const expConf = kept ? c.frozenOldResolved.confidence : "medium";
+    if (newR.type === c.expectedNewResolvedType && newR.method === expMethod &&
+        newR.confidence === expConf) { newOk++; }
+  }
+  check("旧行为零漂移（resolvePageTypeAuto 39/39 与冻结 replay 一致）",
+    oldOk === fixture.captures.length, oldOk + "/39");
+  check("H2 新行为 = 冻结规则（judgeLayoutGate 39/39，threshold=2/平分取 multi）",
+    newOk === fixture.captures.length, newOk + "/39");
 }
 
 /* ---------- BATCH_DETAIL_NAVIGATION_V1：详情来源与返回（静态守卫） ----------
